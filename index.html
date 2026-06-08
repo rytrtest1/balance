@@ -219,18 +219,20 @@ function Throughline() {
 
   // now-flow
   const [place, setPlace] = useState(defaultPlace());
-  const [stage, setStage] = useState("entry"); // entry | time | proposal | empty | done
-  const [limit, setLimit] = useState(null);
-  const [used, setUsed] = useState(0);
+  const [stage, setStage] = useState("entry"); // entry | proposal | running | empty | done
   const [current, setCurrent] = useState(null);
   const [lastId, setLastId] = useState(null);
-  const [doneMin, setDoneMin] = useState(0);
-  const [doneNote, setDoneNote] = useState("");
-  const [doneHard, setDoneHard] = useState(50);
   const [showWhy, setShowWhy] = useState(false);
-  const [downshifted, setDownshifted] = useState(false);
 
-  // data tab
+  // the live line. While "running", it fills from the CENTRE outward as real time
+  // elapses — reaching the margins at the action's estimated minutes, then spilling
+  // past them (dépassement) if you keep going. No clock is ever shown: the line is
+  // the only feedback. A few seconds = a sliver; the whole time = full; beyond = overflow.
+  const [running, setRunning] = useState(false);
+  const [startedAt, setStartedAt] = useState(0);
+  const [elapsedMs, setElapsedMs] = useState(0);
+
+  // misc
   const [pasteVal, setPasteVal] = useState("");
   const [msg, setMsg] = useState("");
 
@@ -254,64 +256,49 @@ function Throughline() {
   useEffect(() => { if (loaded.current) saveJSON("tlx_activities", activities); }, [activities]);
   useEffect(() => { if (loaded.current) saveJSON("tlx_log", log); }, [log]);
 
-  // ----- now-flow actions -----
-  const propose = (maxMin, logUse = log, actsUse = activities, relax = false, avoidId = null) => {
-    const p = pick(actsUse, logUse, place, maxMin, relax, avoidId);
-    setShowWhy(false);
-    setDownshifted(false);
-    if (!p) { setCurrent(null); setStage("empty"); }
-    else { setCurrent(p); setDoneMin(p.action.min); setDoneNote(""); setDoneHard(50); setStage("proposal"); }
-  };
-  const startAny = () => { setLimit(null); setUsed(0); propose(null); };
-  const startTime = () => setStage("time");
-  const chooseBucket = (m) => { setLimit(m); setUsed(0); propose(m); };
-  const resetFlow = () => { setStage("entry"); setLimit(null); setUsed(0); setCurrent(null); setShowWhy(false); setDownshifted(false); };
-  // "not now" = a recorded refusal (logged type:"skip", never counts as done).
-  // But it does NOT let you off clean: instead of dumping you back to the start,
-  // it downshifts — offers something smaller, so a refusal becomes a step down
-  // toward action, not an exit. The only clean exit is an explicit "stop" tap.
-  const logSkip = (a, action) => setLog((L) => [...L, {
-    id: uid(), date: todayKey(), ts: Date.now(), type: "skip",
-    activityId: a.id, actionId: action.id, actionText: action.text, min: 0, domain: a.domain,
-  }]);
-  const notNow = () => {
-    if (!current) { resetFlow(); return; }
-    logSkip(current.activity, current.action);
-    // try to offer something genuinely smaller than what was just refused
-    const cap = Math.max(2, Math.floor(current.action.min / 2));
-    const smaller = pick(activities, log, place, cap, false, null);
-    if (smaller && smaller.action.min < current.action.min) {
-      setCurrent(smaller); setDoneMin(smaller.action.min); setDoneNote(""); setDoneHard(50);
-      setShowWhy(false); setDownshifted(true); setStage("proposal");
-    } else {
-      // nothing smaller to step down to — offer an explicit, no-shame exit
-      setStage("stop");
-    }
-  };
+  // tick the live line while running — re-read the wall clock so it stays accurate
+  // even if the tab was backgrounded.
+  useEffect(() => {
+    if (!running) return;
+    const t = setInterval(() => setElapsedMs(Date.now() - startedAt), 100);
+    return () => clearInterval(t);
+  }, [running, startedAt]);
 
-  const markDone = () => {
-    if (!current) return;
-    const spent = doneMin || current.action.min;
+  // ----- now-flow actions -----
+  const propose = (logUse = log, actsUse = activities, relax = false, avoidId = null) => {
+    const p = pick(actsUse, logUse, place, null, relax, avoidId);
+    setShowWhy(false);
+    setRunning(false); setElapsedMs(0);
+    if (!p) { setCurrent(null); setStage("empty"); }
+    else { setCurrent(p); setStage("proposal"); }
+  };
+  const start = () => propose();
+  // swap the instruction for another — no judgement, no log. There is no "refuse"
+  // anymore: if a suggestion doesn't fit you ask for another, or you engage for a
+  // few seconds. The minimum viable move is a sliver of the line, not a clean exit.
+  const swap = () => propose(log, activities, false, current ? current.activity.id : null);
+  const resetFlow = () => { setStage("entry"); setCurrent(null); setShowWhy(false); setRunning(false); setElapsedMs(0); };
+
+  // tap to begin acting — the line starts filling from the centre.
+  const begin = () => { setStartedAt(Date.now()); setElapsedMs(0); setRunning(true); setStage("running"); };
+
+  // tap "done" to stop — log the REAL time spent (the line's own truth), then move on.
+  const finish = () => {
+    if (!current) { resetFlow(); return; }
+    const sec = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
     const aid = current.activity.id;
     setLastId(aid);
     const e = {
       id: uid(), date: todayKey(), ts: Date.now(), type: "done",
-      activityId: aid, actionId: current.action.id,
-      actionText: current.action.text, min: spent, domain: current.activity.domain,
-      note: doneNote.trim(), hard: doneHard,
+      activityId: aid, actionId: current.action.id, actionText: current.action.text,
+      min: Math.round(sec / 60), sec, domain: current.activity.domain, note: "",
     };
-    const newLog = [...log, e];
-    let newActs = activities;
     if (current.activity.kind === "task") {
-      newActs = activities.map((a) => (a.id === aid ? { ...a, done: true } : a));
-      setActivities(newActs);
+      setActivities((arr) => arr.map((a) => (a.id === aid ? { ...a, done: true } : a)));
     }
-    setLog(newLog);
-    const newUsed = used + spent;
-    setUsed(newUsed);
-    const remaining = limit != null ? limit - newUsed : null;
-    if (remaining != null && remaining <= 0) { setCurrent(null); setStage("done"); return; }
-    propose(remaining, newLog, newActs, false, aid);
+    setLog((L) => [...L, e]);
+    setRunning(false); setShowWhy(false); // keep `current` so the line stays frozen-full on "done"
+    setStage("done");
   };
 
   // ----- activity mutations -----
@@ -360,7 +347,7 @@ function Throughline() {
       const o = JSON.parse(text);
       if (!o.activities) throw new Error("no activities");
       setActivities(o.activities); setLog(o.log || []);
-      setMsg("loaded ✓"); setStage("entry"); setPasteVal("");
+      setMsg("loaded ✓"); setTab("now"); setStage("entry"); setPasteVal("");
     } catch { setMsg("couldn't read that — check the file/text"); }
     setTimeout(() => setMsg(""), 2200);
   };
@@ -379,6 +366,11 @@ function Throughline() {
     </div>
   );
 
+  // live line geometry — fraction of the action's estimated time that has elapsed.
+  // full (=1) means the line reaches the margins; >1 means you've gone beyond.
+  const fullMs = Math.max(1, (current?.action?.min || 10) * 60000);
+  const frac = (stage === "running" || stage === "done") ? elapsedMs / fullMs : 0;
+
   return (
     <div className="tl">
       <style dangerouslySetInnerHTML={{ __html: css }} />
@@ -391,7 +383,7 @@ function Throughline() {
         </div>
 
         <div className="fade" style={{ display: "flex", gap: 22, marginTop: 20 }}>
-          {["now", "activities", "progress", "data"].map((t) => (
+          {["now", "activities", "progress"].map((t) => (
             <button key={t} className={`tab ${tab === t ? "on" : ""}`} onClick={() => { setTab(t); if (t === "now") resetFlow(); }}>{t}<span className="u" /></button>
           ))}
         </div>
@@ -399,124 +391,110 @@ function Throughline() {
 
         {/* =================== NOW =================== */}
         {tab === "now" && (
-          <div style={{ marginTop: 40 }}>
-            <div className="fade" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 34 }}>
-              <span className="lab">where are you</span>
+          <div style={{ display: "flex", flexDirection: "column", minHeight: "calc(100vh - 220px)" }}>
+
+            <div className="fade" style={{ display: "flex", justifyContent: "center", marginTop: 22, visibility: stage === "running" ? "hidden" : "visible" }}>
               <PlaceToggle />
             </div>
 
-            {stage === "entry" && (
-              <div className="fade">
-                <div style={{ fontFamily: "var(--serif)", fontSize: 23, fontWeight: 300, fontStyle: "italic", color: C.mut, marginBottom: 28 }}>
-                  Got time but no drive? Pick how long.
-                </div>
-                <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-                  <button className="pill big" onClick={startAny}>any — just tell me something</button>
-                  <button className="pill big" onClick={startTime}>i have a set amount of time</button>
-                </div>
-                <button className="link" style={{ marginTop: 26 }} onClick={() => setTab("data")}>↻ coming back? load your saved data first</button>
-              </div>
-            )}
+            {/* the stage: instruction above, the living line as hero, controls below — vertically centered */}
+            <div style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "center", paddingBottom: 30 }}>
 
-            {stage === "time" && (
-              <div className="fade">
-                <div className="lab" style={{ marginBottom: 18 }}>how long</div>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-                  {[["10 min", 10], ["30 min", 30], ["1 hour", 60], ["2 hours +", 999]].map(([t, m]) => (
-                    <button key={m} className="pill" onClick={() => chooseBucket(m)}>{t}</button>
-                  ))}
-                </div>
-                <button className="link" style={{ marginTop: 22 }} onClick={resetFlow}>back</button>
-              </div>
-            )}
+              {/* ---------- above the line: the instruction ---------- */}
+              <div style={{ minHeight: 130, display: "flex", flexDirection: "column", justifyContent: "flex-end", textAlign: "center", marginBottom: 30 }}>
 
-            {stage === "proposal" && current && (
-              <div className="fade">
-                {downshifted && (
-                  <div className="mono" style={{ fontSize: 10, letterSpacing: ".12em", textTransform: "uppercase", color: C.mut, marginBottom: 14 }}>
-                    smaller — just get moving
+                {stage === "entry" && (
+                  <div className="fade lab" style={{ alignSelf: "center", opacity: .45 }}>one thing</div>
+                )}
+
+                {(stage === "proposal" || stage === "running" || stage === "done") && current && (
+                  <div className="fade">
+                    <div className="mono" style={{ fontSize: 10, letterSpacing: ".14em", textTransform: "uppercase", color: C.faint, marginBottom: 14 }}>
+                      <span className="dot" style={{ background: dColor(current.activity.domain), display: "inline-block", marginRight: 8, verticalAlign: "middle" }} />{current.activity.name}
+                    </div>
+                    <div style={{ fontFamily: "var(--serif)", fontSize: 22, fontWeight: 300, lineHeight: 1.4, color: stage === "done" ? C.mut : C.text }}>
+                      {current.action.text}
+                    </div>
+                    {showWhy && stage === "proposal" && (
+                      <div className="mono" style={{ fontSize: 10.5, color: C.mut, marginTop: 16, lineHeight: 1.6, letterSpacing: ".03em" }}>
+                        {reasonFor(current.activity, log, place, current.action)}
+                      </div>
+                    )}
                   </div>
                 )}
-                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 16 }}>
-                  <span className="dot" style={{ background: dColor(current.activity.domain) }} />
-                  <span className="mono" style={{ fontSize: 10, letterSpacing: ".14em", textTransform: "uppercase", color: C.faint }}>
-                    {current.activity.name} · ~{current.action.min} min
-                  </span>
-                </div>
-                <div style={{ fontFamily: "var(--serif)", fontSize: 30, fontWeight: 300, lineHeight: 1.25, letterSpacing: ".005em", marginBottom: 26 }}>
-                  {current.action.text}
-                </div>
-                {current.activity.capMin > 0 && (
-                  <div className="mono" style={{ fontSize: 10, color: C.faint, marginBottom: 18 }}>
-                    {minutesToday(log, current.activity.id)} / {current.activity.capMin} min on this today
-                  </div>
-                )}
-                {limit != null && limit < 999 && (
-                  <div className="mono" style={{ fontSize: 10, color: C.faint, marginBottom: 18 }}>
-                    {Math.max(0, limit - used)} of {limit} min left
-                  </div>
-                )}
-                <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 18 }}>
-                  <span className="lab">time spent</span>
-                  <button className="seg" onClick={() => setDoneMin((m) => Math.max(5, m - 5))}>−5</button>
-                  <span className="mono" style={{ fontSize: 14, minWidth: 56, textAlign: "center", color: C.text }}>{doneMin} min</span>
-                  <button className="seg" onClick={() => setDoneMin((m) => m + 5)}>+5</button>
-                </div>
-                <input className="in" value={doneNote} onChange={(e) => setDoneNote(e.target.value)}
-                  placeholder="what did you do? (optional)"
-                  style={{ fontFamily: "var(--serif)", fontSize: 15, fontWeight: 300, fontStyle: doneNote ? "normal" : "italic", borderBottom: `1px solid ${C.soft}`, paddingBottom: 6, marginBottom: 24 }} />
-                <div style={{ marginBottom: 26 }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 10 }}>
-                    <span className="lab">how hard was it</span>
-                    <span className="mono" style={{ fontSize: 12, color: C.bone }}>{doneHard}%</span>
-                  </div>
-                  <input type="range" className="sl" min="0" max="100" step="5" value={doneHard}
-                    onChange={(e) => setDoneHard(parseInt(e.target.value))} />
-                  <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6 }}>
-                    <span className="mono" style={{ fontSize: 9, letterSpacing: ".1em", color: C.faint }}>effortless</span>
-                    <span className="mono" style={{ fontSize: 9, letterSpacing: ".1em", color: C.faint }}>brutal</span>
-                  </div>
-                </div>
-                <button className="primary" onClick={markDone}>done — next</button>
-                <div style={{ display: "flex", justifyContent: "space-between", marginTop: 16 }}>
-                  <button className="ghost" onClick={() => setShowWhy((s) => !s)}>{showWhy ? "hide" : "why this?"}</button>
-                  <button className="ghost" onClick={notNow}>not now</button>
-                </div>
-                {showWhy && (
-                  <div className="mono" style={{ fontSize: 10.5, color: C.mut, marginTop: 14, lineHeight: 1.6, letterSpacing: ".03em" }}>
-                    {reasonFor(current.activity, log, place, current.action)}
+
+                {stage === "empty" && (
+                  <div className="fade" style={{ fontFamily: "var(--serif)", fontSize: 20, fontWeight: 300, fontStyle: "italic", color: C.mut, lineHeight: 1.45 }}>
+                    You've done everything {place} has on the board today. That's a real day.
                   </div>
                 )}
               </div>
-            )}
 
-            {stage === "empty" && (
-              <div className="fade">
-                <div style={{ fontFamily: "var(--serif)", fontSize: 22, fontWeight: 300, fontStyle: "italic", color: C.mut, lineHeight: 1.4 }}>
-                  You've done everything {place} has on the board today. That's a real day.
-                </div>
-                <button className="primary" style={{ marginTop: 26 }} onClick={() => propose(null, log, activities, true, lastId)}>give me something anyway</button>
-                <button className="link" style={{ marginTop: 16 }} onClick={resetFlow}>i'm done</button>
-              </div>
-            )}
+              {/* ---------- the living line: hollow track, fills from the centre while you act, ---------- */}
+              {/* ---------- spills past the margins when you go beyond the estimate ---------- */}
+              {(() => {
+                const over = frac > 1;
+                const widthPct = Math.min(frac, 1.85) * 100;
+                const tappable = stage === "proposal" || stage === "running";
+                return (
+                  <div className="fade" onClick={tappable ? (stage === "proposal" ? begin : finish) : undefined}
+                    style={{ position: "relative", height: 14, marginLeft: -20, marginRight: -20,
+                      display: "flex", justifyContent: "center", alignItems: "center",
+                      overflow: "visible", cursor: tappable ? "pointer" : "default" }}>
+                    {/* hollow track */}
+                    <div style={{ position: "absolute", left: 0, right: 0, top: "50%", transform: "translateY(-50%)", height: 2, background: C.soft }} />
+                    {/* centre fill — grows symmetrically from the middle */}
+                    {frac > 0 && (
+                      <div style={{ position: "relative", flexShrink: 0, height: over ? 8 : 6, width: `${widthPct}%`,
+                        background: C.bone, opacity: over ? 1 : 0.9,
+                        boxShadow: over ? `0 0 14px ${C.bone}` : "none",
+                        transition: "width .25s linear, height .35s, box-shadow .35s" }} />
+                    )}
+                  </div>
+                );
+              })()}
 
-            {stage === "stop" && (
-              <div className="fade">
-                <div style={{ fontFamily: "var(--serif)", fontSize: 23, fontWeight: 300, fontStyle: "italic", color: C.mut, lineHeight: 1.4 }}>
-                  Okay — not this one, not right now. That's logged. No drama.
-                </div>
-                <button className="primary" style={{ marginTop: 26 }} onClick={() => propose(null, log, activities, true, current ? current.activity.id : null)}>actually — give me one tiny thing</button>
-                <button className="link" style={{ marginTop: 16 }} onClick={resetFlow}>i'm stopping here</button>
-              </div>
-            )}
+              {/* ---------- below the line: controls ---------- */}
+              <div style={{ minHeight: 130, marginTop: 30, textAlign: "center" }}>
 
-            {stage === "done" && (
-              <div className="fade">
-                <div style={{ fontFamily: "var(--serif)", fontSize: 24, fontWeight: 300 }}>That's your time. Well spent.</div>
-                <div className="mono" style={{ fontSize: 10, color: C.faint, marginTop: 12 }}>{used} min logged this round</div>
-                <button className="link" style={{ marginTop: 24 }} onClick={resetFlow}>again</button>
+                {stage === "entry" && (
+                  <button className="fade link" onClick={start} style={{ fontSize: 11 }}>give me one thing →</button>
+                )}
+
+                {stage === "proposal" && current && (
+                  <div className="fade">
+                    <button className="primary" style={{ maxWidth: 280, margin: "0 auto", display: "block" }} onClick={begin}>start</button>
+                    <div style={{ display: "flex", justifyContent: "center", gap: 28, marginTop: 18 }}>
+                      <button className="ghost" onClick={() => setShowWhy((s) => !s)}>{showWhy ? "hide" : "why this?"}</button>
+                      <button className="ghost" onClick={swap}>something else</button>
+                    </div>
+                  </div>
+                )}
+
+                {stage === "running" && current && (
+                  <div className="fade">
+                    <button className="primary" style={{ maxWidth: 280, margin: "0 auto", display: "block" }} onClick={finish}>done</button>
+                    <div className="mono" style={{ fontSize: 9.5, letterSpacing: ".14em", textTransform: "uppercase", color: C.faint, marginTop: 18 }}>
+                      {frac > 1 ? "beyond — keep going" : "a few seconds counts"}
+                    </div>
+                  </div>
+                )}
+
+                {stage === "empty" && (
+                  <div className="fade">
+                    <button className="primary" style={{ maxWidth: 280, margin: "0 auto", display: "block" }} onClick={() => propose(log, activities, true, lastId)}>give me something anyway</button>
+                    <button className="link" style={{ marginTop: 16 }} onClick={resetFlow}>i'm done</button>
+                  </div>
+                )}
+
+                {stage === "done" && (
+                  <div className="fade">
+                    <button className="primary" style={{ maxWidth: 280, margin: "0 auto", display: "block" }} onClick={start}>one more</button>
+                    <button className="link" style={{ marginTop: 16 }} onClick={resetFlow}>that's it for now</button>
+                  </div>
+                )}
               </div>
-            )}
+            </div>
           </div>
         )}
 
@@ -535,44 +513,15 @@ function Throughline() {
         {/* =================== PROGRESS =================== */}
         {tab === "progress" && <Progress activities={activities} log={log} quickLog={quickLog} delLog={delLog} />}
 
-        {/* =================== DATA =================== */}
-        {tab === "data" && (
-          <div style={{ marginTop: 30 }}>
-            <div className="fade">
-              <div className="lab" style={{ marginBottom: 8 }}>your backup — save it somewhere safe</div>
-              <div className="mono" style={{ fontSize: 11, color: C.faint, marginBottom: 14, lineHeight: 1.6 }}>
-                It auto-saves on this device as you go. A backup only matters if you clear your browser or switch phones — once a week is plenty. Tap <b>back up</b> to send the file to Drive, email, or notes. Or copy the text below for the weekly look-back.
-              </div>
-              <textarea readOnly value={exportText()}
-                onFocus={(e) => e.target.select()} onClick={(e) => e.target.select()}
-                rows={7}
-                style={{ fontFamily: "var(--mono)", fontSize: 10.5, color: C.mut, width: "100%", border: `1px solid ${C.soft}`, padding: 10, lineHeight: 1.5, background: "transparent", resize: "vertical" }} />
-              <div style={{ display: "flex", gap: 18, marginTop: 12 }}>
-                <button className="link" onClick={shareBackup}>back up</button>
-                <button className="link" onClick={copy}>copy text</button>
-              </div>
-            </div>
-
-            <div className="fade" style={{ marginTop: 34 }}>
-              <hr className="softrule" />
-              <div className="lab" style={{ margin: "24px 0 14px" }}>load a file</div>
-              <label className="pill" style={{ display: "inline-block" }}>
-                choose file
-                <input type="file" accept="application/json,.json" onChange={onFile} style={{ display: "none" }} />
-              </label>
-              <div className="lab" style={{ margin: "20px 0 10px" }}>…or paste it</div>
-              <textarea className="in" rows={4} value={pasteVal} onChange={(e) => setPasteVal(e.target.value)}
-                placeholder="paste exported JSON here"
-                style={{ fontFamily: "var(--mono)", fontSize: 11, border: `1px solid ${C.soft}`, padding: 10, lineHeight: 1.5 }} />
-              <button className="link" style={{ marginTop: 12 }} onClick={() => applyImport(pasteVal)}>load pasted</button>
-            </div>
-
-            <div className="fade" style={{ marginTop: 40 }}>
-              <hr className="softrule" />
-              <button className="link" style={{ marginTop: 22 }} onClick={resetAll}>reset to defaults</button>
-            </div>
-          </div>
-        )}
+        {/* =================== FOOTER — save / load, bottom of page =================== */}
+        <div className="fade" style={{ display: "flex", justifyContent: "center", alignItems: "center", gap: 22, marginTop: 56, paddingTop: 18, borderTop: `1px solid ${C.line}` }}>
+          <button className="link" onClick={shareBackup}>save</button>
+          <label className="link" style={{ cursor: "pointer" }}>load
+            <input type="file" accept="application/json,.json" onChange={onFile} style={{ display: "none" }} />
+          </label>
+          <button className="link" onClick={copy}>copy</button>
+          <button className="link" style={{ color: C.line }} onClick={resetAll}>reset</button>
+        </div>
 
         {msg && (
           <div className="mono" style={{ position: "fixed", left: 0, right: 0, bottom: 24, textAlign: "center", fontSize: 10.5, letterSpacing: ".1em", textTransform: "uppercase", color: C.bone, zIndex: 3 }}>
