@@ -79,28 +79,19 @@ const A = (name, domain, where, perWeek, actions, kind = "practice", items = [],
   items: items.map((t) => ({ id: uid(), text: t, status: "doing" })),
   note: "",
 });
+// Generic starter set — a blank canvas. Edit these (or wipe them) in the
+// Activities tab to make the app your own. Your real setup lives in your
+// own saved data / backup file, not here.
 const SEED = [
-  // sport
-  A("Treadmill walk", "physical", "home", 7, [["Walk on the treadmill", 20]], "practice", [], 60),
-  A("Ping-pong / climbing", "physical", "out", 1, [["Play ping-pong", 60], ["Go climbing", 90]]),
-  // writing
-  A("Poetry", "creative", "anywhere", 2, [["Make an erasure poem from a page", 15], ["Free-write a poem", 15]]),
-  // music
-  A("Piano", "creative", "home", 3, [["Practice your current piece", 25], ["Learn the next part of a new piece", 30]]),
-  A("Singing", "creative", "home", 2, [["Sing on the mic", 15]]),
-  A("Cover", "creative", "home", 1, [["Work on a cover — piano + voice", 25]]),
-  // language
-  A("Spanish", "learning", "anywhere", 3, [["15 min of conversation practice", 15], ["Shadow a clip out loud", 10]]),
-  // leisure / input
-  A("Reading", "rest", "anywhere", 4, [["Read your book", 20]]),
-  A("Film", "rest", "home", 1, [["Watch a film", 90], ["Watch part of something", 30]]),
-  A("Music", "rest", "anywhere", 2, [["Sit and listen to an album", 40], ["Put music on and really listen", 15]]),
-  // perfume
-  A("Perfume", "creative", "home", 2, [["Learn a material — smell and note it", 15], ["Create — build or adjust an accord", 30]]),
-  // logic
-  A("Sudoku", "learning", "anywhere", 2, [["Learn a new technique", 15], ["Solve a grid — no clock", 20]]),
-  // cooking
-  A("Cooking", "chore", "home", 1, [["Prep meals for your work nights", 45]], "practice", [], 0, 1),
+  A("Move your body", "physical", "home", 5, [["Do a short workout", 20], ["Go for a walk", 30]]),
+  A("Get outside", "physical", "out", 2, [["Go for a longer walk or activity", 60]]),
+  A("Make something", "creative", "anywhere", 3, [["Spend a focused block creating", 25], ["Sketch a quick idea", 15]]),
+  A("Practice a skill", "learning", "home", 3, [["Practice your current thing", 25]]),
+  A("Learn a little", "learning", "anywhere", 3, [["Study for a short block", 15]]),
+  A("Read", "rest", "anywhere", 4, [["Read for a while", 20]]),
+  A("Rest on purpose", "rest", "home", 2, [["Do something restful and intentional", 30]]),
+  A("Reach out", "social", "anywhere", 2, [["Message or call someone", 10]]),
+  A("Tidy / chore", "chore", "home", 1, [["Knock out one chore", 20]]),
 ];
 
 // ---------- engine ----------
