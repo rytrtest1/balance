@@ -475,17 +475,12 @@ function Throughline() {
 
                 {(stage === "proposal" || stage === "running" || stage === "done") && current && (
                   <div className="fade">
-                    <div className="mono" style={{ fontSize: 10, letterSpacing: ".14em", textTransform: "uppercase", color: C.faint, marginBottom: 14 }}>
-                      <span className="dot" style={{ background: dColor(current.activity.domain), display: "inline-block", marginRight: 8, verticalAlign: "middle" }} />{current.activity.name}
+                    <div className="mono" style={{ fontSize: 10.5, letterSpacing: ".1em", textTransform: "lowercase", color: C.mut, marginBottom: 16 }}>
+                      <span className="dot" style={{ background: dColor(current.activity.domain), display: "inline-block", marginRight: 9, verticalAlign: "middle" }} />{current.activity.name}
                     </div>
                     <div style={{ fontFamily: "var(--serif)", fontSize: 22, fontWeight: 300, lineHeight: 1.4, color: stage === "done" ? C.mut : C.text }}>
                       {current.action.text}
                     </div>
-                    {showWhy && stage === "proposal" && (
-                      <div className="mono" style={{ fontSize: 10.5, color: C.mut, marginTop: 16, lineHeight: 1.6, letterSpacing: ".03em" }}>
-                        {reasonFor(current.activity, log, place, current.action)}
-                      </div>
-                    )}
                   </div>
                 )}
 
@@ -505,6 +500,7 @@ function Throughline() {
                 // the hollow track stays inset from the screen edges so the fill can visibly
                 // overshoot it — that overshoot is the felt dépassement.
                 const trackTransition = holding ? `transform ${effHold}ms linear` : "transform .3s cubic-bezier(.2,.7,.2,1)";
+                const fillColor = current ? dColor(current.activity.domain) : C.bone; // the line carries the activity's colour
                 return (
                   <div onPointerDown={onLineDown} onPointerUp={onLineUp} onPointerLeave={onLineCancel} onPointerCancel={onLineCancel}
                     onContextMenu={(e) => e.preventDefault()}
@@ -518,8 +514,8 @@ function Throughline() {
                     {/* centre fill — grows symmetrically from the middle, overshoots the track when you go beyond */}
                     {frac > 0 && (
                       <div style={{ position: "relative", flexShrink: 0, height: over ? 8 : 6, width: `${widthPct}%`,
-                        background: C.bone, opacity: over ? 1 : 0.9,
-                        boxShadow: over ? `0 0 14px ${C.bone}` : "none",
+                        background: fillColor, opacity: over ? 1 : 0.9,
+                        boxShadow: over ? `0 0 14px ${fillColor}` : "none",
                         transform: `scaleX(${holding ? 0 : 1})`, transformOrigin: "center",
                         transition: holding ? `transform ${effHold}ms linear` : "width .25s linear, height .35s, box-shadow .35s, transform .3s" }} />
                     )}
@@ -532,14 +528,7 @@ function Throughline() {
 
                 {/* entry: nothing. just the breathing line above. */}
 
-                {/* proposal: the only thing under the line is a quiet "why this?". */}
-                {stage === "proposal" && current && (
-                  <div className="fade">
-                    <button className="ghost" onClick={() => setShowWhy((s) => !s)}>{showWhy ? "hide" : "why this?"}</button>
-                  </div>
-                )}
-
-                {/* running: nothing under the line. */}
+                {/* proposal & running: nothing under the line. we know why. */}
 
                 {stage === "empty" && (
                   <div className="fade">
