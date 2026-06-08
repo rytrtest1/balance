@@ -228,6 +228,7 @@ function Throughline() {
   const [doneNote, setDoneNote] = useState("");
   const [doneHard, setDoneHard] = useState(50);
   const [showWhy, setShowWhy] = useState(false);
+  const [downshifted, setDownshifted] = useState(false);
 
   // data tab
   const [pasteVal, setPasteVal] = useState("");
@@ -257,25 +258,35 @@ function Throughline() {
   const propose = (maxMin, logUse = log, actsUse = activities, relax = false, avoidId = null) => {
     const p = pick(actsUse, logUse, place, maxMin, relax, avoidId);
     setShowWhy(false);
+    setDownshifted(false);
     if (!p) { setCurrent(null); setStage("empty"); }
     else { setCurrent(p); setDoneMin(p.action.min); setDoneNote(""); setDoneHard(50); setStage("proposal"); }
   };
   const startAny = () => { setLimit(null); setUsed(0); propose(null); };
   const startTime = () => setStage("time");
   const chooseBucket = (m) => { setLimit(m); setUsed(0); propose(m); };
-  const resetFlow = () => { setStage("entry"); setLimit(null); setUsed(0); setCurrent(null); setShowWhy(false); };
-  // "not now" = a recorded refusal. The most coaching-relevant signal: where you
-  // resisted, and to what. Logged as type:"skip" so it never counts as done.
-  const skipCurrent = () => {
-    if (current) {
-      const a = current.activity;
-      setLog((L) => [...L, {
-        id: uid(), date: todayKey(), ts: Date.now(), type: "skip",
-        activityId: a.id, actionId: current.action.id,
-        actionText: current.action.text, min: 0, domain: a.domain,
-      }]);
+  const resetFlow = () => { setStage("entry"); setLimit(null); setUsed(0); setCurrent(null); setShowWhy(false); setDownshifted(false); };
+  // "not now" = a recorded refusal (logged type:"skip", never counts as done).
+  // But it does NOT let you off clean: instead of dumping you back to the start,
+  // it downshifts — offers something smaller, so a refusal becomes a step down
+  // toward action, not an exit. The only clean exit is an explicit "stop" tap.
+  const logSkip = (a, action) => setLog((L) => [...L, {
+    id: uid(), date: todayKey(), ts: Date.now(), type: "skip",
+    activityId: a.id, actionId: action.id, actionText: action.text, min: 0, domain: a.domain,
+  }]);
+  const notNow = () => {
+    if (!current) { resetFlow(); return; }
+    logSkip(current.activity, current.action);
+    // try to offer something genuinely smaller than what was just refused
+    const cap = Math.max(2, Math.floor(current.action.min / 2));
+    const smaller = pick(activities, log, place, cap, false, null);
+    if (smaller && smaller.action.min < current.action.min) {
+      setCurrent(smaller); setDoneMin(smaller.action.min); setDoneNote(""); setDoneHard(50);
+      setShowWhy(false); setDownshifted(true); setStage("proposal");
+    } else {
+      // nothing smaller to step down to — offer an explicit, no-shame exit
+      setStage("stop");
     }
-    resetFlow();
   };
 
   const markDone = () => {
@@ -421,6 +432,11 @@ function Throughline() {
 
             {stage === "proposal" && current && (
               <div className="fade">
+                {downshifted && (
+                  <div className="mono" style={{ fontSize: 10, letterSpacing: ".12em", textTransform: "uppercase", color: C.mut, marginBottom: 14 }}>
+                    smaller — just get moving
+                  </div>
+                )}
                 <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 16 }}>
                   <span className="dot" style={{ background: dColor(current.activity.domain) }} />
                   <span className="mono" style={{ fontSize: 10, letterSpacing: ".14em", textTransform: "uppercase", color: C.faint }}>
@@ -464,7 +480,7 @@ function Throughline() {
                 <button className="primary" onClick={markDone}>done — next</button>
                 <div style={{ display: "flex", justifyContent: "space-between", marginTop: 16 }}>
                   <button className="ghost" onClick={() => setShowWhy((s) => !s)}>{showWhy ? "hide" : "why this?"}</button>
-                  <button className="ghost" onClick={skipCurrent}>not now</button>
+                  <button className="ghost" onClick={notNow}>not now</button>
                 </div>
                 {showWhy && (
                   <div className="mono" style={{ fontSize: 10.5, color: C.mut, marginTop: 14, lineHeight: 1.6, letterSpacing: ".03em" }}>
@@ -481,6 +497,16 @@ function Throughline() {
                 </div>
                 <button className="primary" style={{ marginTop: 26 }} onClick={() => propose(null, log, activities, true, lastId)}>give me something anyway</button>
                 <button className="link" style={{ marginTop: 16 }} onClick={resetFlow}>i'm done</button>
+              </div>
+            )}
+
+            {stage === "stop" && (
+              <div className="fade">
+                <div style={{ fontFamily: "var(--serif)", fontSize: 23, fontWeight: 300, fontStyle: "italic", color: C.mut, lineHeight: 1.4 }}>
+                  Okay — not this one, not right now. That's logged. No drama.
+                </div>
+                <button className="primary" style={{ marginTop: 26 }} onClick={() => propose(null, log, activities, true, current ? current.activity.id : null)}>actually — give me one tiny thing</button>
+                <button className="link" style={{ marginTop: 16 }} onClick={resetFlow}>i'm stopping here</button>
               </div>
             )}
 
