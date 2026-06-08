@@ -475,10 +475,10 @@ function Throughline() {
 
                 {(stage === "proposal" || stage === "running" || stage === "done") && current && (
                   <div className="fade">
-                    <div className="mono" style={{ fontSize: 10.5, letterSpacing: ".1em", textTransform: "lowercase", color: C.mut, marginBottom: 16 }}>
-                      <span className="dot" style={{ background: dColor(current.activity.domain), display: "inline-block", marginRight: 9, verticalAlign: "middle" }} />{current.activity.name}
+                    <div className="mono" style={{ fontSize: 10, letterSpacing: ".22em", textTransform: "uppercase", color: C.faint, marginBottom: 18 }}>
+                      <span className="dot" style={{ background: dColor(current.activity.domain), display: "inline-block", marginRight: 10, verticalAlign: "middle" }} />{current.activity.name}
                     </div>
-                    <div style={{ fontFamily: "var(--serif)", fontSize: 22, fontWeight: 300, lineHeight: 1.4, color: stage === "done" ? C.mut : C.text }}>
+                    <div style={{ fontFamily: "var(--serif)", fontSize: 27, fontWeight: 300, lineHeight: 1.42, letterSpacing: "-.005em", textTransform: "lowercase", color: stage === "done" ? C.mut : C.text }}>
                       {current.action.text}
                     </div>
                   </div>
