@@ -252,6 +252,18 @@ function Throughline() {
   const [startedAt, setStartedAt] = useState(0);
   const [elapsedMs, setElapsedMs] = useState(0);
 
+  // long-press to swap: hold the line and it retracts to nothing, then re-picks.
+  // there is no visible "something else" button — this is the only way to change.
+  // the hold starts at 10s and DOUBLES with every skip (20s, 40s…), so skipping
+  // gets costlier through the day. it resets to 10s each new day.
+  const BASE_HOLD_MS = 10000;
+  const [holding, setHolding] = useState(false);
+  const [holdMs, setHoldMs] = useState(BASE_HOLD_MS);
+  const [holdDate, setHoldDate] = useState(todayKey());
+  const holdTimer = useRef(null);
+  const holdStart = useRef(0);
+  const didHold = useRef(false);
+
   // misc
   const [pasteVal, setPasteVal] = useState("");
   const [msg, setMsg] = useState("");
@@ -265,9 +277,12 @@ function Throughline() {
     (async () => {
       const a = await loadJSON("tlx_activities", null);
       const l = await loadJSON("tlx_log", null);
+      const hs = await loadJSON("tlx_hold", null);
       if (!alive) return;
       setActivities(a ?? SEED);
       setLog(l ?? []);
+      if (hs && hs.date === todayKey()) { setHoldMs(hs.ms); setHoldDate(hs.date); } // same day → keep the accumulated penalty
+      else { setHoldMs(BASE_HOLD_MS); setHoldDate(todayKey()); }                    // new day → back to 10s
       setLoading(false);
       loaded.current = true;
     })();
@@ -297,7 +312,14 @@ function Throughline() {
   // swap the instruction for another — no judgement, no log. There is no "refuse"
   // anymore: if a suggestion doesn't fit you ask for another, or you engage for a
   // few seconds. The minimum viable move is a sliver of the line, not a clean exit.
-  const swap = () => propose(log, activities, false, current ? current.activity.id : null);
+  const swap = () => {
+    const today = todayKey();
+    const cur = holdDate === today ? holdMs : BASE_HOLD_MS; // fresh day → start from 10s
+    const next = cur * 2; // every skip doubles the next hold
+    setHoldMs(next); setHoldDate(today);
+    saveJSON("tlx_hold", { date: today, ms: next });
+    propose(log, activities, false, current ? current.activity.id : null);
+  };
   const resetFlow = () => { setStage("entry"); setCurrent(null); setShowWhy(false); setRunning(false); setElapsedMs(0); };
 
   // section navigation — no tab bar; swipe left/right or tap the faint edge arrows.
@@ -337,6 +359,35 @@ function Throughline() {
     setRunning(false); setShowWhy(false); // keep `current` so the line stays frozen-full on "done"
     setStage("done");
   };
+
+  // ----- the line is the whole control surface: short tap acts, long hold retracts & re-picks -----
+  const tapAction = () => {
+    if (stage === "entry" || stage === "done") start();
+    else if (stage === "proposal") begin();
+    else if (stage === "running") finish();
+  };
+  const canHold = stage === "proposal" || stage === "running"; // only "change activity" is a hold
+  const effHold = holdDate === todayKey() ? holdMs : BASE_HOLD_MS; // ignore a stale day if left open past midnight
+  const onLineDown = () => {
+    didHold.current = false;
+    if (!canHold) return;
+    holdStart.current = Date.now();
+    setHolding(true); // the line begins retracting toward the centre over the full hold time
+    holdTimer.current = setTimeout(() => {
+      didHold.current = true; holdTimer.current = null;
+      setHolding(false); swap(); // fully retracted → a different thing
+    }, effHold);
+  };
+  const cancelHold = () => { if (holdTimer.current) { clearTimeout(holdTimer.current); holdTimer.current = null; } setHolding(false); };
+  const onLineUp = () => {
+    const heldFor = holdStart.current ? Date.now() - holdStart.current : 0;
+    cancelHold();
+    if (didHold.current) { didHold.current = false; return; } // swap already fired
+    if (canHold && heldFor >= 300) { holdStart.current = 0; return; } // aborted hold — spring back, no action
+    holdStart.current = 0;
+    tapAction();
+  };
+  const onLineCancel = () => { cancelHold(); didHold.current = false; holdStart.current = 0; };
 
   // ----- activity mutations -----
   const upd = (id, patch) => setActivities((arr) => arr.map((a) => (a.id === id ? { ...a, ...patch } : a)));
@@ -450,25 +501,27 @@ function Throughline() {
               {(() => {
                 const over = frac > 1;
                 const widthPct = Math.min(frac, 1.85) * 100;
-                // the line carries the whole loop: tap to ask, tap to begin, tap to end, tap for the next.
-                const onTap =
-                  stage === "entry" ? start :
-                  stage === "proposal" ? begin :
-                  stage === "running" ? finish :
-                  stage === "done" ? start : undefined;
+                // the line carries the whole loop. short tap acts; long hold retracts & re-picks.
+                // the hollow track stays inset from the screen edges so the fill can visibly
+                // overshoot it — that overshoot is the felt dépassement.
+                const trackTransition = holding ? `transform ${effHold}ms linear` : "transform .3s cubic-bezier(.2,.7,.2,1)";
                 return (
-                  <div onClick={onTap}
-                    style={{ position: "relative", height: 40, marginLeft: -20, marginRight: -20,
+                  <div onPointerDown={onLineDown} onPointerUp={onLineUp} onPointerLeave={onLineCancel} onPointerCancel={onLineCancel}
+                    onContextMenu={(e) => e.preventDefault()}
+                    style={{ position: "relative", height: 44, width: "82%", margin: "0 auto",
                       display: "flex", justifyContent: "center", alignItems: "center",
-                      overflow: "visible", cursor: onTap ? "pointer" : "default" }}>
-                    {/* hollow track */}
-                    <div className={stage === "entry" ? "breathe" : ""} style={{ position: "absolute", left: 0, right: 0, top: "50%", transform: "translateY(-50%)", height: 2, background: stage === "entry" ? C.bone : C.soft }} />
-                    {/* centre fill — grows symmetrically from the middle */}
+                      overflow: "visible", cursor: "pointer", touchAction: "manipulation", userSelect: "none", WebkitUserSelect: "none" }}>
+                    {/* hollow track — inset, never touches the edges */}
+                    <div className={stage === "entry" && !holding ? "breathe" : ""}
+                      style={{ position: "absolute", left: 0, right: 0, top: "50%", height: 2, background: stage === "entry" ? C.bone : C.soft,
+                        transform: `translateY(-50%) scaleX(${holding ? 0 : 1})`, transformOrigin: "center", transition: trackTransition }} />
+                    {/* centre fill — grows symmetrically from the middle, overshoots the track when you go beyond */}
                     {frac > 0 && (
                       <div style={{ position: "relative", flexShrink: 0, height: over ? 8 : 6, width: `${widthPct}%`,
                         background: C.bone, opacity: over ? 1 : 0.9,
                         boxShadow: over ? `0 0 14px ${C.bone}` : "none",
-                        transition: "width .25s linear, height .35s, box-shadow .35s" }} />
+                        transform: `scaleX(${holding ? 0 : 1})`, transformOrigin: "center",
+                        transition: holding ? `transform ${effHold}ms linear` : "width .25s linear, height .35s, box-shadow .35s, transform .3s" }} />
                     )}
                   </div>
                 );
@@ -479,21 +532,14 @@ function Throughline() {
 
                 {/* entry: nothing. just the breathing line above. */}
 
+                {/* proposal: the only thing under the line is a quiet "why this?". */}
                 {stage === "proposal" && current && (
                   <div className="fade">
-                    <div className="mono" style={{ fontSize: 9.5, letterSpacing: ".14em", textTransform: "uppercase", color: C.faint }}>tap the line to begin</div>
-                    <div style={{ display: "flex", justifyContent: "center", gap: 28, marginTop: 18 }}>
-                      <button className="ghost" onClick={() => setShowWhy((s) => !s)}>{showWhy ? "hide" : "why this?"}</button>
-                      <button className="ghost" onClick={swap}>something else</button>
-                    </div>
+                    <button className="ghost" onClick={() => setShowWhy((s) => !s)}>{showWhy ? "hide" : "why this?"}</button>
                   </div>
                 )}
 
-                {stage === "running" && current && (
-                  <div className="fade mono" style={{ fontSize: 9.5, letterSpacing: ".14em", textTransform: "uppercase", color: C.faint }}>
-                    {frac > 1 ? "beyond — keep going · tap to stop" : "tap the line when you stop"}
-                  </div>
-                )}
+                {/* running: nothing under the line. */}
 
                 {stage === "empty" && (
                   <div className="fade">
@@ -504,8 +550,7 @@ function Throughline() {
 
                 {stage === "done" && (
                   <div className="fade">
-                    <div className="mono" style={{ fontSize: 9.5, letterSpacing: ".14em", textTransform: "uppercase", color: C.faint }}>logged · tap the line for another</div>
-                    <button className="link" style={{ marginTop: 16 }} onClick={resetFlow}>that's it for now</button>
+                    <button className="link" onClick={resetFlow}>that's it for now</button>
                   </div>
                 )}
               </div>
@@ -528,8 +573,8 @@ function Throughline() {
         {/* =================== PROGRESS =================== */}
         {tab === "progress" && <Progress activities={activities} log={log} quickLog={quickLog} delLog={delLog} />}
 
-        {/* =================== FOOTER — save / load centered, reset tucked further below =================== */}
-        <div className="fade" style={{ marginTop: 56, paddingTop: 18, borderTop: `1px solid ${C.line}`, textAlign: "center" }}>
+        {/* =================== FOOTER — save / load centered, reset tucked further below. no rule: the only line is the one in the centre. =================== */}
+        <div className="fade" style={{ marginTop: 72, textAlign: "center" }}>
           <div style={{ display: "flex", justifyContent: "center", alignItems: "center", gap: 26 }}>
             <button className="link" onClick={shareBackup}>save</button>
             <label className="link" style={{ cursor: "pointer" }}>load
