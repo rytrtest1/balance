@@ -1,0 +1,736 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>throughline</title>
+<link rel="manifest" href="manifest.json" />
+<meta name="theme-color" content="#0a0a0b" />
+<meta name="mobile-web-app-capable" content="yes" />
+<link rel="icon" href="icon-192.png" />
+<link rel="apple-touch-icon" href="icon-192.png" />
+<style>html,body{margin:0;background:#0a0a0b}</style>
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef } = React;
+
+/* ============================================================
+ * throughline — the daily engine
+ * You tell it how much time you have; it tells you one thing to do.
+ * No menu to skip through, no streaks, no scores. A record you own.
+ * ============================================================ */
+
+// ---------- storage (localStorage so it survives reloads) ----------
+const mem = {};
+const store = {
+  async get(k) {
+    try { if (typeof localStorage !== "undefined") return localStorage.getItem(k); } catch {}
+    return k in mem ? mem[k] : null;
+  },
+  async set(k, v) {
+    try { if (typeof localStorage !== "undefined") { localStorage.setItem(k, v); return; } } catch {}
+    mem[k] = v;
+  },
+};
+async function loadJSON(key, fb) {
+  const raw = await store.get(key);
+  if (raw == null) return fb;
+  try { return JSON.parse(raw); } catch { return fb; }
+}
+const saveJSON = (key, v) => store.set(key, JSON.stringify(v));
+
+// ---------- dates ----------
+const pad = (n) => String(n).padStart(2, "0");
+const keyOf = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+const todayKey = () => keyOf(new Date());
+const fromKey = (s) => new Date(s + "T00:00:00");
+const weekStartKey = (d = new Date()) => {
+  const x = new Date(d); const dow = (x.getDay() + 6) % 7;
+  x.setDate(x.getDate() - dow); x.setHours(0, 0, 0, 0); return keyOf(x);
+};
+const daysBetween = (a, b) => Math.round((fromKey(b) - fromKey(a)) / 86400000);
+const fmtLong = (s) => fromKey(s).toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long" });
+const uid = () => Math.random().toString(36).slice(2, 9);
+const fmtMin = (m) => { if (!m) return "0m"; if (m < 60) return m + "m"; const h = Math.floor(m / 60), r = m % 60; return r ? `${h}h ${r}m` : `${h}h`; };
+
+// ---------- domains ----------
+const DOMAINS = [
+  { key: "physical", label: "physical", color: "#88a08a" },
+  { key: "creative", label: "creative", color: "#b09277" },
+  { key: "learning", label: "learning", color: "#7e8a99" },
+  { key: "rest",     label: "rest",     color: "#ad8f9a" },
+  { key: "mind",     label: "mind",     color: "#9b8aa0" },
+  { key: "social",   label: "social",   color: "#7d96a3" },
+  { key: "chore",    label: "chore",    color: "#807d76" },
+];
+const DKEYS = DOMAINS.map((d) => d.key);
+const dColor = (k) => (DOMAINS.find((d) => d.key === k) || {}).color || "#807d76";
+const WHERES = ["home", "anywhere", "out"];
+
+// ---------- seed (everything editable) ----------
+const A = (name, domain, where, perWeek, actions, kind = "practice", items = [], capMin = 0, capWeek = 0) => ({
+  id: uid(), name, domain, where, perWeek, kind, deadline: null, done: false, capMin, capWeek,
+  actions: actions.map(([text, min]) => ({ id: uid(), text, min })),
+  items: items.map((t) => ({ id: uid(), text: t, status: "doing" })),
+  note: "",
+});
+const SEED = [
+  // sport
+  A("Treadmill walk", "physical", "home", 7, [["Walk on the treadmill", 20]], "practice", [], 60),
+  A("Ping-pong / climbing", "physical", "out", 1, [["Play ping-pong", 60], ["Go climbing", 90]]),
+  // writing
+  A("Poetry", "creative", "anywhere", 2, [["Make an erasure poem from a page", 15], ["Free-write a poem", 15]]),
+  // music
+  A("Piano", "creative", "home", 3, [["Practice your current piece", 25], ["Learn the next part of a new piece", 30]]),
+  A("Singing", "creative", "home", 2, [["Sing on the mic", 15]]),
+  A("Cover", "creative", "home", 1, [["Work on a cover — piano + voice", 25]]),
+  // language
+  A("Spanish", "learning", "anywhere", 3, [["15 min of conversation practice", 15], ["Shadow a clip out loud", 10]]),
+  // leisure / input
+  A("Reading", "rest", "anywhere", 4, [["Read your book", 20]]),
+  A("Film", "rest", "home", 1, [["Watch a film", 90], ["Watch part of something", 30]]),
+  A("Music", "rest", "anywhere", 2, [["Sit and listen to an album", 40], ["Put music on and really listen", 15]]),
+  // perfume
+  A("Perfume", "creative", "home", 2, [["Learn a material — smell and note it", 15], ["Create — build or adjust an accord", 30]]),
+  // logic
+  A("Sudoku", "learning", "anywhere", 2, [["Learn a new technique", 15], ["Solve a grid — no clock", 20]]),
+  // cooking
+  A("Cooking", "chore", "home", 1, [["Prep meals for your work nights", 45]], "practice", [], 0, 1),
+];
+
+// ---------- engine ----------
+function defaultPlace() {
+  const d = new Date(); const day = d.getDay(); const h = d.getHours();
+  const evening = (day === 4 || day === 5 || day === 6) && h >= 20; // Thu/Fri/Sat night
+  const morning = (day === 5 || day === 6 || day === 0) && h < 8;   // tail into Fri/Sat/Sun morning
+  return evening || morning ? "work" : "home";
+}
+function doneThisWeek(log, id) {
+  const ws = weekStartKey();
+  return log.filter((e) => e.date >= ws && e.activityId === id).length;
+}
+function doneToday(log, id) {
+  const t = todayKey();
+  return log.some((e) => e.date === t && e.activityId === id);
+}
+function minutesToday(log, id) {
+  const t = todayKey();
+  return log.filter((e) => e.date === t && e.activityId === id).reduce((s, e) => s + (e.min || 0), 0);
+}
+function weight(a, log) {
+  if (a.kind === "task" && a.deadline) {
+    const d = daysBetween(todayKey(), a.deadline);
+    if (d <= 0) return 60; if (d <= 2) return 14; if (d <= 7) return 5; return 2;
+  }
+  const jit = 0.7 + Math.random() * 0.6;
+  if (!a.perWeek || a.perWeek <= 0) return 0.25 * jit; // optional, low priority
+  const remaining = a.perWeek - doneThisWeek(log, a.id);
+  const base = remaining > 0 ? remaining : 0.2; // soft target: still possible once met, just rarer
+  return Math.max(0.05, base * jit);
+}
+function placeOk(a, place) {
+  if (place === "work") return a.where === "anywhere";
+  if (place === "out") return a.where === "out" || a.where === "anywhere";
+  return a.where === "home" || a.where === "anywhere"; // home
+}
+function pick(activities, log, place, maxMin, relax = false, avoidId = null) {
+  const elig = [];
+  for (const a of activities) {
+    if (a.kind === "task" && a.done) continue;
+    if (a.id === avoidId) continue;
+    if (!relax) {
+      if (a.capMin > 0 && minutesToday(log, a.id) >= a.capMin) continue;   // hard daily minutes cap (e.g. treadmill)
+      if (a.capWeek > 0 && doneThisWeek(log, a.id) >= a.capWeek) continue; // hard weekly cap (e.g. meal prep)
+    }
+    if (!placeOk(a, place)) continue;
+    const acts = a.actions.filter((ac) => maxMin == null || ac.min <= maxMin);
+    if (!acts.length) continue;
+    elig.push({ a, acts, w: weight(a, log) });
+  }
+  if (!elig.length) return null;
+  const total = elig.reduce((s, e) => s + e.w, 0);
+  let r = Math.random() * total, chosen = elig[0];
+  for (const e of elig) { if (r < e.w) { chosen = e; break; } r -= e.w; }
+  const action = chosen.acts[Math.floor(Math.random() * chosen.acts.length)];
+  return { activity: chosen.a, action };
+}
+function reasonFor(a, log, place, action) {
+  const r = [];
+  if (a.kind === "task" && a.deadline) {
+    const d = daysBetween(todayKey(), a.deadline);
+    r.push(d <= 0 ? "due now" : `due in ${d}d`);
+  } else {
+    const t = a.perWeek > 0 ? a.perWeek : 1; const dw = doneThisWeek(log, a.id);
+    r.push(dw < t ? `under-served this week (${dw}/${t})` : "keeping the mix varied");
+  }
+  r.push(`fits ${action.min} min`); r.push(place);
+  return r.join("  ·  ");
+}
+
+// ---------- palette / css ----------
+const C = { bg: "#0a0a0b", text: "#ece9e3", mut: "#8a877f", faint: "#56544e", line: "#222226", soft: "#18181b", bone: "#d6cfbf" };
+const css = `
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500&family=Spectral:ital,wght@0,300;0,400;0,500;1,300;1,400&display=swap');
+*{box-sizing:border-box}
+.tl,.tl *{-webkit-tap-highlight-color:transparent}
+.tl{--serif:'Spectral',Georgia,serif;--mono:'IBM Plex Mono',ui-monospace,Menlo,monospace;background:${C.bg};color:${C.text};min-height:100vh;font-family:var(--serif);position:relative;overflow-x:hidden}
+.grain{position:fixed;inset:0;pointer-events:none;z-index:0;opacity:.05;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E")}
+.wrap{position:relative;z-index:1;max-width:600px;margin:0 auto;padding:26px 20px 90px}
+.lab{font-family:var(--mono);font-size:10px;letter-spacing:.22em;text-transform:uppercase;color:${C.faint}}
+.mono{font-family:var(--mono)}
+.rule{height:1px;background:${C.line};border:none}
+.softrule{height:1px;background:${C.soft};border:none}
+.tab{font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;background:none;border:none;cursor:pointer;padding:6px 0;color:${C.faint};transition:color .2s}
+.tab.on{color:${C.text}}
+.tab .u{display:block;height:1px;margin-top:6px;background:transparent;transition:background .2s}
+.tab.on .u{background:${C.bone}}
+.in{font-family:inherit;color:inherit;background:transparent;border:none;outline:none;width:100%}
+.in::placeholder{color:${C.faint}}
+.pill{font-family:var(--mono);font-size:12px;letter-spacing:.1em;text-transform:uppercase;padding:14px 18px;border:1px solid ${C.line};color:${C.text};background:transparent;cursor:pointer;transition:all .2s}
+.pill:hover{border-color:${C.mut}}
+.pill.big{font-size:13px;padding:20px}
+.seg{font-family:var(--mono);font-size:10px;letter-spacing:.12em;text-transform:uppercase;padding:6px 12px;border:1px solid ${C.line};color:${C.mut};background:transparent;cursor:pointer;transition:all .18s}
+.seg.on{color:${C.bg};background:${C.bone};border-color:${C.bone}}
+.primary{font-family:var(--mono);font-size:12px;letter-spacing:.16em;text-transform:uppercase;padding:16px;width:100%;border:1px solid ${C.bone};background:${C.bone};color:${C.bg};cursor:pointer;transition:opacity .2s}
+.primary:hover{opacity:.88}
+.ghost{font-family:var(--mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;background:none;border:none;color:${C.faint};cursor:pointer;transition:color .2s}
+.ghost:hover{color:${C.mut}}
+.x{font-family:var(--mono);font-size:15px;color:${C.faint};background:none;border:none;cursor:pointer;padding:4px;transition:color .2s}
+.x:hover{color:${C.text}}
+.dot{width:8px;height:8px;border-radius:50%;flex:none}
+.chip{font-family:var(--mono);font-size:9.5px;letter-spacing:.1em;text-transform:uppercase;padding:4px 9px;border:1px solid ${C.line};color:${C.mut};background:transparent;cursor:pointer;transition:all .18s}
+.chip.on{color:${C.bg};background:${C.bone};border-color:${C.bone}}
+.fade{opacity:0;transform:translateY(8px);animation:fu .5s cubic-bezier(.2,.7,.2,1) forwards}
+@keyframes fu{to{opacity:1;transform:none}}
+.link{font-family:var(--mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:${C.faint};background:none;border:none;cursor:pointer;transition:color .2s}
+.link:hover{color:${C.mut}}
+textarea.in{resize:vertical}
+@media (prefers-reduced-motion:reduce){.fade{animation:none;opacity:1;transform:none}}
+`;
+
+function Throughline() {
+  const [loading, setLoading] = useState(true);
+  const [tab, setTab] = useState("now");
+  const [activities, setActivities] = useState([]);
+  const [log, setLog] = useState([]);
+  const loaded = useRef(false);
+
+  // now-flow
+  const [place, setPlace] = useState(defaultPlace());
+  const [stage, setStage] = useState("entry"); // entry | time | proposal | empty | done
+  const [limit, setLimit] = useState(null);
+  const [used, setUsed] = useState(0);
+  const [current, setCurrent] = useState(null);
+  const [lastId, setLastId] = useState(null);
+  const [doneMin, setDoneMin] = useState(0);
+  const [doneNote, setDoneNote] = useState("");
+  const [showWhy, setShowWhy] = useState(false);
+
+  // data tab
+  const [pasteVal, setPasteVal] = useState("");
+  const [msg, setMsg] = useState("");
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      const a = await loadJSON("tlx_activities", null);
+      const l = await loadJSON("tlx_log", null);
+      if (!alive) return;
+      setActivities(a ?? SEED);
+      setLog(l ?? []);
+      setLoading(false);
+      loaded.current = true;
+    })();
+    return () => { alive = false; };
+  }, []);
+  useEffect(() => { if (loaded.current) saveJSON("tlx_activities", activities); }, [activities]);
+  useEffect(() => { if (loaded.current) saveJSON("tlx_log", log); }, [log]);
+
+  // ----- now-flow actions -----
+  const propose = (maxMin, logUse = log, actsUse = activities, relax = false, avoidId = null) => {
+    const p = pick(actsUse, logUse, place, maxMin, relax, avoidId);
+    setShowWhy(false);
+    if (!p) { setCurrent(null); setStage("empty"); }
+    else { setCurrent(p); setDoneMin(p.action.min); setDoneNote(""); setStage("proposal"); }
+  };
+  const startAny = () => { setLimit(null); setUsed(0); propose(null); };
+  const startTime = () => setStage("time");
+  const chooseBucket = (m) => { setLimit(m); setUsed(0); propose(m); };
+  const resetFlow = () => { setStage("entry"); setLimit(null); setUsed(0); setCurrent(null); setShowWhy(false); };
+
+  const markDone = () => {
+    if (!current) return;
+    const spent = doneMin || current.action.min;
+    const aid = current.activity.id;
+    setLastId(aid);
+    const e = {
+      id: uid(), date: todayKey(), ts: Date.now(),
+      activityId: aid, actionId: current.action.id,
+      actionText: current.action.text, min: spent, domain: current.activity.domain,
+      note: doneNote.trim(),
+    };
+    const newLog = [...log, e];
+    let newActs = activities;
+    if (current.activity.kind === "task") {
+      newActs = activities.map((a) => (a.id === aid ? { ...a, done: true } : a));
+      setActivities(newActs);
+    }
+    setLog(newLog);
+    const newUsed = used + spent;
+    setUsed(newUsed);
+    const remaining = limit != null ? limit - newUsed : null;
+    if (remaining != null && remaining <= 0) { setCurrent(null); setStage("done"); return; }
+    propose(remaining, newLog, newActs, false, aid);
+  };
+
+  // ----- activity mutations -----
+  const upd = (id, patch) => setActivities((arr) => arr.map((a) => (a.id === id ? { ...a, ...patch } : a)));
+  const addActivity = () =>
+    setActivities((arr) => [...arr, { id: uid(), name: "", domain: "creative", where: "home", perWeek: 1, kind: "practice", deadline: null, done: false, capMin: 0, capWeek: 0, actions: [{ id: uid(), text: "", min: 15 }], items: [], note: "" }]);
+  const delActivity = (id) => setActivities((arr) => arr.filter((a) => a.id !== id));
+  const addAction = (id) => upd(id, { actions: [...activities.find((a) => a.id === id).actions, { id: uid(), text: "", min: 15 }] });
+  const editAction = (id, aid, patch) => upd(id, { actions: activities.find((a) => a.id === id).actions.map((ac) => (ac.id === aid ? { ...ac, ...patch } : ac)) });
+  const delAction = (id, aid) => upd(id, { actions: activities.find((a) => a.id === id).actions.filter((ac) => ac.id !== aid) });
+  const addItem = (id, text) => { if (!text.trim()) return; upd(id, { items: [...activities.find((a) => a.id === id).items, { id: uid(), text, status: "doing" }] }); };
+  const cycleItem = (id, iid) => { const order = ["todo", "doing", "done"]; upd(id, { items: activities.find((a) => a.id === id).items.map((it) => (it.id === iid ? { ...it, status: order[(order.indexOf(it.status) + 1) % 3] } : it)) }); };
+  const delItem = (id, iid) => upd(id, { items: activities.find((a) => a.id === id).items.filter((it) => it.id !== iid) });
+  const quickLog = (a) => {
+    const ac = a.actions[0] || { id: uid(), text: a.name, min: 15 };
+    setLog((L) => [...L, { id: uid(), date: todayKey(), ts: Date.now(), activityId: a.id, actionId: ac.id, actionText: ac.text, min: ac.min, domain: a.domain }]);
+    setMsg(`logged: ${a.name}`); setTimeout(() => setMsg(""), 1500);
+  };
+  const delLog = (id) => setLog((L) => L.filter((e) => e.id !== id));
+
+  // ----- data -----
+  const exportObj = () => ({ app: "throughline", version: 2, exportedAt: new Date().toISOString(), savedOn: fmtLong(todayKey()), activities, log });
+  const exportText = () => JSON.stringify(exportObj(), null, 2);
+  const download = () => {
+    const blob = new Blob([exportText()], { type: "application/json" });
+    const url = URL.createObjectURL(blob); const a = document.createElement("a");
+    a.href = url; a.download = `throughline-${todayKey()}.json`; a.click(); URL.revokeObjectURL(url);
+    setMsg("file downloaded"); setTimeout(() => setMsg(""), 1800);
+  };
+  const copy = async () => { try { await navigator.clipboard.writeText(exportText()); setMsg("copied to clipboard"); } catch { setMsg("copy failed — use the file"); } setTimeout(() => setMsg(""), 1800); };
+  const applyImport = (text) => {
+    try {
+      const o = JSON.parse(text);
+      if (!o.activities) throw new Error("no activities");
+      setActivities(o.activities); setLog(o.log || []);
+      setMsg("loaded ✓"); setStage("entry"); setPasteVal("");
+    } catch { setMsg("couldn't read that — check the file/text"); }
+    setTimeout(() => setMsg(""), 2200);
+  };
+  const onFile = (ev) => { const f = ev.target.files?.[0]; if (!f) return; const r = new FileReader(); r.onload = () => applyImport(String(r.result)); r.readAsText(f); ev.target.value = ""; };
+  const resetAll = () => { if (typeof window !== "undefined" && !window.confirm("Wipe all activities and history?")) return; setActivities(SEED); setLog([]); setMsg("reset to defaults"); setTimeout(() => setMsg(""), 1800); };
+
+  if (loading) return (
+    <div className="tl"><style dangerouslySetInnerHTML={{ __html: css }} /><div className="grain" /><div className="wrap"><span className="lab">loading…</span></div></div>
+  );
+
+  const PlaceToggle = () => (
+    <div style={{ display: "flex", gap: 6 }}>
+      {["home", "work", "out"].map((p) => (
+        <button key={p} className={`seg ${place === p ? "on" : ""}`} onClick={() => setPlace(p)}>{p}</button>
+      ))}
+    </div>
+  );
+
+  return (
+    <div className="tl">
+      <style dangerouslySetInnerHTML={{ __html: css }} />
+      <div className="grain" />
+      <div className="wrap">
+
+        <div className="fade" style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+          <span className="mono" style={{ fontSize: 12, letterSpacing: ".3em", textTransform: "uppercase", color: C.mut }}>throughline</span>
+          <span className="lab">{fmtLong(todayKey())}</span>
+        </div>
+
+        <div className="fade" style={{ display: "flex", gap: 22, marginTop: 20 }}>
+          {["now", "activities", "progress", "data"].map((t) => (
+            <button key={t} className={`tab ${tab === t ? "on" : ""}`} onClick={() => { setTab(t); if (t === "now") resetFlow(); }}>{t}<span className="u" /></button>
+          ))}
+        </div>
+        <hr className="rule" style={{ marginTop: 14 }} />
+
+        {/* =================== NOW =================== */}
+        {tab === "now" && (
+          <div style={{ marginTop: 40 }}>
+            <div className="fade" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 34 }}>
+              <span className="lab">where are you</span>
+              <PlaceToggle />
+            </div>
+
+            {stage === "entry" && (
+              <div className="fade">
+                <div style={{ fontFamily: "var(--serif)", fontSize: 23, fontWeight: 300, fontStyle: "italic", color: C.mut, marginBottom: 28 }}>
+                  Got time but no drive? Pick how long.
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                  <button className="pill big" onClick={startAny}>any — just tell me something</button>
+                  <button className="pill big" onClick={startTime}>i have a set amount of time</button>
+                </div>
+                <button className="link" style={{ marginTop: 26 }} onClick={() => setTab("data")}>↻ coming back? load your saved data first</button>
+              </div>
+            )}
+
+            {stage === "time" && (
+              <div className="fade">
+                <div className="lab" style={{ marginBottom: 18 }}>how long</div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                  {[["10 min", 10], ["30 min", 30], ["1 hour", 60], ["2 hours +", 999]].map(([t, m]) => (
+                    <button key={m} className="pill" onClick={() => chooseBucket(m)}>{t}</button>
+                  ))}
+                </div>
+                <button className="link" style={{ marginTop: 22 }} onClick={resetFlow}>back</button>
+              </div>
+            )}
+
+            {stage === "proposal" && current && (
+              <div className="fade">
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 16 }}>
+                  <span className="dot" style={{ background: dColor(current.activity.domain) }} />
+                  <span className="mono" style={{ fontSize: 10, letterSpacing: ".14em", textTransform: "uppercase", color: C.faint }}>
+                    {current.activity.name} · ~{current.action.min} min
+                  </span>
+                </div>
+                <div style={{ fontFamily: "var(--serif)", fontSize: 30, fontWeight: 300, lineHeight: 1.25, letterSpacing: ".005em", marginBottom: 26 }}>
+                  {current.action.text}
+                </div>
+                {current.activity.capMin > 0 && (
+                  <div className="mono" style={{ fontSize: 10, color: C.faint, marginBottom: 18 }}>
+                    {minutesToday(log, current.activity.id)} / {current.activity.capMin} min on this today
+                  </div>
+                )}
+                {limit != null && limit < 999 && (
+                  <div className="mono" style={{ fontSize: 10, color: C.faint, marginBottom: 18 }}>
+                    {Math.max(0, limit - used)} of {limit} min left
+                  </div>
+                )}
+                <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 18 }}>
+                  <span className="lab">time spent</span>
+                  <button className="seg" onClick={() => setDoneMin((m) => Math.max(5, m - 5))}>−5</button>
+                  <span className="mono" style={{ fontSize: 14, minWidth: 56, textAlign: "center", color: C.text }}>{doneMin} min</span>
+                  <button className="seg" onClick={() => setDoneMin((m) => m + 5)}>+5</button>
+                </div>
+                <input className="in" value={doneNote} onChange={(e) => setDoneNote(e.target.value)}
+                  placeholder="what did you do? (optional)"
+                  style={{ fontFamily: "var(--serif)", fontSize: 15, fontWeight: 300, fontStyle: doneNote ? "normal" : "italic", borderBottom: `1px solid ${C.soft}`, paddingBottom: 6, marginBottom: 24 }} />
+                <button className="primary" onClick={markDone}>done — next</button>
+                <div style={{ display: "flex", justifyContent: "space-between", marginTop: 16 }}>
+                  <button className="ghost" onClick={() => setShowWhy((s) => !s)}>{showWhy ? "hide" : "why this?"}</button>
+                  <button className="ghost" onClick={resetFlow}>not now</button>
+                </div>
+                {showWhy && (
+                  <div className="mono" style={{ fontSize: 10.5, color: C.mut, marginTop: 14, lineHeight: 1.6, letterSpacing: ".03em" }}>
+                    {reasonFor(current.activity, log, place, current.action)}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {stage === "empty" && (
+              <div className="fade">
+                <div style={{ fontFamily: "var(--serif)", fontSize: 22, fontWeight: 300, fontStyle: "italic", color: C.mut, lineHeight: 1.4 }}>
+                  You've done everything {place} has on the board today. That's a real day.
+                </div>
+                <button className="primary" style={{ marginTop: 26 }} onClick={() => propose(null, log, activities, true, lastId)}>give me something anyway</button>
+                <button className="link" style={{ marginTop: 16 }} onClick={resetFlow}>i'm done</button>
+              </div>
+            )}
+
+            {stage === "done" && (
+              <div className="fade">
+                <div style={{ fontFamily: "var(--serif)", fontSize: 24, fontWeight: 300 }}>That's your time. Well spent.</div>
+                <div className="mono" style={{ fontSize: 10, color: C.faint, marginTop: 12 }}>{used} min logged this round</div>
+                <button className="link" style={{ marginTop: 24 }} onClick={resetFlow}>again</button>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* =================== ACTIVITIES =================== */}
+        {tab === "activities" && (
+          <div style={{ marginTop: 26 }}>
+            {activities.map((a) => (
+              <ActivityCard key={a.id} a={a} upd={upd} del={delActivity}
+                addAction={addAction} editAction={editAction} delAction={delAction}
+                addItem={addItem} cycleItem={cycleItem} delItem={delItem} />
+            ))}
+            <button className="link" style={{ marginTop: 20 }} onClick={addActivity}>+ add activity</button>
+          </div>
+        )}
+
+        {/* =================== PROGRESS =================== */}
+        {tab === "progress" && <Progress activities={activities} log={log} quickLog={quickLog} delLog={delLog} />}
+
+        {/* =================== DATA =================== */}
+        {tab === "data" && (
+          <div style={{ marginTop: 30 }}>
+            <div className="fade">
+              <div className="lab" style={{ marginBottom: 8 }}>your backup — copy this and keep it</div>
+              <div className="mono" style={{ fontSize: 11, color: C.faint, marginBottom: 14, lineHeight: 1.6 }}>
+                It auto-saves on this device as you go, but keep your own copy too. Tap the box to select all, copy it, and paste it somewhere safe — or into a chat for the weekly look-back.
+              </div>
+              <textarea readOnly value={exportText()}
+                onFocus={(e) => e.target.select()} onClick={(e) => e.target.select()}
+                rows={7}
+                style={{ fontFamily: "var(--mono)", fontSize: 10.5, color: C.mut, width: "100%", border: `1px solid ${C.soft}`, padding: 10, lineHeight: 1.5, background: "transparent", resize: "vertical" }} />
+              <div style={{ display: "flex", gap: 18, marginTop: 12 }}>
+                <button className="link" onClick={copy}>copy to clipboard</button>
+                <button className="link" onClick={download}>download .json</button>
+              </div>
+            </div>
+
+            <div className="fade" style={{ marginTop: 34 }}>
+              <hr className="softrule" />
+              <div className="lab" style={{ margin: "24px 0 14px" }}>load a file</div>
+              <label className="pill" style={{ display: "inline-block" }}>
+                choose file
+                <input type="file" accept="application/json,.json" onChange={onFile} style={{ display: "none" }} />
+              </label>
+              <div className="lab" style={{ margin: "20px 0 10px" }}>…or paste it</div>
+              <textarea className="in" rows={4} value={pasteVal} onChange={(e) => setPasteVal(e.target.value)}
+                placeholder="paste exported JSON here"
+                style={{ fontFamily: "var(--mono)", fontSize: 11, border: `1px solid ${C.soft}`, padding: 10, lineHeight: 1.5 }} />
+              <button className="link" style={{ marginTop: 12 }} onClick={() => applyImport(pasteVal)}>load pasted</button>
+            </div>
+
+            <div className="fade" style={{ marginTop: 40 }}>
+              <hr className="softrule" />
+              <button className="link" style={{ marginTop: 22 }} onClick={resetAll}>reset to defaults</button>
+            </div>
+          </div>
+        )}
+
+        {msg && (
+          <div className="mono" style={{ position: "fixed", left: 0, right: 0, bottom: 24, textAlign: "center", fontSize: 10.5, letterSpacing: ".1em", textTransform: "uppercase", color: C.bone, zIndex: 3 }}>
+            {msg}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------- activity editor ------------------------- */
+function ActivityCard({ a, upd, del, addAction, editAction, delAction, addItem, cycleItem, delItem }) {
+  const [open, setOpen] = useState(false);
+  const [itemDraft, setItemDraft] = useState("");
+  const statusColor = (s) => (s === "done" ? C.bone : s === "doing" ? C.mut : C.faint);
+  return (
+    <div className="fade" style={{ borderBottom: `1px solid ${C.soft}`, padding: "16px 0" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+        <button className="dot" style={{ background: dColor(a.domain), border: "none", cursor: "pointer" }}
+          onClick={() => upd(a.id, { domain: DKEYS[(DKEYS.indexOf(a.domain) + 1) % DKEYS.length] })} title="change domain" />
+        <input className="in" value={a.name} placeholder="activity name"
+          onChange={(e) => upd(a.id, { name: e.target.value })}
+          style={{ fontFamily: "var(--serif)", fontSize: 18, fontWeight: 300, fontStyle: a.name ? "normal" : "italic", color: a.name ? C.text : C.faint }} />
+        <button className="ghost" onClick={() => setOpen((o) => !o)}>{open ? "−" : "edit"}</button>
+        <button className="x" onClick={() => del(a.id)}>×</button>
+      </div>
+
+      {open && (
+        <div style={{ paddingLeft: 20, marginTop: 16 }}>
+          {/* meta row */}
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "14px 20px", marginBottom: 18 }}>
+            <Meta label="where">
+              <div style={{ display: "flex", gap: 5 }}>
+                {WHERES.map((w) => (
+                  <button key={w} className={`chip ${a.where === w ? "on" : ""}`} onClick={() => upd(a.id, { where: w })}>{w}</button>
+                ))}
+              </div>
+            </Meta>
+            <Meta label="kind">
+              <div style={{ display: "flex", gap: 5 }}>
+                {["practice", "task"].map((k) => (
+                  <button key={k} className={`chip ${a.kind === k ? "on" : ""}`} onClick={() => upd(a.id, { kind: k, done: false })}>{k}</button>
+                ))}
+              </div>
+            </Meta>
+            {a.kind === "practice" ? (
+              <>
+              <Meta label="per week">
+                <input className="in mono" type="number" min="0" value={a.perWeek}
+                  onChange={(e) => upd(a.id, { perWeek: Math.max(0, parseInt(e.target.value) || 0) })}
+                  style={{ width: 40, fontSize: 13, borderBottom: `1px solid ${C.line}`, color: C.text }} />
+              </Meta>
+              <Meta label="stop after (min/day)">
+                <input className="in mono" type="number" min="0" value={a.capMin || 0}
+                  onChange={(e) => upd(a.id, { capMin: Math.max(0, parseInt(e.target.value) || 0) })}
+                  style={{ width: 48, fontSize: 13, borderBottom: `1px solid ${C.line}`, color: a.capMin ? C.text : C.faint }} />
+              </Meta>
+              </>
+            ) : (
+              <Meta label="deadline">
+                <input className="in mono" type="date" value={a.deadline || ""}
+                  onChange={(e) => upd(a.id, { deadline: e.target.value || null })}
+                  style={{ fontSize: 12, borderBottom: `1px solid ${C.line}`, color: a.deadline ? C.text : C.faint }} />
+              </Meta>
+            )}
+          </div>
+
+          {/* actions */}
+          <div className="lab" style={{ marginBottom: 10 }}>actions — what actually shows up</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
+            {a.actions.map((ac) => (
+              <div key={ac.id} style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <input className="in" value={ac.text} placeholder="a concrete action"
+                  onChange={(e) => editAction(a.id, ac.id, { text: e.target.value })}
+                  style={{ fontSize: 15, fontWeight: 300, fontStyle: ac.text ? "normal" : "italic", color: ac.text ? C.text : C.faint, borderBottom: `1px solid ${C.soft}`, paddingBottom: 5 }} />
+                <input className="in mono" type="number" min="1" value={ac.min}
+                  onChange={(e) => editAction(a.id, ac.id, { min: Math.max(1, parseInt(e.target.value) || 1) })}
+                  style={{ width: 34, fontSize: 12, textAlign: "right", color: C.mut }} />
+                <span className="mono" style={{ fontSize: 10, color: C.faint }}>m</span>
+                <button className="x" onClick={() => delAction(a.id, ac.id)}>×</button>
+              </div>
+            ))}
+          </div>
+          <button className="link" style={{ marginTop: 12 }} onClick={() => addAction(a.id)}>+ action</button>
+
+          {/* progress items */}
+          <div className="lab" style={{ margin: "22px 0 10px" }}>progress — pieces, materials, milestones</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+            {a.items.map((it) => (
+              <div key={it.id} style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <button className="chip" onClick={() => cycleItem(a.id, it.id)} style={{ minWidth: 58, color: statusColor(it.status), borderColor: it.status === "done" ? C.bone : C.line }}>{it.status}</button>
+                <span style={{ flex: 1, fontSize: 14, fontWeight: 300, color: it.status === "done" ? C.mut : C.text, textDecoration: it.status === "done" ? "line-through" : "none" }}>{it.text}</span>
+                <button className="x" onClick={() => delItem(a.id, it.id)}>×</button>
+              </div>
+            ))}
+          </div>
+          <div style={{ display: "flex", gap: 10, marginTop: 10, alignItems: "center" }}>
+            <input className="in" value={itemDraft} placeholder="add one"
+              onChange={(e) => setItemDraft(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") { addItem(a.id, itemDraft); setItemDraft(""); } }}
+              style={{ fontSize: 14, fontStyle: "italic", borderBottom: `1px solid ${C.soft}`, paddingBottom: 4 }} />
+            <button className="link" onClick={() => { addItem(a.id, itemDraft); setItemDraft(""); }}>add</button>
+          </div>
+
+          {/* note */}
+          <div className="lab" style={{ margin: "22px 0 8px" }}>note</div>
+          <textarea className="in" rows={2} value={a.note} onChange={(e) => upd(a.id, { note: e.target.value })}
+            placeholder="anything the coach should know"
+            style={{ fontSize: 14, fontWeight: 300, lineHeight: 1.5, fontStyle: a.note ? "normal" : "italic", color: a.note ? C.text : C.faint }} />
+        </div>
+      )}
+    </div>
+  );
+}
+function Meta({ label, children }) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+      <span className="lab">{label}</span>
+      {children}
+    </div>
+  );
+}
+
+/* ------------------------- progress ------------------------- */
+function Progress({ activities, log, quickLog, delLog }) {
+  const ws = weekStartKey();
+  const today = todayKey();
+  const nameOf = (id) => (activities.find((a) => a.id === id) || {}).name || "—";
+  const minByDomain = {};
+  DOMAINS.forEach((d) => (minByDomain[d.key] = 0));
+  log.filter((e) => e.date >= ws).forEach((e) => { minByDomain[e.domain] = (minByDomain[e.domain] || 0) + (e.min || 0); });
+  const maxD = Math.max(1, ...Object.values(minByDomain));
+  const totalWeek = Object.values(minByDomain).reduce((s, n) => s + n, 0);
+  const todayLog = log.filter((e) => e.date === today).slice().reverse();
+
+  return (
+    <div style={{ marginTop: 30 }}>
+      {/* this week — time */}
+      <div className="fade">
+        <div className="lab" style={{ marginBottom: 16 }}>this week — time spent</div>
+        {totalWeek === 0 && <div className="mono" style={{ fontSize: 12, color: C.faint, marginBottom: 8 }}>nothing logged yet this week</div>}
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {DOMAINS.map((d) => (
+            <div key={d.key} style={{ display: "flex", alignItems: "center", gap: 12 }}>
+              <span className="mono" style={{ fontSize: 10, width: 64, color: C.mut, letterSpacing: ".08em" }}>{d.label}</span>
+              <div style={{ flex: 1, height: 6, background: C.soft }}>
+                <div style={{ width: `${(minByDomain[d.key] / maxD) * 100}%`, height: "100%", background: d.color, opacity: 0.75 }} />
+              </div>
+              <span className="mono" style={{ fontSize: 10, width: 48, textAlign: "right", color: minByDomain[d.key] ? C.bone : C.faint }}>{fmtMin(minByDomain[d.key])}</span>
+            </div>
+          ))}
+        </div>
+        <div className="mono" style={{ fontSize: 9.5, color: C.faint, marginTop: 12, letterSpacing: ".06em" }}>{fmtMin(totalWeek)} this week · time, not tallies.</div>
+      </div>
+
+      {/* today */}
+      <div className="fade" style={{ marginTop: 38 }}>
+        <hr className="softrule" />
+        <div className="lab" style={{ margin: "24px 0 16px" }}>today</div>
+        {todayLog.length === 0 && <div className="mono" style={{ fontSize: 12, color: C.faint }}>nothing logged today</div>}
+        <div style={{ display: "flex", flexDirection: "column", gap: 13 }}>
+          {todayLog.map((e) => (
+            <div key={e.id} style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+              <span className="dot" style={{ background: dColor(e.domain), marginTop: 6 }} />
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 15, fontWeight: 300 }}>{nameOf(e.activityId)} <span className="mono" style={{ fontSize: 10, color: C.faint }}>· {fmtMin(e.min)}</span></div>
+                {e.note ? <div style={{ fontSize: 13.5, fontWeight: 300, fontStyle: "italic", color: C.mut, marginTop: 2, lineHeight: 1.4 }}>{e.note}</div> : null}
+              </div>
+              <button className="x" onClick={() => delLog(e.id)} aria-label="remove">×</button>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* by activity */}
+      <div className="fade" style={{ marginTop: 38 }}>
+        <hr className="softrule" />
+        <div className="lab" style={{ margin: "24px 0 18px" }}>by activity</div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+          {activities.map((a) => {
+            const wkMin = log.filter((e) => e.date >= ws && e.activityId === a.id).reduce((s, e) => s + (e.min || 0), 0);
+            const totMin = log.filter((e) => e.activityId === a.id).reduce((s, e) => s + (e.min || 0), 0);
+            const items = a.items || [];
+            const doneItems = items.filter((i) => i.status === "done").length;
+            return (
+              <div key={a.id}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <span className="dot" style={{ background: dColor(a.domain) }} />
+                  <span style={{ flex: 1, fontSize: 16, fontWeight: 300 }}>{a.name || "untitled"}</span>
+                  <span className="mono" style={{ fontSize: 10, color: C.mut }}>{fmtMin(wkMin)} this wk · {fmtMin(totMin)} total</span>
+                </div>
+                {items.length > 0 && (
+                  <div style={{ paddingLeft: 18, marginTop: 8 }}>
+                    <span className="mono" style={{ fontSize: 9.5, color: C.faint, letterSpacing: ".08em" }}>{doneItems}/{items.length} done</span>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 6 }}>
+                      {items.map((it) => (
+                        <span key={it.id} className="mono" style={{ fontSize: 10.5, color: it.status === "done" ? C.mut : C.text, textDecoration: it.status === "done" ? "line-through" : "none" }}>
+                          {it.text}{it.status === "doing" ? " ·" : ""}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                <div style={{ paddingLeft: 18, marginTop: 6 }}>
+                  <button className="link" onClick={() => quickLog(a)}>+ did this today</button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<Throughline />);
+</script>
+<script>
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", () => {
+      navigator.serviceWorker.register("sw.js").catch(() => {});
+    });
+  }
+</script>
+</body>
+</html>
