@@ -101,17 +101,20 @@ function defaultPlace() {
   const morning = (day === 5 || day === 6 || day === 0) && h < 8;   // tail into Fri/Sat/Sun morning
   return evening || morning ? "work" : "home";
 }
+// Skips (type:"skip") are recorded for reflection but must NOT count as done,
+// or the engine would think you did what you just declined. undefined = done.
+const isDone = (e) => e.type !== "skip";
 function doneThisWeek(log, id) {
   const ws = weekStartKey();
-  return log.filter((e) => e.date >= ws && e.activityId === id).length;
+  return log.filter((e) => e.date >= ws && e.activityId === id && isDone(e)).length;
 }
 function doneToday(log, id) {
   const t = todayKey();
-  return log.some((e) => e.date === t && e.activityId === id);
+  return log.some((e) => e.date === t && e.activityId === id && isDone(e));
 }
 function minutesToday(log, id) {
   const t = todayKey();
-  return log.filter((e) => e.date === t && e.activityId === id).reduce((s, e) => s + (e.min || 0), 0);
+  return log.filter((e) => e.date === t && e.activityId === id && isDone(e)).reduce((s, e) => s + (e.min || 0), 0);
 }
 function weight(a, log) {
   if (a.kind === "task" && a.deadline) {
@@ -201,6 +204,9 @@ const css = `
 .link{font-family:var(--mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:${C.faint};background:none;border:none;cursor:pointer;transition:color .2s}
 .link:hover{color:${C.mut}}
 textarea.in{resize:vertical}
+input[type=range].sl{-webkit-appearance:none;appearance:none;height:2px;background:${C.line};outline:none;width:100%;margin:0}
+input[type=range].sl::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:16px;height:16px;border-radius:50%;background:${C.bone};cursor:pointer}
+input[type=range].sl::-moz-range-thumb{width:16px;height:16px;border:none;border-radius:50%;background:${C.bone};cursor:pointer}
 @media (prefers-reduced-motion:reduce){.fade{animation:none;opacity:1;transform:none}}
 `;
 
@@ -220,6 +226,7 @@ function Throughline() {
   const [lastId, setLastId] = useState(null);
   const [doneMin, setDoneMin] = useState(0);
   const [doneNote, setDoneNote] = useState("");
+  const [doneHard, setDoneHard] = useState(50);
   const [showWhy, setShowWhy] = useState(false);
 
   // data tab
@@ -251,12 +258,25 @@ function Throughline() {
     const p = pick(actsUse, logUse, place, maxMin, relax, avoidId);
     setShowWhy(false);
     if (!p) { setCurrent(null); setStage("empty"); }
-    else { setCurrent(p); setDoneMin(p.action.min); setDoneNote(""); setStage("proposal"); }
+    else { setCurrent(p); setDoneMin(p.action.min); setDoneNote(""); setDoneHard(50); setStage("proposal"); }
   };
   const startAny = () => { setLimit(null); setUsed(0); propose(null); };
   const startTime = () => setStage("time");
   const chooseBucket = (m) => { setLimit(m); setUsed(0); propose(m); };
   const resetFlow = () => { setStage("entry"); setLimit(null); setUsed(0); setCurrent(null); setShowWhy(false); };
+  // "not now" = a recorded refusal. The most coaching-relevant signal: where you
+  // resisted, and to what. Logged as type:"skip" so it never counts as done.
+  const skipCurrent = () => {
+    if (current) {
+      const a = current.activity;
+      setLog((L) => [...L, {
+        id: uid(), date: todayKey(), ts: Date.now(), type: "skip",
+        activityId: a.id, actionId: current.action.id,
+        actionText: current.action.text, min: 0, domain: a.domain,
+      }]);
+    }
+    resetFlow();
+  };
 
   const markDone = () => {
     if (!current) return;
@@ -264,10 +284,10 @@ function Throughline() {
     const aid = current.activity.id;
     setLastId(aid);
     const e = {
-      id: uid(), date: todayKey(), ts: Date.now(),
+      id: uid(), date: todayKey(), ts: Date.now(), type: "done",
       activityId: aid, actionId: current.action.id,
       actionText: current.action.text, min: spent, domain: current.activity.domain,
-      note: doneNote.trim(),
+      note: doneNote.trim(), hard: doneHard,
     };
     const newLog = [...log, e];
     let newActs = activities;
@@ -302,7 +322,7 @@ function Throughline() {
   const delLog = (id) => setLog((L) => L.filter((e) => e.id !== id));
 
   // ----- data -----
-  const exportObj = () => ({ app: "throughline", version: 2, exportedAt: new Date().toISOString(), savedOn: fmtLong(todayKey()), activities, log });
+  const exportObj = () => ({ app: "throughline", version: 3, exportedAt: new Date().toISOString(), savedOn: fmtLong(todayKey()), activities, log });
   const exportText = () => JSON.stringify(exportObj(), null, 2);
   const download = () => {
     const blob = new Blob([exportText()], { type: "application/json" });
@@ -429,10 +449,22 @@ function Throughline() {
                 <input className="in" value={doneNote} onChange={(e) => setDoneNote(e.target.value)}
                   placeholder="what did you do? (optional)"
                   style={{ fontFamily: "var(--serif)", fontSize: 15, fontWeight: 300, fontStyle: doneNote ? "normal" : "italic", borderBottom: `1px solid ${C.soft}`, paddingBottom: 6, marginBottom: 24 }} />
+                <div style={{ marginBottom: 26 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 10 }}>
+                    <span className="lab">how hard was it</span>
+                    <span className="mono" style={{ fontSize: 12, color: C.bone }}>{doneHard}%</span>
+                  </div>
+                  <input type="range" className="sl" min="0" max="100" step="5" value={doneHard}
+                    onChange={(e) => setDoneHard(parseInt(e.target.value))} />
+                  <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6 }}>
+                    <span className="mono" style={{ fontSize: 9, letterSpacing: ".1em", color: C.faint }}>effortless</span>
+                    <span className="mono" style={{ fontSize: 9, letterSpacing: ".1em", color: C.faint }}>brutal</span>
+                  </div>
+                </div>
                 <button className="primary" onClick={markDone}>done — next</button>
                 <div style={{ display: "flex", justifyContent: "space-between", marginTop: 16 }}>
                   <button className="ghost" onClick={() => setShowWhy((s) => !s)}>{showWhy ? "hide" : "why this?"}</button>
-                  <button className="ghost" onClick={resetFlow}>not now</button>
+                  <button className="ghost" onClick={skipCurrent}>not now</button>
                 </div>
                 {showWhy && (
                   <div className="mono" style={{ fontSize: 10.5, color: C.mut, marginTop: 14, lineHeight: 1.6, letterSpacing: ".03em" }}>
@@ -646,10 +678,11 @@ function Progress({ activities, log, quickLog, delLog }) {
   const nameOf = (id) => (activities.find((a) => a.id === id) || {}).name || "—";
   const minByDomain = {};
   DOMAINS.forEach((d) => (minByDomain[d.key] = 0));
-  log.filter((e) => e.date >= ws).forEach((e) => { minByDomain[e.domain] = (minByDomain[e.domain] || 0) + (e.min || 0); });
+  log.filter((e) => e.date >= ws && isDone(e)).forEach((e) => { minByDomain[e.domain] = (minByDomain[e.domain] || 0) + (e.min || 0); });
   const maxD = Math.max(1, ...Object.values(minByDomain));
   const totalWeek = Object.values(minByDomain).reduce((s, n) => s + n, 0);
-  const todayLog = log.filter((e) => e.date === today).slice().reverse();
+  const todayLog = log.filter((e) => e.date === today && isDone(e)).slice().reverse();
+  const skipsWeek = log.filter((e) => e.date >= ws && !isDone(e)).length;
 
   return (
     <div style={{ marginTop: 30 }}>
@@ -668,7 +701,9 @@ function Progress({ activities, log, quickLog, delLog }) {
             </div>
           ))}
         </div>
-        <div className="mono" style={{ fontSize: 9.5, color: C.faint, marginTop: 12, letterSpacing: ".06em" }}>{fmtMin(totalWeek)} this week · time, not tallies.</div>
+        <div className="mono" style={{ fontSize: 9.5, color: C.faint, marginTop: 12, letterSpacing: ".06em" }}>
+          {fmtMin(totalWeek)} this week · time, not tallies.{skipsWeek > 0 ? `  ·  ${skipsWeek} passed on` : ""}
+        </div>
       </div>
 
       {/* today */}
@@ -696,8 +731,8 @@ function Progress({ activities, log, quickLog, delLog }) {
         <div className="lab" style={{ margin: "24px 0 18px" }}>by activity</div>
         <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
           {activities.map((a) => {
-            const wkMin = log.filter((e) => e.date >= ws && e.activityId === a.id).reduce((s, e) => s + (e.min || 0), 0);
-            const totMin = log.filter((e) => e.activityId === a.id).reduce((s, e) => s + (e.min || 0), 0);
+            const wkMin = log.filter((e) => e.date >= ws && e.activityId === a.id && isDone(e)).reduce((s, e) => s + (e.min || 0), 0);
+            const totMin = log.filter((e) => e.activityId === a.id && isDone(e)).reduce((s, e) => s + (e.min || 0), 0);
             const items = a.items || [];
             const doneItems = items.filter((i) => i.status === "done").length;
             return (
