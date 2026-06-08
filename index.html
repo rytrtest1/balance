@@ -236,6 +236,10 @@ function Throughline() {
   const [msg, setMsg] = useState("");
 
   useEffect(() => {
+    // Ask the browser to keep our data — without this, phones may evict
+    // localStorage under storage pressure. With it, data stays until you
+    // clear site data or uninstall.
+    try { navigator.storage?.persist?.(); } catch {}
     let alive = true;
     (async () => {
       const a = await loadJSON("tlx_activities", null);
@@ -316,6 +320,19 @@ function Throughline() {
     setMsg("file downloaded"); setTimeout(() => setMsg(""), 1800);
   };
   const copy = async () => { try { await navigator.clipboard.writeText(exportText()); setMsg("copied to clipboard"); } catch { setMsg("copy failed — use the file"); } setTimeout(() => setMsg(""), 1800); };
+  // Best on phones: hand the backup file to the OS share sheet (Drive, email,
+  // Keep…). Falls back to a plain download where sharing files isn't supported.
+  const shareBackup = async () => {
+    const fname = `throughline-${todayKey()}.json`;
+    try {
+      const file = new File([exportText()], fname, { type: "application/json" });
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        await navigator.share({ files: [file], title: "throughline backup" });
+        setMsg("shared ✓"); setTimeout(() => setMsg(""), 1800); return;
+      }
+    } catch (e) { if (e && e.name === "AbortError") return; }
+    download();
+  };
   const applyImport = (text) => {
     try {
       const o = JSON.parse(text);
@@ -473,17 +490,17 @@ function Throughline() {
         {tab === "data" && (
           <div style={{ marginTop: 30 }}>
             <div className="fade">
-              <div className="lab" style={{ marginBottom: 8 }}>your backup — copy this and keep it</div>
+              <div className="lab" style={{ marginBottom: 8 }}>your backup — save it somewhere safe</div>
               <div className="mono" style={{ fontSize: 11, color: C.faint, marginBottom: 14, lineHeight: 1.6 }}>
-                It auto-saves on this device as you go, but keep your own copy too. Tap the box to select all, copy it, and paste it somewhere safe — or into a chat for the weekly look-back.
+                It auto-saves on this device as you go. A backup only matters if you clear your browser or switch phones — once a week is plenty. Tap <b>back up</b> to send the file to Drive, email, or notes. Or copy the text below for the weekly look-back.
               </div>
               <textarea readOnly value={exportText()}
                 onFocus={(e) => e.target.select()} onClick={(e) => e.target.select()}
                 rows={7}
                 style={{ fontFamily: "var(--mono)", fontSize: 10.5, color: C.mut, width: "100%", border: `1px solid ${C.soft}`, padding: 10, lineHeight: 1.5, background: "transparent", resize: "vertical" }} />
               <div style={{ display: "flex", gap: 18, marginTop: 12 }}>
-                <button className="link" onClick={copy}>copy to clipboard</button>
-                <button className="link" onClick={download}>download .json</button>
+                <button className="link" onClick={shareBackup}>back up</button>
+                <button className="link" onClick={copy}>copy text</button>
               </div>
             </div>
 
