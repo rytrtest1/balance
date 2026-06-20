@@ -584,9 +584,12 @@ Détermine où en est la pièce APRÈS cette session. new_stage = index (0 à ${
   // Best on phones: hand the backup file to the OS share sheet (Drive, email,
   // Keep…). Falls back to a plain download where sharing files isn't supported.
   const shareBackup = async () => {
-    const fname = `throughline-${stampKey()}.json`;
+    // Share as .txt / text/plain: .json is NOT on Chrome's Web Share allowlist,
+    // so canShare({files}) returns false for it and we'd silently fall to download
+    // (no destination prompt). The body is still JSON; load parses by content.
+    const fname = `throughline-${stampKey()}.txt`;
     try {
-      const file = new File([exportText()], fname, { type: "application/json" });
+      const file = new File([exportText()], fname, { type: "text/plain" });
       if (navigator.canShare && navigator.canShare({ files: [file] })) {
         await navigator.share({ files: [file], title: "throughline backup" });
         setMsg("shared ✓"); setTimeout(() => setMsg(""), 1800); return;
@@ -745,7 +748,7 @@ Détermine où en est la pièce APRÈS cette session. new_stage = index (0 à ${
           <div style={{ display: "flex", justifyContent: "center", alignItems: "center", gap: 26 }}>
             <button className="link" onClick={shareBackup}>save</button>
             <label className="link" style={{ cursor: "pointer" }}>load
-              <input type="file" accept="application/json,.json" onChange={onFile} style={{ display: "none" }} />
+              <input type="file" accept="application/json,.json,text/plain,.txt" onChange={onFile} style={{ display: "none" }} />
             </label>
             <button className="link" onClick={() => setKeyOpen((o) => !o)}>key{apiKey ? " ·" : ""}</button>
           </div>
