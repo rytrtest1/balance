@@ -48,6 +48,8 @@ const saveJSON = (key, v) => store.set(key, JSON.stringify(v));
 const pad = (n) => String(n).padStart(2, "0");
 const keyOf = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 const todayKey = () => keyOf(new Date());
+// Filename stamp: date + hour-minute, so multiple saves the same day don't collide.
+const stampKey = () => { const d = new Date(); return `${keyOf(d)}-${pad(d.getHours())}${pad(d.getMinutes())}`; };
 const fromKey = (s) => new Date(s + "T00:00:00");
 const weekStartKey = (d = new Date()) => {
   const x = new Date(d); const dow = (x.getDay() + 6) % 7;
@@ -575,14 +577,14 @@ Détermine où en est la pièce APRÈS cette session. new_stage = index (0 à ${
   const download = () => {
     const blob = new Blob([exportText()], { type: "application/json" });
     const url = URL.createObjectURL(blob); const a = document.createElement("a");
-    a.href = url; a.download = `throughline-${todayKey()}.json`; a.click(); URL.revokeObjectURL(url);
+    a.href = url; a.download = `throughline-${stampKey()}.json`; a.click(); URL.revokeObjectURL(url);
     setMsg("file downloaded"); setTimeout(() => setMsg(""), 1800);
   };
   const copy = async () => { try { await navigator.clipboard.writeText(exportText()); setMsg("copied to clipboard"); } catch { setMsg("copy failed — use the file"); } setTimeout(() => setMsg(""), 1800); };
   // Best on phones: hand the backup file to the OS share sheet (Drive, email,
   // Keep…). Falls back to a plain download where sharing files isn't supported.
   const shareBackup = async () => {
-    const fname = `throughline-${todayKey()}.json`;
+    const fname = `throughline-${stampKey()}.json`;
     try {
       const file = new File([exportText()], fname, { type: "application/json" });
       if (navigator.canShare && navigator.canShare({ files: [file] })) {
