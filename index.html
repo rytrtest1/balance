@@ -237,6 +237,29 @@ function pipelineStep(a) {
   return { id: uid(), text: `${label(chosen.stage)} — « ${chosen.text} »`, min: 15, pieceId: chosen.id, pieceStage: chosen.stage, fresh: false };
 }
 
+// ---------- items[] picker (Chant micro & co.) ----------
+// For practice activities whose items[] has "doing" entries, the picker selects
+// the specific item least recently done rather than the generic action text.
+// Logged as { itemId } so the next pick avoids picking the same song again too soon.
+function hasDoingItems(a) {
+  return a.kind === "practice" && (a.items || []).some((it) => it.status === "doing");
+}
+function itemStep(a, log) {
+  const base = a.actions[0] || { id: uid(), text: "—", min: 15 };
+  const doing = (a.items || []).filter((it) => it.status === "doing");
+  if (!doing.length) return base;
+  const scored = doing.map((it) => {
+    let last = null;
+    for (const e of log) {
+      if (e.activityId === a.id && isDone(e) && e.itemId === it.id && (!last || e.date > last)) last = e.date;
+    }
+    const days = last ? daysBetween(last, todayKey()) : 999;
+    return { it, w: days * (0.7 + Math.random() * 0.6) };
+  });
+  const pick = scored.sort((x, y) => y.w - x.w)[0].it;
+  return { id: base.id, text: pick.text, min: base.min, itemId: pick.id };
+}
+
 function pick(activities, log, place, maxMin, relax = false, avoidId = null) {
   const elig = [];
   for (const a of activities) {
@@ -266,7 +289,11 @@ function pick(activities, log, place, maxMin, relax = false, avoidId = null) {
   const total = elig.reduce((s, e) => s + e.w, 0);
   let r = Math.random() * total, chosen = elig[0];
   for (const e of elig) { if (r < e.w) { chosen = e; break; } r -= e.w; }
-  const action = chosen.a.kind === "pipeline" ? pipelineStep(chosen.a) : chosen.acts[Math.floor(Math.random() * chosen.acts.length)];
+  const action = chosen.a.kind === "pipeline"
+    ? pipelineStep(chosen.a)
+    : hasDoingItems(chosen.a)
+      ? itemStep(chosen.a, log)
+      : chosen.acts[Math.floor(Math.random() * chosen.acts.length)];
   if (!action) return null;
   return { activity: chosen.a, action };
 }
@@ -633,6 +660,7 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
       id: uid(), date: todayKey(), ts: Date.now(), type: "done",
       activityId: aid, actionId: current.action.id, actionText: current.action.text,
       min: Math.round(sec / 60), sec, domain: current.activity.domain, note: "",
+      ...(current.action.itemId ? { itemId: current.action.itemId } : {}),
     };
     if (current.activity.kind === "task") {
       setActivities((arr) => arr.map((a) => (a.id === aid ? { ...a, done: true } : a)));
