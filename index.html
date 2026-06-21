@@ -178,7 +178,10 @@ function actionWeight(a, ac, log) {
 function placeOk(a, place) {
   if (place === "work") return a.where === "anywhere";
   if (place === "out") return a.where === "out" || a.where === "anywhere";
-  return a.where === "home" || a.where === "anywhere"; // home
+  // home (the default non-work state): home + anywhere, AND "out" activities —
+  // there is no separate "out" place state, so an evening at home is exactly when
+  // you'd decide to go out for one (ping-pong). Without this, "out" is a dead category.
+  return a.where === "home" || a.where === "anywhere" || a.where === "out";
 }
 // ---------- pipeline picker ----------
 // A pipeline doesn't propose a generic action — it proposes the next ATOMIC
