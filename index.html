@@ -282,6 +282,37 @@ async function claudeJSON(key, prompt, schema, maxTokens = 400) {
   return JSON.parse(txt);
 }
 
+// ---------- recommandeur: named suggestion generated at proposal time ----------
+// Reads the taste profile from activity.note + last 20 session notes, returns a
+// one-line string ("title — subtitle") to replace the generic action text.
+async function generateReco(key, activity, action, log) {
+  const recent = log
+    .filter((e) => e.activityId === activity.id && isDone(e))
+    .slice(-20)
+    .map((e) => e.claudeNote || e.note || e.actionText || "")
+    .filter(Boolean);
+  const prompt = `Tu es le moteur de recommandation pour : « ${activity.name} » (${activity.domain}).
+
+Profil de goûts / contraintes :
+"""
+${activity.note || "(pas de profil)"}
+"""
+
+Action proposée : « ${action.text} »
+
+Sessions récentes (à ne pas répéter immédiatement) :
+${recent.length ? recent.join("\n") : "(aucune)"}
+
+Génère UNE recommandation concrète et nommée qui colle au profil et l'élargit légèrement. Pas la valeur sûre évidente — quelque chose d'adjacent qui surprend un peu. Réponds avec un titre court (nom de l'œuvre, du plat, du morceau…) et un sous-titre optionnel (artiste, réalisateur, note courte…).`;
+  const out = await claudeJSON(key, prompt, {
+    type: "object",
+    properties: { title: { type: "string" }, subtitle: { type: "string" } },
+    required: ["title"],
+    additionalProperties: false,
+  }, 250);
+  return out.subtitle ? `${out.title} — ${out.subtitle}` : out.title;
+}
+
 // ---------- palette / css ----------
 const C = { bg: "#0a0a0b", text: "#ece9e3", mut: "#8a877f", faint: "#56544e", line: "#222226", soft: "#18181b", bone: "#d6cfbf" };
 const css = `
@@ -373,6 +404,7 @@ function Throughline() {
   const [doneEntryId, setDoneEntryId] = useState(null);
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState("");
+  const [generating, setGenerating] = useState(false);
   const [apiKey, setApiKey] = useState("");
   const [keyOpen, setKeyOpen] = useState(false);
 
@@ -416,7 +448,21 @@ function Throughline() {
     setShowWhy(false);
     setRunning(false); setElapsedMs(0);
     if (!p) { setCurrent(null); setStage("empty"); }
-    else { setCurrent(p); setStage("proposal"); }
+    else {
+      setCurrent(p); setStage("proposal");
+      if (p.activity.kind === "recommandeur" && p.activity.note) {
+        (async () => {
+          const key = (await store.get("tlx_apiKey")) || "";
+          if (!key) return;
+          setGenerating(true);
+          try {
+            const text = await generateReco(key, p.activity, p.action, logUse);
+            setCurrent((c) => c && c.activity.id === p.activity.id ? { ...c, action: { ...c.action, text } } : c);
+          } catch (e) {}
+          finally { setGenerating(false); }
+        })();
+      }
+    }
   };
   const start = () => propose();
   // swap the instruction for another — no judgement, no log. There is no "refuse"
@@ -430,7 +476,7 @@ function Throughline() {
     saveJSON("tlx_hold", { date: today, ms: next });
     propose(log, activities, false, current ? current.activity.id : null);
   };
-  const resetFlow = () => { setStage("entry"); setCurrent(null); setShowWhy(false); setRunning(false); setElapsedMs(0); setComment(""); setSyncMsg(""); setSyncing(false); };
+  const resetFlow = () => { setStage("entry"); setCurrent(null); setShowWhy(false); setRunning(false); setElapsedMs(0); setComment(""); setSyncMsg(""); setSyncing(false); setGenerating(false); };
 
   // ----- after-session comment → advance the pipeline piece via a direct Claude call -----
   // The comment is the ONLY thing that moves a pipeline piece forward (no tap-to-advance).
@@ -733,7 +779,7 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
                       <span className="dot" style={{ background: dColor(current.activity.domain), display: "inline-block", marginRight: 10, verticalAlign: "middle" }} />{current.activity.name}
                     </div>
                     <div style={{ fontFamily: "var(--mono)", fontSize: 13, fontWeight: 400, lineHeight: 1.55, letterSpacing: ".02em", textTransform: "lowercase", color: stage === "done" ? C.mut : C.text }}>
-                      {current.action.text}
+                      {generating ? <span className="breathe" style={{ color: C.faint, letterSpacing: ".22em" }}>…</span> : current.action.text}
                     </div>
                   </div>
                 )}
