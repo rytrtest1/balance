@@ -181,12 +181,13 @@ function pipelineStep(a) {
   return { id: uid(), text: `${label(chosen.stage)} — « ${chosen.text} »`, min: 15, pieceId: chosen.id, pieceStage: chosen.stage, fresh: false };
 }
 
-// --- items[] LRU picker (Chant micro, Ordre…) ---
+// --- items[] LRU picker (Chant micro, Ordre, Clean, Cuisiner…) ---
 function hasDoingItems(a) {
   return a.kind === "practice" && (a.items || []).some((it) => it.status === "doing");
 }
-function itemStep(a, log) {
-  const base = a.actions[0] || { id: uid(), text: "—", min: 15 };
+// shared LRU: among items[status=doing], pick the one least recently logged (by
+// itemId in the log) — weighted so longer-idle items are favoured, not fixed.
+function pickItemLRU(a, log, base) {
   const doing = (a.items || []).filter((it) => it.status === "doing");
   if (!doing.length) return base;
   const scored = doing.map((it) => {
@@ -194,90 +195,174 @@ function itemStep(a, log) {
     for (const e of log) if (e.activityId === a.id && isDone(e) && e.itemId === it.id && (!last || e.date > last)) last = e.date;
     return { it, w: (last ? daysBetween(last, todayKey()) : 999) * (0.7 + Math.random() * 0.6) };
   });
-  const pick = scored.sort((x, y) => y.w - x.w)[0].it;
-  return { id: base.id, text: pick.text, min: base.min, dur: base.dur, itemId: pick.id };
+  const chosen = scored.sort((x, y) => y.w - x.w)[0].it;
+  return { id: base.id, text: chosen.text, min: base.min, dur: base.dur, itemId: chosen.id };
+}
+function itemStep(a, log) {
+  return pickItemLRU(a, log, a.actions[0] || { id: uid(), text: "—", min: 15 });
 }
 
-// --- dumb pick: draw at random from what's still owed this period ---
-// Build the hat: every obligation not yet fulfilled for its period, filtered by
-// place. Targets can live on the activity (one line in the hat, target× ) or be
-// split across its actions (each action its own line/period — Sudoku: grille 1/day
-// + vidéo 3/week). Then draw one uniformly. The action-pickers below (pipeline
-// funnel, items LRU, random action) only shape WHAT a chosen activity proposes.
-// relax=true ignores the "already done" check, so "give me something anyway" can
-// still hand you a task once the hat is empty.
-// safety-net threshold for unmet daily anchors, see below — randomized 3..6 per
-// calendar day (deterministic from the date, so it's stable all day but you can't
-// learn "it's always the Nth thing")
-function anchorGuaranteeThreshold(day) {
-  let h = 0;
-  for (let i = 0; i < day.length; i++) h = (h * 31 + day.charCodeAt(i)) >>> 0;
-  return 3 + (h % 4); // 3..6
+// --- vaisselle: derived straight from the log (cooked − washed this week), not
+// kept in a separate piece of state that resets to 0 on every reload. A completed
+// meal-prep/cuisiner session queues a dish session; a completed vaisselle clears one.
+function pendingVaisselleFrom(log) {
+  const ws = weekStartKey(realNow());
+  const cooked = log.filter((e) => (e.activityId === "a_mealprep" || e.activityId === "a_cuisiner") && e.date >= ws && isDone(e)).length;
+  const washed = log.filter((e) => e.activityId === "a_vaisselle" && e.date >= ws && isDone(e)).length;
+  return Math.max(0, cooked - washed);
 }
-// ramp, not switch: ticket weight climbs as doneToday approaches T instead of
-// jumping straight from "1 among many" to "the only draw" — no single instant
-// where it visibly flips from surprise to certainty.
-function anchorTicketMultiplier(doneToday, T) {
-  const left = T - doneToday;
-  if (left <= 0) return Infinity; // at/past T: guaranteed
-  if (left === 1) return 4; // T-1
-  if (left === 2) return 2; // T-2
-  return 1; // baseline, same odds as anything else
+
+// --- cuisiner: only proposed around meal times, never mid-afternoon ---
+function isMealTime(now) {
+  const h = now.getHours() + now.getMinutes() / 60;
+  return (h >= 11.5 && h < 13.5) || (h >= 18 && h < 20.5);
 }
-function pick(activities, log, place, options = {}) {
-  const { avoidId = null, relax = false } = options;
+
+// --- meal prep sequencing: garniture only surfaces once focaccia is done this week ---
+function focacciaDoneDateThisWeek(log) {
+  const ws = weekStartKey(realNow());
+  let d = null;
+  for (const e of log) if (e.activityId === "a_mealprep" && e.actionId === "x_mp_focaccia" && e.date >= ws && isDone(e) && (!d || e.date > d)) d = e.date;
+  return d;
+}
+
+// --- lessive: plier+ranger only surfaces the day after a wash, once it's had time to dry ---
+const LESSIVE_WASH_ACTIONS = ["x_li_habits", "x_li_serviettes", "x_li_draps"];
+function lastLessiveWashDate(log) {
+  const ws = weekStartKey(realNow());
+  let d = null;
+  for (const e of log) if (e.activityId === "a_linge" && LESSIVE_WASH_ACTIONS.includes(e.actionId) && e.date >= ws && isDone(e) && (!d || e.date > d)) d = e.date;
+  return d;
+}
+
+// --- soft deadlines: a ticket-weight ramp toward a moment in time, capped at
+// `maxMult` — never a guarantee like the daily anchors below, just a nudge that
+// grows the closer the deadline gets. rampHours = how far ahead it starts climbing.
+function deadlineTicketMultiplier(now, deadline, rampHours, maxMult = 8) {
+  const hoursLeft = (deadline.getTime() - now.getTime()) / 3600000;
+  if (hoursLeft <= 0) return maxMult;
+  if (hoursLeft >= rampHours) return 1;
+  const t = 1 - hoursLeft / rampHours;
+  return 1 + (maxMult - 1) * t * t;
+}
+// focaccia's deadline: the coming Wednesday 16:00 (the work week starts Thursday) — ramps over the 2 days before.
+function nextWednesday16(now) {
+  const d = new Date(now); const dow = d.getDay();
+  let add = (3 - dow + 7) % 7;
+  if (add === 0 && d.getHours() >= 16) add = 7;
+  d.setDate(d.getDate() + add); d.setHours(16, 0, 0, 0);
+  return d;
+}
+// garniture's deadline: the day after focaccia's done, capped 18:00.
+function garnitureDeadline(focacciaDateKey) {
+  const d = fromKey(focacciaDateKey); d.setDate(d.getDate() + 1); d.setHours(18, 0, 0, 0);
+  return d;
+}
+
+// --- daily anchors (tapis…): a safety net that ramps up as TIME spent in the app
+// today climbs toward ~2h, becoming the only draw once that's reached — tied to
+// usage, not the clock. A quiet no-app day just never triggers it (the point).
+const ANCHOR_TARGET_MIN = 120;
+function anchorTicketMultiplier(minutesToday, targetMin = ANCHOR_TARGET_MIN) {
+  if (minutesToday >= targetMin) return Infinity;
+  const ratio = minutesToday / targetMin;
+  return 1 + 20 * ratio * ratio;
+}
+
+// --- build the hat: every obligation not yet fulfilled for its period, filtered
+// by place, plus a handful of hand-wired gates (vaisselle needs a cooked meal
+// pending, meal-prep garniture needs focaccia first, cuisiner only at meal times,
+// plier needs a wash the day before). relax=true ignores every done/gate check so
+// "give me something anyway" still hands you a task once the hat is empty. This is
+// the single source of truth — both pick() and the sandbox "liste" view read it.
+function buildHatRows(activities, log, place, relax = false) {
   const hat = [];
   for (const a of activities) {
-    if (a.id === avoidId) continue;
     if (a.kind === "task" && a.done) continue;
     if (a.kind === "pipeline" && !(a.stages || []).length) continue;
+    if (a.id === "a_vaisselle") {
+      if (!placeOk(a, place)) continue;
+      if (relax || pendingVaisselleFrom(log) > 0) hat.push({ activity: a, action: a.actions[0], period: "week", target: 1, done: 0 });
+      continue;
+    }
     const acts = a.actions || [];
     const perActionTargets = acts.length && acts.some((x) => x.target);
     if (perActionTargets) {
       for (const action of acts) {
         if (!placeOkW(action.where || a.where, place)) continue;
+        // an action that rotates through items[] has nothing to propose while that
+        // list is empty (e.g. Répertoire before any piece has graduated from Piano)
+        if (/\(LRU\)/.test(action.text || "") && !hasDoingItems(a)) continue;
+        if (!relax) {
+          if (action.id === "x_cu_faire" && !isMealTime(realNow())) continue;
+          if (action.id === "x_mp_garniture" && !focacciaDoneDateThisWeek(log)) continue;
+          if (action.id === "x_li_plier") {
+            const wd = lastLessiveWashDate(log);
+            if (!wd || daysBetween(wd, todayKey()) < 1) continue;
+          }
+        }
         const period = action.period || a.period || "week";
         const target = action.target || 1;
-        if (relax || completionsInPeriod(log, a.id, action.id, period) < target)
-          hat.push({ activity: a, action });
+        const done = completionsInPeriod(log, a.id, action.id, period);
+        if (relax || done < target) hat.push({ activity: a, action, period, target, done });
       }
     } else {
       if (!placeOk(a, place)) continue;
+      if (/\(LRU\)/.test((acts[0] || {}).text || "") && !hasDoingItems(a)) continue;
       const period = a.period || "week";
       const target = a.target || a.perWeek || 1;
-      if (relax || completionsInPeriod(log, a.id, null, period) < target)
-        hat.push({ activity: a, action: null });
+      const done = completionsInPeriod(log, a.id, null, period);
+      if (relax || done < target) hat.push({ activity: a, action: null, period, target, done });
     }
   }
+  return hat;
+}
+
+// --- dumb pick: draw at random from what's still owed this period. Uniform,
+// except daily anchors and the two meal-prep deadlines get heavier tickets as
+// their moment approaches. The action-pickers (pipeline funnel, items LRU) only
+// shape WHAT a chosen activity proposes.
+function pick(activities, log, place, options = {}) {
+  const { avoidId = null, relax = false } = options;
+  const hat = buildHatRows(activities, log, place, relax).filter((h) => h.activity.id !== avoidId);
   if (!hat.length) return null;
-  // last-call safety net: unmet daily anchors (e.g. tapis) get more tickets in the
-  // hat as doneToday climbs toward the day's random threshold T (3..6), and become
-  // the ONLY draw once T is reached — using the app enough is what guarantees it,
-  // tied to usage not the clock. A quiet no-app day just never triggers it (the point).
-  const doneToday = log.filter((e) => e.date >= todayKey() && isDone(e)).length;
-  const T = anchorGuaranteeThreshold(todayKey());
+  const now = realNow();
   const isAnchorDay = (h) => (h.activity.anchor || (h.action && h.action.anchor)) && (h.action ? h.action.period || h.activity.period : h.activity.period) === "day";
+  const minutesToday = log.filter((e) => e.date >= todayKey() && isDone(e)).reduce((s, e) => s + (e.min || 0), 0);
+  const anchorMult = anchorTicketMultiplier(minutesToday);
   const anchorsDue = hat.filter(isAnchorDay);
-  let pool = hat;
-  if (anchorsDue.length) {
-    const mult = anchorTicketMultiplier(doneToday, T);
-    if (mult === Infinity) pool = anchorsDue;
-    else if (mult > 1) {
-      const others = hat.filter((h) => !isAnchorDay(h));
-      const boosted = [];
-      for (const h of anchorsDue) for (let i = 0; i < mult; i++) boosted.push(h);
-      pool = others.concat(boosted);
-    }
+  let drawn;
+  if (anchorMult === Infinity && anchorsDue.length) {
+    drawn = anchorsDue[Math.floor(Math.random() * anchorsDue.length)];
+  } else {
+    const weight = (h) => {
+      if (isAnchorDay(h)) return anchorMult;
+      if (h.action && h.action.id === "x_mp_focaccia") return deadlineTicketMultiplier(now, nextWednesday16(now), 48);
+      if (h.action && h.action.id === "x_mp_garniture") {
+        const fd = focacciaDoneDateThisWeek(log);
+        return fd ? deadlineTicketMultiplier(now, garnitureDeadline(fd), 24) : 1;
+      }
+      return 1;
+    };
+    const total = hat.reduce((s, h) => s + weight(h), 0);
+    let r = Math.random() * total;
+    drawn = hat[hat.length - 1];
+    for (const h of hat) { r -= weight(h); if (r <= 0) { drawn = h; break; } }
   }
-  const drawn = pool[Math.floor(Math.random() * pool.length)];
   const a = drawn.activity;
-  const action = drawn.action
+  let action = drawn.action
     ? drawn.action
     : a.kind === "pipeline"
       ? pipelineStep(a)
       : hasDoingItems(a)
         ? itemStep(a, log)
         : a.actions[Math.floor(Math.random() * a.actions.length)];
+  // a per-action target (cuisiner's "recette choisie", linge's "faire une lessive")
+  // means the generic items-LRU path above never runs — apply it explicitly here
+  // whenever that specific action is the "(LRU)" one.
+  if (drawn.action && action && /\(LRU\)/.test(action.text || "") && hasDoingItems(a)) {
+    action = pickItemLRU(a, log, action);
+  }
   return action ? { activity: a, action } : null;
 }
 
@@ -291,32 +376,13 @@ const SIM = typeof location !== "undefined" && new URLSearchParams(location.sear
 const NS = (k) => (SIM && k !== "tlx_apiKey" ? k.replace("tlx_", "tlx_sim_") : k);
 
 // buildHat = the whole checklist laid open (for the sandbox "Liste" view). Same
-// obligations pick() draws from, but returned in full with done/target counts so
-// the draining is visible. Grouped day/week by the caller.
+// rows pick() draws from (buildHatRows), just labeled/keyed for display.
 function buildHat(activities, log, place) {
-  const rows = [];
-  for (const a of activities) {
-    if (a.kind === "task" && a.done) continue;
-    if (a.kind === "pipeline" && !(a.stages || []).length) continue;
-    const acts = a.actions || [];
-    const perActionTargets = acts.length && acts.some((x) => x.target);
-    if (perActionTargets) {
-      for (const action of acts) {
-        if (!placeOkW(action.where || a.where, place)) continue;
-        const period = action.period || a.period || "week";
-        const target = action.target || 1;
-        rows.push({ key: a.id + ":" + action.id, activity: a, action, period, target,
-          done: completionsInPeriod(log, a.id, action.id, period), label: a.name + " — " + action.text });
-      }
-    } else {
-      if (!placeOk(a, place)) continue;
-      const period = a.period || "week";
-      const target = a.target || a.perWeek || 1;
-      rows.push({ key: a.id, activity: a, action: null, period, target,
-        done: completionsInPeriod(log, a.id, null, period), label: a.name });
-    }
-  }
-  return rows;
+  return buildHatRows(activities, log, place, false).map((r) => ({
+    key: r.activity.id + (r.action ? ":" + r.action.id : ""),
+    activity: r.activity, action: r.action, period: r.period, target: r.target, done: r.done,
+    label: r.action ? r.activity.name + " — " + r.action.text : r.activity.name,
+  }));
 }
 
 // ---------- Claude bridge (shared) ----------
@@ -445,6 +511,15 @@ function Throughline() {
   const [running, setRunning] = useState(false);
   const [startedAt, setStartedAt] = useState(0);
   const [elapsedMs, setElapsedMs] = useState(0);
+  // pause — for a real interruption mid-session (phone call, someone at the door).
+  // freezes the line; resuming shifts startedAt forward by the paused gap so the
+  // logged time excludes it. Distinct from the sandbox's "+5m/+10m" time-travel pause.
+  const [paused, setPaused] = useState(false);
+  const pauseStartRef = useRef(0);
+  const togglePause = () => {
+    if (paused) { setStartedAt((s) => s + (Date.now() - pauseStartRef.current)); setPaused(false); }
+    else { pauseStartRef.current = Date.now(); setPaused(true); }
+  };
 
   // long-press to swap: hold the line and it retracts to nothing, then re-picks.
   // there is no visible "something else" button — this is the only way to change.
@@ -458,8 +533,7 @@ function Throughline() {
   const holdStart = useRef(0);
   const didHold = useRef(false);
 
-  // vaisselle trigger + debug time override
-  const [pendingVaisselle, setPendingVaisselle] = useState(0);
+  // debug time override
   const [manualMin, setManualMin] = useState("");
   const [debugDay, setDebugDay] = useState("");
   const [debugHour, setDebugHour] = useState("");
@@ -522,6 +596,7 @@ function Throughline() {
       let a = await loadJSON(NS("tlx_activities"), null);
       const l = await loadJSON(NS("tlx_log"), null);
       const hs = await loadJSON(NS("tlx_hold"), null);
+      const fl = await loadJSON(NS("tlx_flow"), null);
       const k = await store.get("tlx_apiKey");
       // sandbox with no data yet → seed from the served catalogue copy so the
       // clone opens on the REAL activities. Falls back to SEED if it isn't there.
@@ -534,6 +609,16 @@ function Throughline() {
       setApiKey(k || "");
       if (hs && hs.date === todayKey()) { setHoldMs(hs.ms); setHoldDate(hs.date); } // same day → keep the accumulated penalty
       else { setHoldMs(BASE_HOLD_MS); setHoldDate(todayKey()); }                    // new day → back to 10s
+      // restore the live proposal so a backgrounded tab getting killed and reopened
+      // (common on phones) resumes exactly where it left off, instead of silently
+      // re-picking — that silent re-pick was an unintended free skip. Only same-day:
+      // a proposal from a previous day is stale, start fresh instead.
+      if (fl && fl.date === todayKey() && fl.stage && fl.stage !== "entry" && fl.stage !== "empty") {
+        setStage(fl.stage); setCurrent(fl.current || null);
+        setStartedAt(fl.startedAt || 0); setElapsedMs(fl.startedAt ? Date.now() - fl.startedAt : 0);
+        setRunning(!!fl.running); setPaused(!!fl.paused);
+        setDoneEntryId(fl.doneEntryId || null); setComment(fl.comment || ""); setManualMin(fl.manualMin || "");
+      }
       setLoading(false);
       loaded.current = true;
     })();
@@ -541,19 +626,24 @@ function Throughline() {
   }, []);
   useEffect(() => { if (loaded.current) saveJSON(NS("tlx_activities"), activities); }, [activities]);
   useEffect(() => { if (loaded.current) saveJSON(NS("tlx_log"), log); }, [log]);
+  // persist the live flow so it survives a tab getting backgrounded and killed
+  useEffect(() => {
+    if (!loaded.current) return;
+    saveJSON(NS("tlx_flow"), { date: todayKey(), stage, current, startedAt, running, paused, doneEntryId, comment, manualMin });
+  }, [stage, current, startedAt, running, paused, doneEntryId, comment, manualMin]);
 
   // tick the live line while running — re-read the wall clock so it stays accurate
   // even if the tab was backgrounded.
   useEffect(() => {
-    if (!running) return;
+    if (!running || paused) return;
     const t = setInterval(() => setElapsedMs(Date.now() - startedAt), 100);
     return () => clearInterval(t);
-  }, [running, startedAt]);
+  }, [running, startedAt, paused]);
 
   // ----- now-flow actions -----
   const propose = (logUse = log, actsUse = activities, relax = false, avoidId = null) => {
     const pl = computePlace(); setPlace(pl); // place is read from the clock, not chosen
-    const p = pick(actsUse, logUse, pl, { relax, avoidId, pendingVaisselle });
+    const p = pick(actsUse, logUse, pl, { relax, avoidId });
     setShowWhy(false);
     setRunning(false); setElapsedMs(0);
     if (!p) { setCurrent(null); setStage("empty"); }
@@ -585,7 +675,7 @@ function Throughline() {
     saveJSON(NS("tlx_hold"), { date: today, ms: next });
     propose(log, activities, false, current ? current.activity.id : null);
   };
-  const resetFlow = () => { setStage("entry"); setCurrent(null); setShowWhy(false); setRunning(false); setElapsedMs(0); setComment(""); setSyncMsg(""); setSyncing(false); setGenerating(false); };
+  const resetFlow = () => { setStage("entry"); setCurrent(null); setShowWhy(false); setRunning(false); setElapsedMs(0); setPaused(false); setComment(""); setSyncMsg(""); setSyncing(false); setGenerating(false); };
 
   // ----- after-session comment → advance the pipeline piece via a direct Claude call -----
   // The comment is the ONLY thing that moves a pipeline piece forward (no tap-to-advance).
@@ -602,7 +692,9 @@ function Throughline() {
     const ctx = action.fresh
       ? `Une pièce FRAÎCHE vient d'être lancée (pas encore de nom). Le pas proposé était : "${action.text}".`
       : `Pièce existante : « ${piece ? piece.text : "?"} », à l'étape ${action.pieceStage} (${(stages[action.pieceStage] || {}).text || "?"}).`;
-    const prompt = `Tu suis l'avancement d'un poème dans un funnel d'écriture (erasure).
+    // named after the activity itself, not hardcoded to erasure — this same function
+    // drives every pipeline (piano, cover, parfum-création…), not just poems.
+    const prompt = `Tu suis l'avancement d'une pièce dans un funnel « ${act.name} » (domaine : ${act.domain}).
 Étapes du funnel (index: nom) :
 ${stages.map((s, i) => `${i}: ${s.text}`).join("\n")}
 
@@ -622,12 +714,23 @@ Détermine où en est la pièce APRÈS cette session. new_stage = index (0 à ${
       });
       const ns = Math.max(0, Math.min(last, parseInt(out.new_stage)));
       const aid = act.id;
+      const pieceName = out.piece_name || (piece ? piece.text : "(sans nom)");
+      // reaching the last stage this session (not already there) graduates the piece
+      // into another activity's items[] — e.g. a mastered Piano piece joins Répertoire.
+      // The comment is what drives it, same as everything else in the funnel.
+      const prevStage = action.fresh ? 0 : (piece ? piece.stage : 0);
+      const justGraduated = act.graduatesTo && ns === last && prevStage < last;
       setActivities((arr) => arr.map((a) => {
-        if (a.id !== aid) return a;
-        let items = a.items || [];
-        if (action.fresh) items = [...items, { id: uid(), text: out.piece_name || "(sans nom)", stage: ns }];
-        else if (action.pieceId) items = items.map((it) => (it.id === action.pieceId ? { ...it, stage: ns } : it));
-        return { ...a, items };
+        if (a.id === aid) {
+          let items = a.items || [];
+          if (action.fresh) items = [...items, { id: uid(), text: pieceName, stage: ns }];
+          else if (action.pieceId) items = items.map((it) => (it.id === action.pieceId ? { ...it, stage: ns } : it));
+          return { ...a, items };
+        }
+        if (justGraduated && a.id === act.graduatesTo) {
+          return { ...a, items: [...(a.items || []), { id: uid(), text: pieceName, status: "doing" }] };
+        }
+        return a;
       }));
       if (doneEntryId) setLog((L) => L.map((en) => (en.id === doneEntryId ? { ...en, note: text, claudeNote: out.note } : en)));
       setSyncMsg(`« ${out.piece_name} » → ${(stages[ns] || {}).text || "?"}`);
@@ -737,6 +840,7 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
     setStartedAt(Date.now() - preMs);
     setElapsedMs(preMs);
     setManualMin("");
+    setPaused(false);
     setRunning(true); setStage("running");
   };
 
@@ -756,13 +860,6 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
     if (current.activity.kind === "task") {
       setActivities((arr) => arr.map((a) => (a.id === aid ? { ...a, done: true } : a)));
     }
-    // vaisselle trigger: a completed cooking session queues a dish session
-    if (aid === "a_mealprep" || aid === "a_cuisiner") {
-      setPendingVaisselle((n) => n + 1);
-    }
-    if (aid === "a_vaisselle") {
-      setPendingVaisselle((n) => Math.max(0, n - 1));
-    }
     setDoneEntryId(e.id);
     setLog((L) => [...L, e]);
     setRunning(false); setShowWhy(false);
@@ -774,9 +871,9 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
   const tapAction = () => {
     if (stage === "entry" || stage === "done") start();
     else if (stage === "proposal") begin();
-    else if (stage === "running") finish();
+    else if (stage === "running" && !paused) finish(); // resume before finishing — paused time shouldn't count
   };
-  const canHold = stage === "proposal" || stage === "running"; // only "change activity" is a hold
+  const canHold = stage === "proposal"; // skip is only useful before you've started — once running, finish or pause
   const effHold = holdDate === todayKey() ? holdMs : BASE_HOLD_MS; // ignore a stale day if left open past midnight
   const onLineDown = () => {
     didHold.current = false;
@@ -846,8 +943,9 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
 
   // sandbox quick-complete: tick one checklist obligation. Same log shape as
   // finish(), but no timer flow — a tap (with optional minutes/comment) is enough.
-  // Mirrors the real side-effects: task→done, vaisselle trigger, and (sim-only,
-  // API-free) advancing the pipeline funnel one stage so the drain is visible.
+  // Mirrors the real side-effects: task→done, and (sim-only, API-free) advancing
+  // the pipeline funnel one stage so the drain is visible. Vaisselle no longer
+  // needs a side-effect here — it's derived straight from the log.
   const simComplete = (row, min, note) => {
     const a = row.activity, action = row.action;
     const m = parseInt(min) || a.dur || (action && action.min) || 15;
@@ -856,10 +954,9 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
       activityId: a.id, actionId: action ? action.id : (a.actions[0] ? a.actions[0].id : null),
       actionText: action ? action.text : (a.actions[0] ? a.actions[0].text : a.name),
       min: m, sec: m * 60, domain: a.domain, note: (note || "").trim(),
+      ...(action && action.itemId ? { itemId: action.itemId } : {}),
     };
     if (a.kind === "task") setActivities((arr) => arr.map((x) => (x.id === a.id ? { ...x, done: true } : x)));
-    if (a.id === "a_mealprep" || a.id === "a_cuisiner") setPendingVaisselle((n) => n + 1);
-    if (a.id === "a_vaisselle") setPendingVaisselle((n) => Math.max(0, n - 1));
     if (a.kind === "pipeline") {
       // advance the most-live piece one stage, or start a fresh one — so the funnel moves
       setActivities((arr) => arr.map((x) => {
@@ -1032,7 +1129,21 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
 
                 {/* entry: nothing. just the breathing line above. */}
 
-                {/* proposal & running: nothing under the line. we know why. */}
+                {/* proposal: nothing under the line, except in the sandbox — testing wants
+                    to reroll fast without the hold gesture, just to see what comes up. */}
+                {SIM && stage === "proposal" && (
+                  <div className="fade">
+                    <button className="link" onClick={swap}>skip (test)</button>
+                  </div>
+                )}
+
+                {/* running: a quiet pause, for when something outside interrupts the session
+                    (a call, someone at the door) — not for skipping, just for stopping the clock. */}
+                {stage === "running" && (
+                  <div className="fade">
+                    <button className="link" onClick={togglePause}>{paused ? "reprendre" : "pause"}</button>
+                  </div>
+                )}
 
                 {stage === "empty" && (
                   <div className="fade">
@@ -1049,12 +1160,22 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
                       <>
                         <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, marginBottom: 18 }}>
                           <span className="mono" style={{ fontSize: 10, color: C.faint, letterSpacing: ".1em" }}>temps réel :</span>
-                          <input
-                            type="number" min="1" className="in mono"
-                            value={manualMin || String(Math.max(1, Math.round((Date.now() - startedAt) / 60000)))}
-                            onChange={(e) => setManualMin(e.target.value)}
-                            style={{ width: 44, fontSize: 12, textAlign: "center", borderBottom: `1px solid ${C.line}`, color: C.mut }}
-                          />
+                          {SIM ? (
+                            // sandbox only — testing needs to fake a duration without waiting it out.
+                            // placeholder (not a forced value) so the field can actually go empty while typing.
+                            <input
+                              type="number" min="1" className="in mono"
+                              value={manualMin}
+                              placeholder={String(Math.max(1, Math.round((Date.now() - startedAt) / 60000)))}
+                              onChange={(e) => setManualMin(e.target.value)}
+                              style={{ width: 44, fontSize: 12, textAlign: "center", borderBottom: `1px solid ${C.line}`, color: C.mut }}
+                            />
+                          ) : (
+                            // real app: time is whatever actually elapsed, never hand-typed
+                            <span className="mono" style={{ fontSize: 12, color: C.mut }}>
+                              {Math.max(1, Math.round((Date.now() - startedAt) / 60000))}
+                            </span>
+                          )}
                           <span className="mono" style={{ fontSize: 10, color: C.faint }}>min</span>
                         </div>
                         <input className="in" value={comment} placeholder="un mot sur cette session ?"
