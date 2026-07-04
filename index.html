@@ -206,6 +206,24 @@ function itemStep(a, log) {
 // funnel, items LRU, random action) only shape WHAT a chosen activity proposes.
 // relax=true ignores the "already done" check, so "give me something anyway" can
 // still hand you a task once the hat is empty.
+// safety-net threshold for unmet daily anchors, see below — randomized 3..6 per
+// calendar day (deterministic from the date, so it's stable all day but you can't
+// learn "it's always the Nth thing")
+function anchorGuaranteeThreshold(day) {
+  let h = 0;
+  for (let i = 0; i < day.length; i++) h = (h * 31 + day.charCodeAt(i)) >>> 0;
+  return 3 + (h % 4); // 3..6
+}
+// ramp, not switch: ticket weight climbs as doneToday approaches T instead of
+// jumping straight from "1 among many" to "the only draw" — no single instant
+// where it visibly flips from surprise to certainty.
+function anchorTicketMultiplier(doneToday, T) {
+  const left = T - doneToday;
+  if (left <= 0) return Infinity; // at/past T: guaranteed
+  if (left === 1) return 4; // T-1
+  if (left === 2) return 2; // T-2
+  return 1; // baseline, same odds as anything else
+}
 function pick(activities, log, place, options = {}) {
   const { avoidId = null, relax = false } = options;
   const hat = [];
@@ -232,7 +250,26 @@ function pick(activities, log, place, options = {}) {
     }
   }
   if (!hat.length) return null;
-  const drawn = hat[Math.floor(Math.random() * hat.length)];
+  // last-call safety net: unmet daily anchors (e.g. tapis) get more tickets in the
+  // hat as doneToday climbs toward the day's random threshold T (3..6), and become
+  // the ONLY draw once T is reached — using the app enough is what guarantees it,
+  // tied to usage not the clock. A quiet no-app day just never triggers it (the point).
+  const doneToday = log.filter((e) => e.date >= todayKey() && isDone(e)).length;
+  const T = anchorGuaranteeThreshold(todayKey());
+  const isAnchorDay = (h) => (h.activity.anchor || (h.action && h.action.anchor)) && (h.action ? h.action.period || h.activity.period : h.activity.period) === "day";
+  const anchorsDue = hat.filter(isAnchorDay);
+  let pool = hat;
+  if (anchorsDue.length) {
+    const mult = anchorTicketMultiplier(doneToday, T);
+    if (mult === Infinity) pool = anchorsDue;
+    else if (mult > 1) {
+      const others = hat.filter((h) => !isAnchorDay(h));
+      const boosted = [];
+      for (const h of anchorsDue) for (let i = 0; i < mult; i++) boosted.push(h);
+      pool = others.concat(boosted);
+    }
+  }
+  const drawn = pool[Math.floor(Math.random() * pool.length)];
   const a = drawn.activity;
   const action = drawn.action
     ? drawn.action
@@ -891,9 +928,9 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
   useEffect(() => {
     if (!SIM) return;
     window.__tlx = {
-      stage, tab, current, activities, log, holdMs, holdDate,
+      stage, tab, current, activities, log, holdMs, holdDate, place,
       begin, finish, tapAction, submitComment, start, resetFlow,
-      setManualMin, setComment, setTab,
+      setManualMin, setComment, setTab, applyDebugTime,
       debugNow: () => (_debugDate || new Date()).toString(),
     };
   });
