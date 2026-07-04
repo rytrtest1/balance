@@ -648,6 +648,8 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
   const submitComment = async () => {
     const text = comment.trim();
     const parsedManual = manualMin.trim() ? parseInt(manualMin) : null;
+    const existing = log.find((en) => en.id === doneEntryId);
+    const finalMin = parsedManual > 0 ? parsedManual : existing?.min;
     if (doneEntryId) {
       setLog((L) => L.map((en) => {
         if (en.id !== doneEntryId) return en;
@@ -657,6 +659,7 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
         return { ...en, ...patch };
       }));
     }
+    if (SIM && finalMin) simAdvanceMinutes(finalMin);
     const kind = current && current.activity.kind;
     // every commented session reaches Claude — pipeline advances the piece, practice
     // and recommandeur grow the note. tasks just keep the comment locally.
@@ -882,6 +885,18 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
   };
   const onFile = (ev) => { const f = ev.target.files?.[0]; if (!f) return; const r = new FileReader(); r.onload = () => applyImport(String(r.result)); r.readAsText(f); ev.target.value = ""; };
   const resetAll = () => { if (typeof window !== "undefined" && !window.confirm("Wipe all activities and history?")) return; setActivities(SEED); setLog([]); setMsg("reset to defaults"); setTimeout(() => setMsg(""), 1800); };
+
+  // sandbox test harness — call window.__tlx.* from devtools/preview_eval instead of
+  // simulating pointer events on the DOM. Runs every render so closures stay fresh.
+  useEffect(() => {
+    if (!SIM) return;
+    window.__tlx = {
+      stage, tab, current, activities, log, holdMs, holdDate,
+      begin, finish, tapAction, submitComment, start, resetFlow,
+      setManualMin, setComment, setTab,
+      debugNow: () => (_debugDate || new Date()).toString(),
+    };
+  });
 
   if (loading) return (
     <div className="tl"><style dangerouslySetInnerHTML={{ __html: css }} /><div className="grain" /><div className="wrap"><span className="lab">loading…</span></div></div>
