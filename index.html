@@ -150,10 +150,12 @@ function minutesInPeriod(log, actId, actionId, period) {
 // Once the hat is empty, it's empty — daily items refill tomorrow, weekly ones Monday.
 // No debt carries over, nothing accumulates, nothing to prioritise. The only
 // structure is the two reset clocks. Old scored engine → git + AUDIT_2026-06-22.md.
-function completionsInPeriod(log, actId, actionId, period) {
+function completionsInPeriod(log, actId, actionId, period, opts = {}) {
   const since = period === "day" ? todayKey() : weekStartKey(realNow());
   return log.filter(
     (e) => e.activityId === actId && (actionId == null || e.actionId === actionId) && e.date >= since && isDone(e)
+      && (!opts.requireFinish || e.finished)
+      && (!opts.requireProgress || e.progressed)
   ).length;
 }
 
@@ -166,24 +168,23 @@ function placeOkW(where, place) {
 }
 function placeOk(a, place) { return placeOkW(a.where, place); }
 
-// --- pipeline picker (unchanged from v3) ---
+// --- pipeline picker ---
+// One active piece at a time (decided 04/07): if a piece is live (not yet at
+// the last stage), the funnel always serves the next step on THAT piece —
+// deterministic, no lottery. A fresh piece only starts once none is live.
 function pipelineStep(a) {
   const stages = a.stages || [];
   if (!stages.length) return null;
   const last = stages.length - 1;
   const label = (i) => (stages[i] ? stages[i].text : "—");
-  const pieces = (a.items || []).filter((it) => typeof it.stage === "number");
-  const live = pieces.filter((p) => p.stage < last);
-  const freshChance = live.length ? Math.min(0.5, 1 / (live.length + 1)) : 1;
-  if (Math.random() < freshChance)
-    return { id: uid(), text: `${label(0)} — nouvelle pièce`, min: 15, pieceId: null, pieceStage: 0, fresh: true };
-  const chosen = live.map((p) => ({ p, w: (p.stage + 1) * (0.7 + Math.random() * 0.6) })).sort((x, y) => y.w - x.w)[0].p;
-  return { id: uid(), text: `${label(chosen.stage)} — « ${chosen.text} »`, min: 15, pieceId: chosen.id, pieceStage: chosen.stage, fresh: false };
+  const live = (a.items || []).find((it) => typeof it.stage === "number" && it.stage < last);
+  if (!live) return { id: uid(), text: `${label(0)} — nouvelle pièce`, min: 15, pieceId: null, pieceStage: 0, fresh: true };
+  return { id: uid(), text: `${label(live.stage)} — « ${live.text} »`, min: 15, pieceId: live.id, pieceStage: live.stage, fresh: false };
 }
 
 // --- items[] LRU picker (Chant micro, Ordre, Clean, Cuisiner…) ---
 function hasDoingItems(a) {
-  return a.kind === "practice" && (a.items || []).some((it) => it.status === "doing");
+  return (a.kind === "practice" || a.kind === "recommandeur") && (a.items || []).some((it) => it.status === "doing");
 }
 // shared LRU: among items[status=doing], pick the one least recently logged (by
 // itemId in the log) — weighted so longer-idle items are favoured, not fixed.
@@ -226,13 +227,14 @@ function focacciaDoneDateThisWeek(log) {
   return d;
 }
 
-// --- lessive: plier+ranger only surfaces the day after a wash, once it's had time to dry ---
-const LESSIVE_WASH_ACTIONS = ["x_li_habits", "x_li_serviettes", "x_li_draps"];
-function lastLessiveWashDate(log) {
-  const ws = weekStartKey(realNow());
-  let d = null;
-  for (const e of log) if (e.activityId === "a_linge" && LESSIVE_WASH_ACTIONS.includes(e.actionId) && e.date >= ws && isDone(e) && (!d || e.date > d)) d = e.date;
-  return d;
+// --- lessive: plier+ranger only surfaces at least 24h (real elapsed time, not
+// calendar day) after the last wash, once it's had time to dry ---
+const LESSIVE_WASH_ACTION = "x_li_wash";
+const LESSIVE_DRY_MS = 24 * 3600000;
+function lastLessiveWashTs(log) {
+  let ts = null;
+  for (const e of log) if (e.activityId === "a_linge" && e.actionId === LESSIVE_WASH_ACTION && isDone(e) && (!ts || e.ts > ts)) ts = e.ts;
+  return ts;
 }
 
 // --- soft deadlines: a ticket-weight ramp toward a moment in time, capped at
@@ -297,8 +299,8 @@ function buildHatRows(activities, log, place, relax = false) {
           if (action.id === "x_cu_faire" && !isMealTime(realNow())) continue;
           if (action.id === "x_mp_garniture" && !focacciaDoneDateThisWeek(log)) continue;
           if (action.id === "x_li_plier") {
-            const wd = lastLessiveWashDate(log);
-            if (!wd || daysBetween(wd, todayKey()) < 1) continue;
+            const wts = lastLessiveWashTs(log);
+            if (!wts || realNow().getTime() - wts < LESSIVE_DRY_MS) continue;
           }
         }
         const period = action.period || a.period || "week";
@@ -311,7 +313,7 @@ function buildHatRows(activities, log, place, relax = false) {
       if (/\(LRU\)/.test((acts[0] || {}).text || "") && !hasDoingItems(a)) continue;
       const period = a.period || "week";
       const target = a.target || a.perWeek || 1;
-      const done = completionsInPeriod(log, a.id, null, period);
+      const done = completionsInPeriod(log, a.id, null, period, { requireFinish: !!a.requireFinish, requireProgress: !!a.requireProgress });
       if (relax || done < target) hat.push({ activity: a, action: null, period, target, done });
     }
   }
@@ -414,12 +416,18 @@ async function claudeJSON(key, prompt, schema, maxTokens = 400) {
 // ---------- recommandeur: named suggestion generated at proposal time ----------
 // Reads the taste profile from activity.note + last 20 session notes, returns a
 // one-line string ("title — subtitle") to replace the generic action text.
+// When the activity also keeps a curated items[] library (e.g. Cuisiner's recipe
+// rotation), the deterministic LRU pick still runs first (in pick()) — this only
+// dresses that choice up, or occasionally proposes something outside it. The
+// library keeps driving the rotation; recommandeur doesn't replace it.
 async function generateReco(key, activity, action, log) {
   const recent = log
     .filter((e) => e.activityId === activity.id && isDone(e))
     .slice(-20)
     .map((e) => e.claudeNote || e.note || e.actionText || "")
     .filter(Boolean);
+  const library = (activity.items || []).filter((it) => it.status === "doing").map((it) => it.text);
+  const usesLibrary = !!action.itemId && library.length > 0;
   const prompt = `Tu es le moteur de recommandation pour : « ${activity.name} » (${activity.domain}).
 
 Profil de goûts / contraintes :
@@ -428,11 +436,14 @@ ${activity.note || "(pas de profil)"}
 """
 
 Action proposée : « ${action.text} »
-
+${library.length ? `\nBibliothèque actuelle (déjà validée par Maxence, à conserver comme base) :\n${library.map((t) => "- " + t).join("\n")}\n` : ""}
 Sessions récentes (à ne pas répéter immédiatement) :
 ${recent.length ? recent.join("\n") : "(aucune)"}
 
-Génère UNE recommandation concrète et nommée qui colle au profil et l'élargit légèrement. Pas la valeur sûre évidente — quelque chose d'adjacent qui surprend un peu. Réponds avec un titre court (nom de l'œuvre, du plat, du morceau…) et un sous-titre optionnel (artiste, réalisateur, note courte…).`;
+${usesLibrary
+    ? `La rotation a déjà choisi « ${action.text} » dans la bibliothèque ci-dessus. Présente CE choix comme une recommandation concrète et engageante (garde le nom reconnaissable ; tu peux ajouter un détail qui donne envie). N'en propose un autre que si celui-ci a visiblement été refait trop souvent récemment — et dans ce cas choisis un AUTRE item de la bibliothèque, jamais hors-liste.`
+    : `Génère UNE recommandation concrète et nommée qui colle au profil et l'élargit légèrement${library.length ? ", en dehors de la bibliothèque ci-dessus (c'est le mode découverte)" : ""}. Pas la valeur sûre évidente — quelque chose d'adjacent qui surprend un peu.`}
+Réponds avec un titre court (nom de l'œuvre, du plat, du morceau…) et un sous-titre optionnel (artiste, réalisateur, note courte…).`;
   const out = await claudeJSON(key, prompt, {
     type: "object",
     properties: { title: { type: "string" }, subtitle: { type: "string" } },
@@ -601,7 +612,7 @@ function Throughline() {
       // sandbox with no data yet → seed from the served catalogue copy so the
       // clone opens on the REAL activities. Falls back to SEED if it isn't there.
       if (SIM && a == null) {
-        try { const r = await fetch("catalogue.json", { cache: "no-store" }); if (r.ok) { const c = await r.json(); if (Array.isArray(c.activities)) a = c.activities; } } catch {}
+        try { const r = await fetch("throughline-catalogue.json", { cache: "no-store" }); if (r.ok) { const c = await r.json(); if (Array.isArray(c.activities)) a = c.activities; } } catch {}
       }
       if (!alive) return;
       setActivities(a ?? SEED);
@@ -703,13 +714,13 @@ ${ctx}
 Commentaire laissé après la session :
 « ${text} »
 
-Détermine où en est la pièce APRÈS cette session. new_stage = index (0 à ${last}) de l'étape courante : si une étape vient d'être finie, avance à la suivante, sinon garde l'étape. piece_name = nom court (existant, ou tiré du commentaire si fraîche). note = une ligne qui distille ce qui a été fait.`;
+Détermine où en est la pièce APRÈS cette session. new_stage = index (0 à ${last}) de l'étape courante : si une étape vient d'être finie, avance à la suivante, sinon garde l'étape. piece_name = nom court (existant, ou tiré du commentaire si fraîche). progressed = true si cette session a fait avancer concrètement la pièce (même sans changer d'étape — un chunk appris, une itération réelle), false si elle n'a rien fait gagner (rejoué sans progrès, session avortée, bloqué). note = une ligne qui distille ce qui a été fait.`;
     setSyncing(true); setSyncMsg("lecture du commentaire…");
     try {
       const out = await claudeJSON(key, prompt, {
         type: "object",
-        properties: { piece_name: { type: "string" }, new_stage: { type: "integer" }, note: { type: "string" } },
-        required: ["piece_name", "new_stage", "note"],
+        properties: { piece_name: { type: "string" }, new_stage: { type: "integer" }, progressed: { type: "boolean" }, note: { type: "string" } },
+        required: ["piece_name", "new_stage", "progressed", "note"],
         additionalProperties: false,
       });
       const ns = Math.max(0, Math.min(last, parseInt(out.new_stage)));
@@ -719,7 +730,11 @@ Détermine où en est la pièce APRÈS cette session. new_stage = index (0 à ${
       // into another activity's items[] — e.g. a mastered Piano piece joins Répertoire.
       // The comment is what drives it, same as everything else in the funnel.
       const prevStage = action.fresh ? 0 : (piece ? piece.stage : 0);
-      const justGraduated = act.graduatesTo && ns === last && prevStage < last;
+      // the piece reached the funnel's last stage THIS session — the one thing that
+      // counts as a real completion (e.g. a_erasure.requireFinish uses this to gate
+      // its weekly target on a finished poem, not just any session touching a piece).
+      const justFinished = ns === last && prevStage < last;
+      const justGraduated = act.graduatesTo && justFinished;
       setActivities((arr) => arr.map((a) => {
         if (a.id === aid) {
           let items = a.items || [];
@@ -732,7 +747,11 @@ Détermine où en est la pièce APRÈS cette session. new_stage = index (0 à ${
         }
         return a;
       }));
-      if (doneEntryId) setLog((L) => L.map((en) => (en.id === doneEntryId ? { ...en, note: text, claudeNote: out.note } : en)));
+      // progressed = real forward movement this session, independent of a full stage
+      // transition (e.g. a_piano.requireProgress gates its weekly target on this —
+      // touching the piece isn't enough, but finishing the whole piece is too rare
+      // a bar for a weekly cadence).
+      if (doneEntryId) setLog((L) => L.map((en) => (en.id === doneEntryId ? { ...en, note: text, claudeNote: out.note, finished: justFinished, progressed: !!out.progressed } : en)));
       setSyncMsg(`« ${out.piece_name} » → ${(stages[ns] || {}).text || "?"}`);
     } catch (err) {
       setSyncMsg("lecture impossible (" + (err.message || "erreur") + ") — commentaire gardé");
@@ -931,7 +950,21 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
       return;
     }
     const order = ["todo", "doing", "done"];
-    upd(id, { items: a.items.map((it) => (it.id === iid ? { ...it, status: order[(order.indexOf(it.status) + 1) % 3] } : it)) });
+    let justMastered = false;
+    let items = a.items.map((it) => {
+      if (it.id !== iid) return it;
+      const next = order[(order.indexOf(it.status) + 1) % 3];
+      if (next === "done") justMastered = true;
+      return { ...it, status: next };
+    });
+    // mastering an item frees a rotation slot — pull the next item from the todo
+    // reserve into doing so the rotation size stays constant (e.g. Chant micro's
+    // ~10-song rotation backed by a todo reserve).
+    if (justMastered) {
+      const idx = items.findIndex((it) => it.status === "todo");
+      if (idx !== -1) items = items.map((it, i) => (i === idx ? { ...it, status: "doing" } : it));
+    }
+    upd(id, { items });
   };
   const delItem = (id, iid) => upd(id, { items: activities.find((a) => a.id === id).items.filter((it) => it.id !== iid) });
   const quickLog = (a) => {
@@ -975,10 +1008,10 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
   };
   const simReseed = async () => {
     try {
-      const r = await fetch("catalogue.json", { cache: "no-store" });
+      const r = await fetch("throughline-catalogue.json", { cache: "no-store" });
       const c = await r.json();
       if (Array.isArray(c.activities)) { setActivities(c.activities); setLog([]); setMsg("catalogue rechargé — sandbox vidé"); }
-    } catch { setMsg("catalogue.json introuvable"); }
+    } catch { setMsg("throughline-catalogue.json introuvable"); }
     setTimeout(() => setMsg(""), 1800);
   };
 
