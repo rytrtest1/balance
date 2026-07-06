@@ -659,6 +659,8 @@ function Throughline() {
   // "counter" (v6, candidate). Toggling is safe: both pick()/pickCounter() are
   // pure reads over activities/log, no engine-side state to reconcile.
   const [engine, setEngine] = useState("hat");
+  const [simRes, setSimRes] = useState(null); // SIM-only: last in-app simulation result (visible, re-runnable)
+  const [simCfg, setSimCfg] = useState({ jours: 7, tirages: 10, warm: 1, band: 4 }); // editable sim conditions
 
   // the live line. While "running", it fills from the CENTRE outward as real time
   // elapses — reaching the margins at the action's estimated minutes, then spilling
@@ -1165,7 +1167,7 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
   // a pipeline session advances the live piece one stage → progressed=true, and
   // finished=true when it reaches the last stage — the same flags advanceViaClaude
   // tags from a real comment, which the requireFinish/requireProgress gates read.
-  const simWeek = ({ engine = "hat", budgetHours = 3, days = 7, warmDays = 1.5 } = {}) => {
+  const simWeek = ({ engine = "hat", budgetHours = 3, days = 7, warmDays = 1.5, band = null, drawsPerDay = 0 } = {}) => {
     const acts = JSON.parse(JSON.stringify(activities));
     const logArr = JSON.parse(JSON.stringify(log));
     const savedDebug = _debugDate;
@@ -1174,11 +1176,11 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
     const pickerOpts = engine === "warm" ? { warmDays } : {};
     const norm = (raw) => (useCounter ? raw && raw.result : raw);
 
-    const runBlock = (cur, startHour, endHour, budgetMin) => {
+    const runBlock = (cur, startHour, endHour, budgetMin, maxDraws = Infinity) => {
       let now = new Date(cur); now.setHours(startHour, 0, 0, 0);
       const windowEnd = new Date(cur); windowEnd.setHours(endHour, 0, 0, 0);
-      let spent = 0, guard = 0;
-      while (spent < budgetMin && now < windowEnd && guard++ < 400) {
+      let spent = 0, guard = 0, draws = 0;
+      while (spent < budgetMin && draws < maxDraws && now < windowEnd && guard++ < 400) {
         _debugDate = new Date(now);
         const pl = computePlace();
         const p = norm(picker(acts, logArr, pl, pickerOpts));
@@ -1204,7 +1206,7 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
           //           a piece graduates to repertoire after nb-stages réussites
           //   Cover   (requireFinish): 3–5 sessions → 1 finished cover
           //   Parfum  (requireFinish): 2–4 sessions → 1 stabilised formula
-          const BAND = { a_erasure: [5, 8], a_piano: [3, 6], a_cover: [3, 5], a_parfum_crea: [2, 4] };
+          const BAND = { a_erasure: [5, 8], a_piano: [3, 6], a_cover: [3, 5], a_parfum_crea: [2, 4], ...(band || {}) };
           const [lo, hi] = BAND[a.id] || [3, 5];
           const draw = () => lo + Math.floor(Math.random() * (hi - lo + 1));
           if (a._thresh == null) a._thresh = draw();
@@ -1230,10 +1232,10 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
           // completion (the "grappe autant que nécessaire tant que pas fini").
         }
         logArr.push(e);
-        spent += m;
+        spent += m; draws += 1;
         now = new Date(now.getTime() + m * 60000);
       }
-      return spent;
+      return draws;
     };
 
     let day = _debugDate ? new Date(_debugDate) : new Date();
@@ -1241,15 +1243,16 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
     for (let d = 0; d < days; d++) {
       const cur = new Date(day); cur.setDate(cur.getDate() + d);
       const budgetMin = Math.round(budgetHours * 60);
+      const dayCap = drawsPerDay > 0 ? drawsPerDay : Infinity; // cap total draws/day (else budget-limited)
       const workEve = isWorkShift(new Date(cur.getFullYear(), cur.getMonth(), cur.getDate(), 21, 0, 0));
       if (workEve) {
         // work night: daytime is home (8h–20h, place=home), then the 20h shift is
         // work. ~1h at home in the day (tapis etc.), the rest during the shift.
         const homeMin = Math.min(budgetMin, 60);
-        runBlock(cur, 11, 20, homeMin);                    // daytime home, spans lunch
-        runBlock(cur, 20, 24, budgetMin - homeMin);        // shift downtime, place=work
+        const d1 = runBlock(cur, 11, 20, homeMin, dayCap);              // daytime home, spans lunch
+        runBlock(cur, 20, 24, budgetMin - homeMin, dayCap - d1);        // shift downtime, place=work
       } else {
-        runBlock(cur, 10, 23, budgetMin);                  // free day: one home block spanning meals
+        runBlock(cur, 10, 23, budgetMin, dayCap);                      // free day: one home block spanning meals
       }
     }
     _debugDate = savedDebug; setClock((c) => c + 1);
@@ -1264,6 +1267,36 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
       if (Array.isArray(c.activities)) { setActivities(c.activities); setLog([]); setMsg("catalogue rechargé — sandbox vidé"); }
     } catch { setMsg("throughline-catalogue.json introuvable"); }
     setTimeout(() => setMsg(""), 1800);
+  };
+
+  // SIM-only: run simWeek on the CURRENTLY selected engine and aggregate into a
+  // visible, re-runnable result. Same params every time so results are comparable:
+  // 4 weeks, ~10 draws/day, Erasure = 4 sessions/poem, averaged over 5 runs.
+  const runSimViz = () => {
+    const RUNS = 5, DAYS = Math.max(1, simCfg.jours), WEEKS = DAYS / 7;
+    const opts = { engine, days: DAYS, budgetHours: Math.max(5, simCfg.tirages), drawsPerDay: Math.max(1, simCfg.tirages), band: { a_erasure: [simCfg.band, simCfg.band] } };
+    if (engine === "warm") opts.warmDays = simCfg.warm;
+    const acc = {}, names = {};
+    let finE = 0, finC = 0, finP = 0, piano = 0, tot = 0; const drawsDays = [];
+    for (let r = 0; r < RUNS; r++) {
+      const exp = simWeek(opts);
+      (exp.activities || []).forEach((a) => { names[a.id] = a.name; });
+      const lg = exp.log.filter((e) => e.type !== "skip");
+      tot += lg.length;
+      const byDay = {}; lg.forEach((e) => { byDay[e.date] = (byDay[e.date] || 0) + 1; });
+      Object.values(byDay).forEach((v) => drawsDays.push(v));
+      lg.forEach((e) => { acc[e.activityId] = (acc[e.activityId] || 0) + 1; });
+      finE += lg.filter((e) => e.activityId === "a_erasure" && e.finished).length;
+      finC += lg.filter((e) => e.activityId === "a_cover" && e.finished).length;
+      finP += lg.filter((e) => e.activityId === "a_parfum_crea" && e.finished).length;
+      piano += lg.filter((e) => e.activityId === "a_piano" && e.progressed).length;
+    }
+    const rows = Object.keys(acc).map((id) => ({ name: names[id] || id, spw: acc[id] / RUNS / WEEKS })).sort((a, b) => b.spw - a.spw);
+    const avgDraws = drawsDays.reduce((s, x) => s + x, 0) / Math.max(drawsDays.length, 1);
+    setSimRes({
+      engine, drawsPerDay: +avgDraws.toFixed(1), totalPerWeek: +(tot / RUNS / WEEKS).toFixed(0), rows,
+      comp: { poemes: +(finE / RUNS / WEEKS).toFixed(2), covers: +(finC / RUNS / WEEKS).toFixed(2), parfums: +(finP / RUNS / WEEKS).toFixed(2), piano: +(piano / RUNS / WEEKS).toFixed(2) },
+    });
   };
 
   // ----- data -----
@@ -1312,6 +1345,7 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
       stage, tab, current, activities, log, holdMs, holdDate, place, engine,
       begin, finish, tapAction, submitComment, start, resetFlow, setEngine,
       setManualMin, setComment, setTab, applyDebugTime, simWeek, simReseed,
+      setLog, setActivities,
       debugNow: () => (_debugDate || new Date()).toString(),
     };
   });
@@ -1598,6 +1632,49 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
                       );
                     })}
                   </>
+                );
+              })()}
+
+              {/* --- in-app simulator: runs simWeek on the active engine, shows
+                  per-activity sessions/week as bars. Visible + re-runnable so the
+                  numbers aren't trusted from a hidden script. SIM-only. --- */}
+              <div className="lab" style={{ marginTop: 34, marginBottom: 6, color: C.bone }}>simulateur — 4 semaines, moteur actif</div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center", marginBottom: 12 }}>
+                {[{ k: "jours", lab: "jours" }, { k: "tirages", lab: "tirages/j" }, { k: "band", lab: "séances/poème" }, ...(engine === "warm" ? [{ k: "warm", lab: "chaleur (j)" }] : [])].map(({ k, lab }) => (
+                  <label key={k} className="mono" style={{ fontSize: 9.5, color: C.faint, display: "flex", alignItems: "center", gap: 5, letterSpacing: ".08em" }}>
+                    <input type="number" min={k === "warm" ? "0.25" : "1"} step={k === "warm" ? "0.25" : "1"} value={simCfg[k]}
+                      onChange={(e) => setSimCfg((c) => ({ ...c, [k]: parseFloat(e.target.value) || c[k] }))}
+                      style={{ width: 44, background: "transparent", border: "none", borderBottom: `1px solid ${C.line}`, color: C.text, fontFamily: "inherit", fontSize: 12, textAlign: "right", outline: "none", padding: "2px 4px" }} />
+                    {lab}
+                  </label>
+                ))}
+                <span className="mono" style={{ fontSize: 9.5, color: C.faint }}>· moyenne 5 runs</span>
+              </div>
+              <button className="seg" onClick={runSimViz}>
+                simuler ({engine === "warm" ? "chantier chaud v8" : engine === "counter" ? "horloge v7" : "chapeau v5"})
+              </button>
+              {simRes && (() => {
+                const max = Math.max(...simRes.rows.map((r) => r.spw), 1);
+                const CH = ["Erasure poetry", "Cover", "Piano — pièce", "Parfum — création"];
+                return (
+                  <div style={{ marginTop: 16 }}>
+                    <div className="mono" style={{ fontSize: 10, color: C.mut, marginBottom: 14, lineHeight: 1.6 }}>
+                      {simRes.drawsPerDay} tirages/jour réels · {simRes.totalPerWeek} séances/sem<br />
+                      complétions/sem — poèmes <span style={{ color: C.bone }}>{simRes.comp.poemes}</span> · covers <span style={{ color: C.bone }}>{simRes.comp.covers}</span> · parfums <span style={{ color: C.bone }}>{simRes.comp.parfums}</span> · piano <span style={{ color: C.bone }}>{simRes.comp.piano}</span>
+                    </div>
+                    {simRes.rows.map((r) => {
+                      const isCh = CH.includes(r.name);
+                      return (
+                        <div key={r.name} style={{ display: "flex", alignItems: "center", gap: 8, padding: "3px 0" }}>
+                          <span style={{ width: 128, flex: "none", fontSize: 11, color: isCh ? C.bone : C.mut }}>{r.name}</span>
+                          <div style={{ flex: 1, height: 9, background: C.soft }}>
+                            <div style={{ width: `${Math.round((r.spw / max) * 100)}%`, height: 9, background: isCh ? C.bone : C.faint }} />
+                          </div>
+                          <span className="mono" style={{ width: 34, textAlign: "right", fontSize: 10, color: C.mut }}>{r.spw.toFixed(1)}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
                 );
               })()}
             </div>
