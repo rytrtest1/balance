@@ -109,11 +109,10 @@ const SEED = [
   A("Tidy / chore", "chore", "home", 1, [["Knock out one chore", 20]]),
 ];
 
-// ---------- engine (v4 — deterministic deficit scheduler) ----------
-// Serves the most-behind eligible activity (argmax urgency, not lottery).
-// Supports v3 schema (perWeek) and v4 (importance + target + period + timed + anchor + triggered).
-// v3 fallbacks: importance=1, target=perWeek||1, period="week", timed=false.
-// Guaranteed: if demand ≤ capacity, nothing ever starves permanently.
+// ---------- engine (chapeau / checklist v5) ----------
+// pick() builds the "hat" of obligations still owed this period (day/week) and
+// draws one at random, filtered by place. Anchors (tapis, meal prep) are served
+// first, outside the draw. No scoring, no importance — being owed is binary.
 
 const WORK_SUNDAY_ANCHOR = new Date(2026, 5, 7);
 function isWorkShift(d = new Date()) {
@@ -132,6 +131,9 @@ function isWorkShift(d = new Date()) {
   return false;
 }
 const computePlace = (d = realNow()) => (isWorkShift(d) ? "work" : "home");
+// is a work shift starting tonight? (used to drop work-day-only activities like
+// tapis, which belongs to a free day, not the 1h home window before a shift)
+const isWorkDayToday = (d = realNow()) => isWorkShift(new Date(d.getFullYear(), d.getMonth(), d.getDate(), 21, 0, 0));
 const isDone = (e) => e.type !== "skip";
 
 // --- period helpers ---
@@ -282,6 +284,7 @@ function buildHatRows(activities, log, place, relax = false) {
   for (const a of activities) {
     if (a.kind === "task" && a.done) continue;
     if (a.kind === "pipeline" && !(a.stages || []).length) continue;
+    if (a.skipWorkDays && isWorkDayToday()) continue; // e.g. tapis: a free-day anchor, never a work day
     if (a.id === "a_vaisselle") {
       if (!placeOk(a, place)) continue;
       if (relax || pendingVaisselleFrom(log) > 0) hat.push({ activity: a, action: a.actions[0], period: "week", target: 1, done: 0 });
@@ -366,6 +369,144 @@ function pick(activities, log, place, options = {}) {
     action = pickItemLRU(a, log, action);
   }
   return action ? { activity: a, action } : null;
+}
+
+// --- engine v7 "staleston" (staleness clock) — decided 06/07, replaces the
+// broken v6. v5 (chapeau) resets every Monday, erasing dodged activities; v6
+// fixed that with a counter that never reset on the calendar — but it only
+// dropped to 0 on a chantier's COMPLETION, so an unfinished funnel (Cover…)
+// climbed forever and monopolised (Cover×9). v7 keeps the never-reset-on-clock
+// idea but resets the counter on ANY session (touch): do it → it drops to 0 and
+// recedes; ignore it → it climbs at its own rate (`target`/`period`, the field
+// v5 already reads). So a worked chantier steps back instead of cornering you,
+// and a neglected activity is auto-promoted — the self-correcting loop (faire →
+// recule, ignorer → monte), no calendar reset, no monopoly. Whichever counter is
+// highest gets proposed — argmax, no lottery. Same gates (place, meal-time,
+// focaccia-before-garniture, wash-before-plier, LRU-needs-items) as buildHatRows,
+// copied rather than shared so v5 stays byte-for-byte untouched while both run
+// side by side on the same data.
+function periodDays(period) { return period === "day" ? 1 : 7; }
+
+// last time THIS activity/action was done — the staleness reset point. ANY
+// session counts (touch-based), so a worked chantier recedes instead of
+// monopolising. null = never done, counter grows from "forever".
+function lastCounterResetTs(log, actId, actionId, opts = {}) {
+  let last = null;
+  for (const e of log) {
+    if (e.activityId !== actId) continue;
+    if (actionId != null && e.actionId !== actionId) continue;
+    if (!isDone(e)) continue;
+    if (opts.requireFinish && !e.finished) continue;
+    if (opts.requireProgress && !e.progressed) continue;
+    if (!last || e.ts > last) last = e.ts;
+  }
+  return last;
+}
+// counter units gained per day = target ÷ period-in-days (e.g. Chant 3/week →
+// 3/7 per day). Value = days-since-touch × that rate — so it crosses 1.0 right
+// on schedule, same intuition as target/period, but reset to 0 by any session
+// (touch), never by the calendar or by a completion gate.
+function counterValue(now, log, actId, actionId, target, period, opts = {}) {
+  const last = lastCounterResetTs(log, actId, actionId, opts);
+  const rate = target / periodDays(period);
+  const elapsedDays = last == null ? 999 : (now.getTime() - last) / 86400000;
+  return elapsedDays * rate;
+}
+// engine v8 "chantier chaud" — a pipeline is WARM (mid-piece) if it's been touched
+// since its last completion: the started-but-not-done state. No "fini" verdict is
+// needed to detect it — reaching the last stage (or firing the gate in sim) ends
+// warmth, a fresh touch restarts it. While warm, the chantier uses a SHORT interval
+// (warmDays) instead of its slow resting rate, so a live piece gets high exposure
+// and actually finishes — but it still resets to 0 on each touch, so it recedes and
+// never corners you. At rest (no live piece) it falls back to the slow resting rate,
+// a gentle invitation to start a new piece. Recovers v5's "finish fast" WITHOUT the
+// requireFinish completion-gate that blocks Maxence.
+const WARM_DAYS = 1; // a live chantier resurfaces on a ~1-day interval (measured sweet
+                     // spot 06/07: poèmes ~2 sem, covers/parfum/piano à parité v5, no monopoly)
+function pipelineWarm(log, a) {
+  if (a.kind !== "pipeline") return false;
+  const gate = a.requireProgress ? "progressed" : "finished";
+  let lastCompl = null, lastTouch = null;
+  for (const e of log) {
+    if (e.activityId !== a.id || !isDone(e)) continue;
+    if (!lastTouch || e.ts > lastTouch) lastTouch = e.ts;
+    if (e[gate] && (!lastCompl || e.ts > lastCompl)) lastCompl = e.ts;
+  }
+  if (lastTouch == null) return false;              // never started → rest (invite a new piece)
+  return lastCompl == null || lastTouch > lastCompl; // touched since last completion → warm
+}
+// every eligible row with its counter — no done<target filter (a counter
+// engine has no exhausted state, everything is always "in the running", just
+// at a different height). Same hand-wired gates as buildHatRows.
+function buildCounterRows(activities, log, place, relax = false, warmDays = 0) {
+  const rows = [];
+  const now = realNow();
+  for (const a of activities) {
+    if (a.kind === "task" && a.done) continue;
+    if (a.kind === "pipeline" && !(a.stages || []).length) continue;
+    if (a.skipWorkDays && isWorkDayToday()) continue; // e.g. tapis: a free-day anchor, never a work day
+    if (a.id === "a_vaisselle") {
+      if (!placeOk(a, place)) continue;
+      const pending = pendingVaisselleFrom(log);
+      if (relax || pending > 0) rows.push({ activity: a, action: a.actions[0], period: "week", target: 1, counter: pending * 999 });
+      continue;
+    }
+    const acts = a.actions || [];
+    const perActionTargets = acts.length && acts.some((x) => x.target);
+    if (perActionTargets) {
+      for (const action of acts) {
+        if (!placeOkW(action.where || a.where, place)) continue;
+        if (/\(LRU\)/.test(action.text || "") && !hasDoingItems(a)) continue;
+        if (!relax) {
+          if (action.id === "x_cu_faire" && !isMealTime(now)) continue;
+          if (action.id === "x_mp_garniture" && !focacciaDoneDateThisWeek(log)) continue;
+          if (action.id === "x_li_plier") {
+            const wts = lastLessiveWashTs(log);
+            if (!wts || now.getTime() - wts < LESSIVE_DRY_MS) continue;
+          }
+        }
+        const period = action.period || a.period || "week";
+        const target = action.target || 1;
+        const counter = counterValue(now, log, a.id, action.id, target, period);
+        rows.push({ activity: a, action, period, target, counter });
+      }
+    } else {
+      if (!placeOk(a, place)) continue;
+      if (/\(LRU\)/.test((acts[0] || {}).text || "") && !hasDoingItems(a)) continue;
+      const period = a.period || "week";
+      const target = a.target || a.perWeek || 1;
+      let counter;
+      if (warmDays && a.kind === "pipeline" && pipelineWarm(log, a)) {
+        // warm chantier: fast interval while mid-piece (v8), still touch-reset
+        const last = lastCounterResetTs(log, a.id, null);
+        const elapsedDays = last == null ? 999 : (now.getTime() - last) / 86400000;
+        counter = elapsedDays / warmDays;
+      } else {
+        counter = counterValue(now, log, a.id, null, target, period); // touch-reset (staleston): any session drops it to 0, so chantiers recede instead of monopolising
+      }
+      rows.push({ activity: a, action: null, period, target, counter });
+    }
+  }
+  return rows;
+}
+// deterministic argmax — always the highest counter, no jitter, no lottery.
+function pickCounter(activities, log, place, options = {}) {
+  const { avoidId = null, relax = false, warmDays = 0 } = options;
+  const rows = buildCounterRows(activities, log, place, relax, warmDays).filter((r) => r.activity.id !== avoidId);
+  if (!rows.length) return null;
+  const drawn = rows.reduce((best, r) => (r.counter > best.counter ? r : best), rows[0]);
+  const a = drawn.activity;
+  let action = drawn.action
+    ? drawn.action
+    : a.kind === "pipeline"
+      ? pipelineStep(a)
+      : hasDoingItems(a)
+        ? itemStep(a, log)
+        : a.actions[Math.floor(Math.random() * a.actions.length)];
+  if (drawn.action && action && /\(LRU\)/.test(action.text || "") && hasDoingItems(a)) {
+    action = pickItemLRU(a, log, action);
+  }
+  return { row: drawn, result: action ? { activity: a, action } : null };
 }
 
 // ---------- sandbox mode (?sim=1) ----------
@@ -514,6 +655,10 @@ function Throughline() {
   const [current, setCurrent] = useState(null);
   const [lastId, setLastId] = useState(null);
   const [showWhy, setShowWhy] = useState(false);
+  // SIM-only: which engine drives propose() by hand — "hat" (v5, shipped) or
+  // "counter" (v6, candidate). Toggling is safe: both pick()/pickCounter() are
+  // pure reads over activities/log, no engine-side state to reconcile.
+  const [engine, setEngine] = useState("hat");
 
   // the live line. While "running", it fills from the CENTRE outward as real time
   // elapses — reaching the margins at the action's estimated minutes, then spilling
@@ -654,7 +799,10 @@ function Throughline() {
   // ----- now-flow actions -----
   const propose = (logUse = log, actsUse = activities, relax = false, avoidId = null) => {
     const pl = computePlace(); setPlace(pl); // place is read from the clock, not chosen
-    const p = pick(actsUse, logUse, pl, { relax, avoidId });
+    const useCounter = SIM && (engine === "counter" || engine === "warm");
+    const cOpts = { relax, avoidId, ...(engine === "warm" ? { warmDays: WARM_DAYS } : {}) };
+    const raw = useCounter ? pickCounter(actsUse, logUse, pl, cOpts) : pick(actsUse, logUse, pl, { relax, avoidId });
+    const p = useCounter ? (raw && raw.result) : raw;
     setShowWhy(false);
     setRunning(false); setElapsedMs(0);
     if (!p) { setCurrent(null); setStage("empty"); }
@@ -875,6 +1023,7 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
       activityId: aid, actionId: current.action.id, actionText: current.action.text,
       min: minLogged, sec: minLogged * 60, domain: current.activity.domain, note: "",
       ...(current.action.itemId ? { itemId: current.action.itemId } : {}),
+      ...(SIM ? { engine } : {}), // tag which picker proposed it, so a manual sim stays attributable even if you switch mid-session
     };
     if (current.activity.kind === "task") {
       setActivities((arr) => arr.map((a) => (a.id === aid ? { ...a, done: true } : a)));
@@ -1006,6 +1155,108 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
     simAdvanceMinutes(m); // the session took m minutes — the sim clock lives it
     setMsg(`✓ ${a.name} (+${m}m)`); setTimeout(() => setMsg(""), 1200);
   };
+  // SIM-only week driver — plays the sandbox forward the way a human would, using
+  // the REAL shipped engine (pick = chapeau/v5, pickCounter = compteur/v6) on deep
+  // copies of the live state, so the numbers come from the engine that ships, not a
+  // re-implementation. budgetHours = session-minutes willingly spent per day; idle
+  // wall-clock time (when nothing's owed) passes but is NOT charged to the budget,
+  // so a meal-gated action can still surface later without shrinking the budget.
+  // The ONE thing a pure sim must model (no Claude in the loop to read a comment):
+  // a pipeline session advances the live piece one stage → progressed=true, and
+  // finished=true when it reaches the last stage — the same flags advanceViaClaude
+  // tags from a real comment, which the requireFinish/requireProgress gates read.
+  const simWeek = ({ engine = "hat", budgetHours = 3, days = 7, warmDays = 1.5 } = {}) => {
+    const acts = JSON.parse(JSON.stringify(activities));
+    const logArr = JSON.parse(JSON.stringify(log));
+    const savedDebug = _debugDate;
+    const useCounter = engine === "counter" || engine === "warm";
+    const picker = useCounter ? pickCounter : pick;
+    const pickerOpts = engine === "warm" ? { warmDays } : {};
+    const norm = (raw) => (useCounter ? raw && raw.result : raw);
+
+    const runBlock = (cur, startHour, endHour, budgetMin) => {
+      let now = new Date(cur); now.setHours(startHour, 0, 0, 0);
+      const windowEnd = new Date(cur); windowEnd.setHours(endHour, 0, 0, 0);
+      let spent = 0, guard = 0;
+      while (spent < budgetMin && now < windowEnd && guard++ < 400) {
+        _debugDate = new Date(now);
+        const pl = computePlace();
+        const p = norm(picker(acts, logArr, pl, pickerOpts));
+        if (!p) { now = new Date(now.getTime() + 30 * 60000); continue; } // nothing owed → idle 30min
+        const a = acts.find((x) => x.id === p.activity.id);
+        const action = p.action;
+        const m = a.dur || (action && (action.dur || action.min)) || 15;
+        const e = {
+          id: uid(), date: keyOf(now), ts: now.getTime(), type: "done",
+          activityId: a.id, actionId: action ? action.id : (a.actions[0] ? a.actions[0].id : null),
+          actionText: action ? action.text : (a.actions[0] ? a.actions[0].text : a.name),
+          min: m, sec: m * 60, domain: a.domain, note: "",
+          ...(action && action.itemId ? { itemId: action.itemId } : {}),
+        };
+        if (a.kind === "pipeline") {
+          // completion cadence = how many sessions before this pipeline's gate fires,
+          // drawn fresh per completion inside a plausible band (Maxence's estimates,
+          // 08/07). This is the sim's STAND-IN for the post-session comment Claude
+          // reads in the real app — it is NOT an app parameter, it only lets a week
+          // that wasn't lived advance. Bands:
+          //   Erasure (requireFinish): 5–8 sessions → 1 finished poem
+          //   Piano   (requireProgress): 3–6 sessions → 1 réussite (a real step);
+          //           a piece graduates to repertoire after nb-stages réussites
+          //   Cover   (requireFinish): 3–5 sessions → 1 finished cover
+          //   Parfum  (requireFinish): 2–4 sessions → 1 stabilised formula
+          const BAND = { a_erasure: [5, 8], a_piano: [3, 6], a_cover: [3, 5], a_parfum_crea: [2, 4] };
+          const [lo, hi] = BAND[a.id] || [3, 5];
+          const draw = () => lo + Math.floor(Math.random() * (hi - lo + 1));
+          if (a._thresh == null) a._thresh = draw();
+          a._since = (a._since || 0) + 1;
+          if (a._since >= a._thresh) {              // a completion fires this session
+            a._since = 0; a._thresh = draw();
+            if (a.requireProgress) {                // Piano: a réussite = one real step
+              e.progressed = true;
+              const last = (a.stages || []).length - 1;
+              let it = (a.items || []).find((q) => typeof q.stage === "number" && q.stage < last);
+              if (!it) { it = { id: uid(), text: "pièce " + ((a.items || []).filter((q) => typeof q.stage === "number").length + 1), stage: 0 }; a.items.push(it); }
+              it.stage += 1;
+              if (it.stage >= last && a.graduatesTo) {   // mastered → feeds the repertoire pool
+                const tgt = acts.find((x) => x.id === a.graduatesTo);
+                if (tgt) tgt.items.push({ id: uid(), text: "pièce maîtrisée", status: "doing" });
+              }
+            } else {                                // Erasure/Cover/Parfum: whole artifact done
+              e.finished = true;
+            }
+          }
+          // non-completion sessions carry no progressed/finished flag → the gate
+          // stays unsatisfied, so the pipeline keeps resurfacing until the next
+          // completion (the "grappe autant que nécessaire tant que pas fini").
+        }
+        logArr.push(e);
+        spent += m;
+        now = new Date(now.getTime() + m * 60000);
+      }
+      return spent;
+    };
+
+    let day = _debugDate ? new Date(_debugDate) : new Date();
+    day.setHours(0, 0, 0, 0);
+    for (let d = 0; d < days; d++) {
+      const cur = new Date(day); cur.setDate(cur.getDate() + d);
+      const budgetMin = Math.round(budgetHours * 60);
+      const workEve = isWorkShift(new Date(cur.getFullYear(), cur.getMonth(), cur.getDate(), 21, 0, 0));
+      if (workEve) {
+        // work night: daytime is home (8h–20h, place=home), then the 20h shift is
+        // work. ~1h at home in the day (tapis etc.), the rest during the shift.
+        const homeMin = Math.min(budgetMin, 60);
+        runBlock(cur, 11, 20, homeMin);                    // daytime home, spans lunch
+        runBlock(cur, 20, 24, budgetMin - homeMin);        // shift downtime, place=work
+      } else {
+        runBlock(cur, 10, 23, budgetMin);                  // free day: one home block spanning meals
+      }
+    }
+    _debugDate = savedDebug; setClock((c) => c + 1);
+    return { app: "throughline", version: 4, engine, budgetHours, days,
+      exportedAt: new Date().toISOString(), activities: acts, log: logArr };
+  };
+
   const simReseed = async () => {
     try {
       const r = await fetch("throughline-catalogue.json", { cache: "no-store" });
@@ -1058,9 +1309,9 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
   useEffect(() => {
     if (!SIM) return;
     window.__tlx = {
-      stage, tab, current, activities, log, holdMs, holdDate, place,
-      begin, finish, tapAction, submitComment, start, resetFlow,
-      setManualMin, setComment, setTab, applyDebugTime,
+      stage, tab, current, activities, log, holdMs, holdDate, place, engine,
+      begin, finish, tapAction, submitComment, start, resetFlow, setEngine,
+      setManualMin, setComment, setTab, applyDebugTime, simWeek, simReseed,
       debugNow: () => (_debugDate || new Date()).toString(),
     };
   });
@@ -1086,8 +1337,14 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
         {/* sandbox banner — makes it impossible to confuse the clone with the real app */}
         {SIM && (
           <div className="mono" style={{ textAlign: "center", fontSize: 9.5, letterSpacing: ".14em", textTransform: "uppercase",
-            color: "#0a0a0b", background: "#b09277", padding: "5px 10px", margin: "-8px -20px 14px", }}>
+            color: C.bg, background: C.bone, padding: "5px 10px", margin: "-8px -20px 14px", }}>
             bac à sable · données de test isolées · {_debugDate ? fmtLong(todayKey()) + " · " + fmtHM(_debugDate) + " · " + computePlace() : "temps réel"}
+            <div style={{ marginTop: 4 }}>
+              moteur :{" "}
+              <span onClick={() => setEngine("hat")} style={{ cursor: "pointer", textDecoration: engine === "hat" ? "underline" : "none", fontWeight: engine === "hat" ? 700 : 400 }}>chapeau (v5)</span>
+              {" / "}
+              <span onClick={() => setEngine("warm")} style={{ cursor: "pointer", textDecoration: engine === "warm" ? "underline" : "none", fontWeight: engine === "warm" ? 700 : 400 }}>chantier chaud (v8)</span>
+            </div>
           </div>
         )}
 
@@ -1314,6 +1571,35 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
                   ))}
                 </>
               )}
+
+              {/* --- v8 chantier-chaud comparator — same data, touch-reset, argmax
+                  instead of lottery, live chantiers on a warm (fast) interval. Read-only:
+                  doesn't affect `done`, doesn't log anything, just shows what the engine
+                  would propose right now. */}
+              {(() => {
+                const counterRows = buildCounterRows(activities, log, place, false, WARM_DAYS)
+                  .slice().sort((x, y) => y.counter - x.counter).slice(0, 8);
+                return (
+                  <>
+                    <div className="lab" style={{ marginTop: 30, marginBottom: 4, color: C.bone }}>chantier chaud (v8, comparatif) — top 8</div>
+                    <div className="mono" style={{ fontSize: 9.5, color: C.faint, marginBottom: 10 }}>
+                      recule quand touché · monte quand ignoré · chantier en cours = revient vite
+                    </div>
+                    {counterRows.map((r, i) => {
+                      const label = r.action ? r.activity.name + " — " + r.action.text : r.activity.name;
+                      return (
+                        <div key={r.activity.id + (r.action ? r.action.id : "") + i}
+                          style={{ display: "flex", alignItems: "center", gap: 10, padding: "5px 0", opacity: i === 0 ? 1 : 0.65 }}>
+                          <span className="mono" style={{ fontSize: 9, color: C.faint, width: 14, flex: "none" }}>{i + 1}</span>
+                          <span className="dot" style={{ background: dColor(r.activity.domain), flex: "none" }} />
+                          <span style={{ flex: 1, fontSize: 12.5, color: i === 0 ? C.text : C.mut }}>{label}</span>
+                          <span className="mono" style={{ fontSize: 10, color: C.faint }}>{r.counter.toFixed(2)}</span>
+                        </div>
+                      );
+                    })}
+                  </>
+                );
+              })()}
             </div>
           );
         })()}
