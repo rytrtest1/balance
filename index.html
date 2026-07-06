@@ -489,12 +489,35 @@ function buildCounterRows(activities, log, place, relax = false, warmDays = 0) {
   }
   return rows;
 }
-// deterministic argmax — always the highest counter, no jitter, no lottery.
+// deterministic argmax — highest counter wins. Same anchor/deadline guarantees as
+// the chapeau's pick(), ported to argmax: daily anchors (tapis…) are forced once
+// ~2h of the day is in, and below that they + the meal-prep deadlines BOOST the
+// counter (× multiplier) so they climb into winning range as their moment nears.
 function pickCounter(activities, log, place, options = {}) {
   const { avoidId = null, relax = false, warmDays = 0 } = options;
   const rows = buildCounterRows(activities, log, place, relax, warmDays).filter((r) => r.activity.id !== avoidId);
   if (!rows.length) return null;
-  const drawn = rows.reduce((best, r) => (r.counter > best.counter ? r : best), rows[0]);
+  const now = realNow();
+  // the counter engine has no "done this period" filter (everything's always in the
+  // running), so an anchor must be excluded once done today — else the guarantee
+  // would re-force it every draw after 2h and it would monopolise the evening.
+  const owedAnchor = (r) => completionsInPeriod(log, r.activity.id, r.action ? r.action.id : null, r.period || "day") < (r.target || 1);
+  const isAnchorDay = (r) => (r.activity.anchor || (r.action && r.action.anchor)) && (r.action ? r.action.period || r.activity.period : r.activity.period) === "day" && owedAnchor(r);
+  const minutesToday = log.filter((e) => e.date >= todayKey() && isDone(e)).reduce((s, e) => s + (e.min || 0), 0);
+  const anchorMult = anchorTicketMultiplier(minutesToday);
+  const anchorsDue = rows.filter(isAnchorDay);
+  let drawn;
+  if (anchorMult === Infinity && anchorsDue.length) {
+    drawn = anchorsDue.reduce((best, r) => (r.counter > best.counter ? r : best), anchorsDue[0]); // guaranteed once ~2h is in
+  } else {
+    const boost = (r) => {
+      if (isAnchorDay(r)) return anchorMult;
+      if (r.action && r.action.id === "x_mp_focaccia") return deadlineTicketMultiplier(now, nextWednesday16(now), 48);
+      if (r.action && r.action.id === "x_mp_garniture") { const fd = focacciaDoneDateThisWeek(log); return fd ? deadlineTicketMultiplier(now, garnitureDeadline(fd), 24) : 1; }
+      return 1;
+    };
+    drawn = rows.reduce((best, r) => (r.counter * boost(r) > best.counter * boost(best) ? r : best), rows[0]);
+  }
   const a = drawn.activity;
   let action = drawn.action
     ? drawn.action
