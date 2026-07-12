@@ -53,7 +53,7 @@ const realNow = () => _debugDate ? new Date(_debugDate) : new Date();
 // the "day" for logging/caps rolls over at 9am, not midnight — Maxence is often
 // still awake past midnight and always asleep by 9am, so a midnight cutoff would
 // split one waking stretch across two calendar days. Only affects date KEYS
-// (todayKey/daysAgoKey/weekStartKey); wall-clock gates that care about the actual
+// (todayKey/daysAgoKey); wall-clock gates that care about the actual
 // hour (meal times, work-shift boundaries) still read realNow() directly. Decided 10/07.
 const DAY_PIVOT_HOUR = 9;
 const logicalNow = (d = realNow()) => { const x = new Date(d); x.setHours(x.getHours() - DAY_PIVOT_HOUR); return x; };
@@ -61,10 +61,6 @@ const todayKey = () => keyOf(logicalNow());
 const stampKey = () => { const d = new Date(); return `${keyOf(d)}-${pad(d.getHours())}${pad(d.getMinutes())}`; };
 const fromKey = (s) => new Date(s + "T00:00:00");
 const daysAgoKey = (n) => { const d = logicalNow(); d.setDate(d.getDate() - n); return keyOf(d); };
-const weekStartKey = (d = realNow()) => {
-  const x = logicalNow(d); const dow = (x.getDay() + 6) % 7;
-  x.setDate(x.getDate() - dow); x.setHours(0, 0, 0, 0); return keyOf(x);
-};
 const daysBetween = (a, b) => Math.round((fromKey(b) - fromKey(a)) / 86400000);
 const fmtLong = (s) => fromKey(s).toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long" });
 const fmtHM = (d) => `${pad(d.getHours())}h${pad(d.getMinutes())}`;
@@ -150,7 +146,34 @@ const computePlace = (d = realNow()) => (isWorkShift(d) ? "work" : "home");
 // is a work shift starting tonight? (used to drop work-day-only activities like
 // tapis, which belongs to a free day, not the 1h home window before a shift)
 const isWorkDayToday = (d = realNow()) => isWorkShift(new Date(d.getFullYear(), d.getMonth(), d.getDate(), 21, 0, 0));
+// exactly 2 days before a work stretch STARTS (not every day within 2 days of one —
+// e.g. Wed sits 2 days from Fri too, but Fri is mid-stretch since Thu already started
+// it, so Wed must stay excluded). Used to gate meal-prep focaccia: found proposed on
+// a Sunday (Maxence 10/07: "seulement j-2 travail" — cohérent seulement 2 jours avant
+// le manque de temps réel du boulot, pas n'importe quand).
+const isTwoDaysBeforeWorkStretch = (d = realNow()) => {
+  const plus = (n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
+  return !isWorkDayToday(d) && !isWorkDayToday(plus(1)) && isWorkDayToday(plus(2));
+};
+// garniture's deadline day, one day after focaccia's — the day right before the
+// work stretch starts (Maxence 11/07-b).
+const isOneDayBeforeWorkStretch = (d = realNow()) => {
+  const plus = (n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
+  return !isWorkDayToday(d) && isWorkDayToday(plus(1));
+};
 const isDone = (e) => e.type !== "skip";
+// how many of the last 7 calendar days are free (not a work day) — a skipWorkDays
+// daily activity (Tapis) can never be drawn on a work day, so its true weekly
+// quota is target × free days, not target × 7 (used by domainBalance below).
+function freeDaysInRollingWeek() {
+  let n = 0;
+  const base = logicalNow();
+  for (let i = 0; i <= 6; i++) {
+    const d = new Date(base); d.setDate(d.getDate() - i);
+    if (!isWorkDayToday(d)) n++;
+  }
+  return n;
+}
 
 // --- period helpers ---
 const PERIOD = { day: 1, week: 7 };
@@ -162,25 +185,68 @@ function minutesInPeriod(log, actId, actionId, period) {
     .filter((e) => e.activityId === actId && (actionId == null || e.actionId === actionId) && e.date >= since && isDone(e))
     .reduce((s, e) => s + (e.min || 0), 0);
 }
-// completionsInPeriod is informational only now (the "liste" tab progress readout,
-// x/target this period) — it does NOT gate what pick() can draw. Kept as-is since
-// the display still wants to show where you stand.
+// completionsInPeriod feeds the "liste" tab readout (x/target this period) and,
+// for day-period rows, the hard day cap in buildLotteryRows below.
 function completionsInPeriod(log, actId, actionId, period, opts = {}) {
-  const since = period === "day" ? todayKey() : weekStartKey(realNow());
+  // week branch is rolling too (fixed 11/07): this fed the "x/target this period"
+  // readout with a calendar-Monday cliff while the actual draw engine below already
+  // used a rolling 7 days — the readout could show "0/1 this week" right after a
+  // Monday rollover for something the engine already correctly counted as satisfied
+  // (done last Thursday), a real display/engine disagreement, not just cosmetic.
+  const since = period === "day" ? todayKey() : daysAgoKey(6);
   return log.filter(
     (e) => e.activityId === actId && (actionId == null || e.actionId === actionId) && e.date >= since && isDone(e)
       && (!opts.requireFinish || e.finished)
       && (!opts.requireProgress || e.progressed)
   ).length;
 }
-// rolling 7-day completions, for the week-period draw cap below — deliberately NOT
-// weekStartKey (that's a calendar-Monday cliff, the exact "reset hebdo" shape tried
-// and dropped three times this summer for the creative pipelines). A rolling window
+// rolling 7-day completions, for the week-period draw cap below — deliberately not
+// a calendar-Monday cliff (the exact "reset hebdo" shape tried and dropped three
+// times this summer for the creative pipelines). No calendar-week counting is left
+// anywhere in the app (weekStartKey itself removed 11/07 — the two remaining
+// calendar-week readouts, "liste" progress and the dashboard's "this week" panel,
+// were disagreeing with this engine cap, e.g. showing "0/1 this week" for something
+// already satisfied per the rolling window). A rolling window
 // has no reset instant: the cap loosens by one day at a time as old sessions age out,
 // never a verdict moment (decided 10/07).
 function completionsInRollingWeek(log, actId, actionId) {
   const since = daysAgoKey(6);
   return log.filter((e) => e.activityId === actId && (actionId == null || e.actionId === actionId) && e.date >= since && isDone(e)).length;
+}
+
+// domain balance — how unevenly the rolling week's satisfaction (done/target,
+// capped at 1 so over-performing one domain buys no credit elsewhere) is spread
+// across domains. 0 = every active domain roughly on pace, 1 = one domain fully
+// idle while another is fully satisfied. A week of total silence yields 0 for
+// every domain equally, so it stays flat rather than reading as a verdict on
+// absence (decided 11/07, see [[throughline-blocker-juste-milieu]]).
+function domainBalance(activities, log) {
+  const byDomain = {};
+  const freeDays = freeDaysInRollingWeek();
+  const toWeekly = (target, period, skipWorkDays) => {
+    if (period !== "week" && skipWorkDays) return target * freeDays;
+    return period === "week" ? target : target * 7;
+  };
+  activities.forEach((a) => {
+    const acts = a.actions || [];
+    const perActionTargets = acts.some((x) => x.target);
+    const d = byDomain[a.domain] || (byDomain[a.domain] = { target: 0, done: 0 });
+    if (perActionTargets) {
+      acts.forEach((action) => {
+        if (!action.target) return;
+        d.target += toWeekly(action.target, action.period || a.period || "week", a.skipWorkDays);
+        d.done += completionsInRollingWeek(log, a.id, action.id);
+      });
+    } else if (a.target && a.period) {
+      d.target += toWeekly(a.target, a.period, a.skipWorkDays);
+      d.done += completionsInRollingWeek(log, a.id, null);
+    }
+  });
+  const ratios = Object.values(byDomain)
+    .filter((d) => d.target > 0)
+    .map((d) => Math.min(1, d.done / d.target));
+  if (ratios.length < 2) return 0;
+  return Math.max(...ratios) - Math.min(...ratios);
 }
 
 // place filters — v4 adds where:"work" (film, work-only)
@@ -193,15 +259,22 @@ function placeOkW(where, place) {
 function placeOk(a, place) { return placeOkW(a.where, place); }
 
 // --- pipeline picker ---
-// One active piece at a time (decided 04/07): if a piece is live (not yet at
-// the last stage), the funnel always serves the next step on THAT piece —
-// deterministic, no lottery. A fresh piece only starts once none is live.
+// One active piece at a time (decided 04/07): if a piece is live, the funnel always
+// serves the next step on THAT piece — deterministic, no lottery. A fresh piece only
+// starts once none is live. Fixed 11/07 (Maxence): the LAST stage is itself a session
+// to actually do and finish, not an automatic terminal marker — "stage === last"
+// means the piece is currently being mastered, still live; it only graduates once a
+// session AT that last stage reports it done (see advanceViaClaude's ns > last).
+// Before this fix, reaching the last stage's index instantly counted as "done", so
+// the funnel jumped straight to "choisir nouvelle pièce" the very next draw without
+// the mastery/final-stage session ever actually being served (a_cover "rosalia
+// magnolia" case, 14/07).
 function pipelineStep(a) {
   const stages = a.stages || [];
   if (!stages.length) return null;
   const last = stages.length - 1;
   const label = (i) => (stages[i] ? stages[i].text : "—");
-  const live = (a.items || []).find((it) => typeof it.stage === "number" && it.stage < last);
+  const live = (a.items || []).find((it) => typeof it.stage === "number" && it.stage <= last);
   if (!live) return { id: uid(), text: `${label(0)} — nouvelle pièce`, min: 15, pieceId: null, pieceStage: 0, fresh: true };
   return { id: uid(), text: `${label(live.stage)} — « ${live.text} »`, min: 15, pieceId: live.id, pieceStage: live.stage, fresh: false };
 }
@@ -227,13 +300,22 @@ function itemStep(a, log) {
   return pickItemLRU(a, log, a.actions[0] || { id: uid(), text: "—", min: 15 });
 }
 
-// --- vaisselle: derived straight from the log (cooked − washed this week), not
+// --- vaisselle: derived straight from the log (cooked − washed, whole history), not
 // kept in a separate piece of state that resets to 0 on every reload. A completed
 // meal-prep/cuisiner session queues a dish session; a completed vaisselle clears one.
+// Fixed 10/07: was clipped to weekStartKey (this calendar week only), which could
+// silently drop a cook logged just before a Monday boundary (its dish never counted
+// once the week rolled over) — chronological cooked−washed pairing has to run over
+// the whole log, not just "present this week", or the two directions of the
+// mismatch (missed debt vs. stale repropose) both stay possible.
+// No freshness/staleness window here (tried one 11/07, Maxence rejected it as
+// overcomplicated): "0 vaisselle à proposer si pas de cuisine, 1 vaisselle à
+// proposer si cuisine, et une fois faite 0" — plain cooked − washed, nothing else.
+// The earlier "vaisselle sans cuisine" confusion traced back to a 2-month sim
+// export and a stray non-sandbox screenshot, not this function.
 function pendingVaisselleFrom(log) {
-  const ws = weekStartKey(realNow());
-  const cooked = log.filter((e) => (e.activityId === "a_mealprep" || e.activityId === "a_cuisiner") && e.date >= ws && isDone(e)).length;
-  const washed = log.filter((e) => e.activityId === "a_vaisselle" && e.date >= ws && isDone(e)).length;
+  const cooked = log.filter((e) => (e.activityId === "a_mealprep" || e.activityId === "a_cuisiner") && isDone(e)).length;
+  const washed = log.filter((e) => e.activityId === "a_vaisselle" && isDone(e)).length;
   return Math.max(0, cooked - washed);
 }
 
@@ -243,45 +325,69 @@ function isMealTime(now) {
   return (h >= 11.5 && h < 13.5) || (h >= 18 && h < 20.5);
 }
 
-// --- meal prep sequencing: garniture only surfaces once focaccia is done this week ---
-function focacciaDoneDateThisWeek(log) {
-  const ws = weekStartKey(realNow());
-  let d = null;
-  for (const e of log) if (e.activityId === "a_mealprep" && e.actionId === "x_mp_focaccia" && e.date >= ws && isDone(e) && (!d || e.date > d)) d = e.date;
-  return d;
-}
-
-// --- lessive: plier+ranger only surfaces at least 24h (real elapsed time, not
-// calendar day) after the last wash, once it's had time to dry ---
-const LESSIVE_WASH_ACTION = "x_li_wash";
-const LESSIVE_DRY_MS = 24 * 3600000;
-function lastLessiveWashTs(log) {
+// --- meal prep sequencing: same toggle pattern as vaisselle (Maxence 11/07, asked
+// explicitly to make both pairs work identically) — a validated focaccia is owed
+// one garniture; once that garniture is validated, none is owed again until the
+// next focaccia. Debt-counted like pendingVaisselleFrom, no staleness ceiling (an
+// earlier 48h-expiry attempt was overcomplicating exactly what he'd just rejected
+// for vaisselle — dropped). The one thing that stays separate: dough needs a real
+// 24h to rest (Maxence 10/07), so even with a garniture owed, it isn't proposed
+// until that minimum has passed — a floor, not a window.
+const FOCACCIA_REST_MS = 24 * 3600000;
+// hour-of-day deadline (Maxence 11/07-b, replacing an earlier click-count
+// version): focaccia is only ever eligible on its one J-2 day, garniture on the
+// J-1 day right after — miss either day and the window doesn't reopen for a
+// whole work-stretch cycle (focaccia) or just goes back to being an ordinary
+// undated debt (garniture). A click-count guarantee meant a slow-click day could
+// never reach the threshold at all; a wall-clock deadline holds regardless of
+// how much the app got used that day, and matches the shape a future todo
+// "due by X" would need. Both ramp up in pickAging's weight() as this hour
+// approaches, forced outright at/after it on their respective deadline day.
+const FOCACCIA_GARNITURE_DEADLINE_HOUR = 20;
+function lastFocacciaTs(log) {
   let ts = null;
-  for (const e of log) if (e.activityId === "a_linge" && e.actionId === LESSIVE_WASH_ACTION && isDone(e) && (!ts || e.ts > ts)) ts = e.ts;
+  for (const e of log) if (e.activityId === "a_mealprep" && e.actionId === "x_mp_focaccia" && isDone(e) && (!ts || e.ts > ts)) ts = e.ts;
   return ts;
+}
+function pendingGarnitureFrom(log) {
+  const focaccia = log.filter((e) => e.activityId === "a_mealprep" && e.actionId === "x_mp_focaccia" && isDone(e)).length;
+  const garniture = log.filter((e) => e.activityId === "a_mealprep" && e.actionId === "x_mp_garniture" && isDone(e)).length;
+  return Math.max(0, focaccia - garniture);
+}
+// which cook created the OLDEST still-open dish debt (Maxence 11/07: "l'app
+// propose peu de temps après l'action qui ramène à 0" — eligible ≠ prioritized;
+// pickAging's weight() ages a row off when THAT ROW was last done, so a vaisselle
+// done yesterday for an earlier debt would still read as "just done" and get
+// starved even though a brand-new cook just re-opened the debt. This timestamp
+// lets weight() age off the triggering cook instead — see its use in pickAging).
+function oldestUnresolvedCookTs(log) {
+  const cooked = log.filter((e) => (e.activityId === "a_mealprep" || e.activityId === "a_cuisiner") && isDone(e)).sort((x, y) => x.ts - y.ts);
+  const washed = log.filter((e) => e.activityId === "a_vaisselle" && isDone(e)).length;
+  return cooked[washed] ? cooked[washed].ts : null;
 }
 
 // --- build the draw pool: every eligible action right now, weighted by its
 // rate (target ÷ period-in-days), filtered by place plus the same hand-wired
 // correctness gates as before (vaisselle needs a pending dish, garniture needs
-// focaccia first, cuisiner only at meal times, plier needs a dry wash). DAY-period
-// rows get one exception: a daily target of 1/day has a rate as high as a 5/week
-// chantier's, so without a limit the ~6 daily items structurally eat ~46% of every
-// day's draws AND can duplicate (drawn twice same day) while a chantier waits —
-// pure waste, not the accepted variance. So once a day-period row hits its target
-// for TODAY it steps out of the pool for the rest of the day, freeing its share to
-// everything else, and reopens on its own at midnight (no calendar wall, no
-// carry-over, no dry week — worst case it just closes early on one day).
-// WEEK-period rows get the same idea (added 10/07, closes the gap that let
-// always-eligible rows like Erasure blow past their target — 5/week drawing 13/week
-// in testing, because the lottery has no per-row ceiling): once its completions over
-// the rolling last 7 days reach its target it steps out, freeing its share to
-// everything else. Rolling, not weekStartKey — no Monday cliff, no reset hebdo,
-// nothing that resembles the finish/progress verdicts already retired from these
-// same pipelines. The cap just loosens a day at a time as old sessions age out.
-// relax=true skips every gate (correctness gates + both caps) — used once a normal
-// draw comes back empty because every row's gate happened to be closed.
-function buildLotteryRows(activities, log, place, relax = false) {
+// focaccia first, cuisiner only at meal times). Those correctness gates are
+// physical/causal constraints, not pacing — always enforced, no bypass (fixed
+// 10/07-j: relax used to drop them too, which let e.g. garniture fire with zero
+// prior focaccia ever logged; caught by Maxence eyeballing a Monday-evening
+// garniture in the day-by-day widget). DAY/WEEK quota is the only thing
+// `skipQuota` ever bypasses — tried making it fully continuous (10/07-b, no
+// exclusion ever, just damped weight) and measured it WORSE in realistic
+// conditions: without a hard floor, a day-period row (rate=1/day, the highest
+// in the pool) can still win a second draw the same day purely by luck whenever
+// the rest of the pool happens to roll low, even while untouched weekly rows
+// sit right there — simWeek at 15 draws/day over a week gave Livre 14/7 (x2)
+// continuous vs 10/7 (x1.4) with the hard gate. So: hard gate for the normal
+// draw (a day-period row simply isn't offered again today once it's had its one
+// turn, reopens at midnight; a week-period row the same over the rolling 7 days
+// — no calendar cliff, loosens a day at a time) — but the skipQuota fallback
+// below (only reached once the WHOLE pool is simultaneously gated shut) damps
+// by `over` instead of using raw rate, so it doesn't snowball (measured 10/07:
+// a day anchor hit 8x its target in one long saturated session).
+function buildLotteryRows(activities, log, place, skipQuota = false) {
   const rows = [];
   for (const a of activities) {
     if (a.kind === "task" && a.done) continue;
@@ -289,7 +395,9 @@ function buildLotteryRows(activities, log, place, relax = false) {
     if (a.skipWorkDays && isWorkDayToday()) continue; // e.g. tapis: a free-day thing, never a work day
     if (a.id === "a_vaisselle") {
       if (!placeOk(a, place)) continue;
-      if (relax || pendingVaisselleFrom(log) > 0) rows.push({ activity: a, action: a.actions[0], period: "week", target: 1, rate: 1 / 7 });
+      // physical constraint, not pacing — never relaxed (fixed 10/07-j alongside
+      // the meal-prep/cuisiner gates below): can't wash dishes that don't exist.
+      if (pendingVaisselleFrom(log) > 0) rows.push({ activity: a, action: a.actions[0], period: "week", target: 1, rate: 1 / 7, over: 0, sinceTs: oldestUnresolvedCookTs(log) });
       continue;
     }
     const acts = a.actions || [];
@@ -300,47 +408,132 @@ function buildLotteryRows(activities, log, place, relax = false) {
         // an action that rotates through items[] has nothing to propose while that
         // list is empty (e.g. Répertoire before any piece has graduated from Piano)
         if (/\(LRU\)/.test(action.text || "") && !hasDoingItems(a)) continue;
-        if (!relax) {
-          if (action.id === "x_cu_faire" && !isMealTime(realNow())) continue;
-          if (action.id === "x_mp_garniture" && !focacciaDoneDateThisWeek(log)) continue;
-          if (action.id === "x_li_plier") {
-            const wts = lastLessiveWashTs(log);
-            if (!wts || realNow().getTime() - wts < LESSIVE_DRY_MS) continue;
-          }
+        // These are physical/causal constraints (you can't cook outside meal
+        // prep time, can't fill a garniture before the dough existed and rested),
+        // not pacing preferences — so unlike the day/week quota below, they are
+        // NEVER dropped, not even by relax. Fixed 10/07-j: relax used to drop
+        // these too, which let garniture fire with zero prior focaccia ever
+        // logged, or focaccia fire on a day that wasn't j-2 before a work
+        // stretch (caught by Maxence eyeballing a Monday-evening garniture in
+        // the widget). relax now only ever bypasses the quota cap.
+        if (action.id === "x_cu_faire" && !isMealTime(realNow())) continue;
+        if (action.id === "x_mp_focaccia" && !isTwoDaysBeforeWorkStretch()) continue;
+        if (action.id === "x_mp_garniture") {
+          // debt-driven like vaisselle, not target/quota-driven — pushed straight in
+          // and skips the completions/rolling-week gate below entirely. Needed
+          // (Maxence 11/07): a garniture from an earlier week can still sit inside
+          // the current rolling-7-day window and falsely read as "already at
+          // target", blocking a garniture a brand-new focaccia just re-owed.
+          if (pendingGarnitureFrom(log) <= 0) continue;
+          const fts = lastFocacciaTs(log);
+          if (!fts || realNow().getTime() - fts < FOCACCIA_REST_MS) continue;
+          rows.push({ activity: a, action, period: "week", target: 1, rate: 1 / 7, over: 0, sinceTs: fts });
+          continue;
         }
         const period = action.period || a.period || "week";
         const target = action.target || 1;
-        if (!relax && period === "day" && completionsInPeriod(log, a.id, action.id, period) >= target) continue;
-        if (!relax && period === "week" && completionsInRollingWeek(log, a.id, action.id) >= target) continue;
-        rows.push({ activity: a, action, period, target, rate: target / periodDays(period) });
+        const completions = period === "day" ? completionsInPeriod(log, a.id, action.id, period) : completionsInRollingWeek(log, a.id, action.id);
+        if (!skipQuota && completions >= target) continue;
+        // +1 fixed 11/07-b: a row exactly at its cap (completions === target) used to
+        // get over=0 — zero damping on its FIRST relax draw past quota, exactly as
+        // competitive as a row not yet due. Confirmed on the real hand-run export
+        // (throughline-2026-07-11-0247.json): every "sorti deux fois" complaint
+        // (album, film) fired via relax with completions already === target at draw
+        // time, i.e. the undamped free pass. Shifting by 1 makes the very first
+        // excess draw already cost the (1+over)² penalty in pickAging's weight().
+        rows.push({ activity: a, action, period, target, rate: target / periodDays(period), over: Math.max(0, completions - target + 1) });
       }
     } else {
       if (!placeOk(a, place)) continue;
       if (/\(LRU\)/.test((acts[0] || {}).text || "") && !hasDoingItems(a)) continue;
       const period = a.period || "week";
       const target = a.target || a.perWeek || 1;
-      if (!relax && period === "day" && completionsInPeriod(log, a.id, null, period) >= target) continue;
-      if (!relax && period === "week" && completionsInRollingWeek(log, a.id, null) >= target) continue;
-      rows.push({ activity: a, action: null, period, target, rate: target / periodDays(period) });
+      const completions = period === "day" ? completionsInPeriod(log, a.id, null, period) : completionsInRollingWeek(log, a.id, null);
+      if (!skipQuota && completions >= target) continue;
+      // +1 fixed 11/07-b, see the perActionTargets branch above for why.
+      rows.push({ activity: a, action: null, period, target, rate: target / periodDays(period), over: Math.max(0, completions - target + 1) });
     }
   }
   return rows;
 }
 
-// --- pick: one weighted random draw over the pool that's currently open (rows past
-// their day/rolling-week cap are excluded upstream by buildLotteryRows — no other
-// priority boosts). The target ratio IS the draw probability among open rows; the
-// action-pickers (pipeline funnel, items LRU) only shape WHAT a chosen activity
-// proposes. Variance below the cap is expected and accepted — what converges is
-// the average over weeks, not any single day.
-function pick(activities, log, place, options = {}) {
-  const { avoidId = null, relax = false } = options;
-  const rows = buildLotteryRows(activities, log, place, relax).filter((r) => r.activity.id !== avoidId);
-  if (!rows.length) return null;
-  const total = rows.reduce((s, r) => s + r.rate, 0);
-  let roll = Math.random() * total;
-  let drawn = rows[rows.length - 1];
-  for (const r of rows) { roll -= r.rate; if (roll <= 0) { drawn = r; break; } }
+// --- pickAging (promoted 10/07-i to the sole engine, prod and sandbox alike —
+// the plain-rate lottery `pick()` it was benchmarked against is retired; every
+// finding above about elapsed-days weighting, the relax/`over` damping, and the
+// same-day cap applies here unconditionally now, not just inside SIM):
+// classic anti-starvation scheduling. priority(row) = real elapsed days since
+// always serve the single highest-priority row among rows still UNDER their day/
+// rolling-week cap — same hard gate as pick() (buildLotteryRows(..., false)),
+// not bypassed. Corrected 10/07: an earlier version bypassed the cap on the
+// theory that aging's own priority already handles "served enough" — wrong,
+// measured it let Erasure run to 167% of its target because nothing ever
+// stopped it competing once past target. Same relax fallback as pick(): only
+// once the capped pool is empty does a retry skip the cap (skipQuota) — the
+// correctness gates (meal time, focaccia sequencing) stay on regardless, see
+// buildLotteryRows above (fixed 10/07-j, they used to get dropped too).
+// Corrected again 10/07-c: traced actual relax usage at the exact demand-matching
+// rate (83/sem = 11.857/j) — the capped pool runs dry on ~1/3 of ALL draws (110/332
+// over a 28-day run), not as a rare edge case, because 12 clicks/day routinely
+// exceeds how many rows are simultaneously due-and-uncapped on a given day. Once in
+// relax, raw elapsed×rate let Erasure win 14 of its 17 serves AFTER already hitting
+// its 3/week cap (measured 133-142% of target) — undamped relax has no memory that
+// a row already got its turn. Now damped by `over` exactly like pick()'s relax
+// weight, so an already-capped row's priority shrinks quadratically with how far
+// past target it is instead of competing on raw elapsed time forever.
+// Depends on every log entry's `ts` tracking realNow() (the debug clock when one is
+// set), not raw Date.now() — found broken 10/07: finish()/quickLog()/simComplete()
+// all stamped ts with Date.now() (true wall-clock), so during a hand-run sandbox
+// test where _debugDate gets jumped days ahead of real time, elapsedDays here ended
+// up comparing simulated "now" against a REAL timestamp barely different across
+// entries (all logged within the same real ~40min tapping session) — collapsing
+// aging's whole ordering into noise from real tap order, not simulated overdue-ness.
+// That's what caused the pipeline streak Maxence caught twice (parfum_crea → cover →
+// piano, same order both times): all three share the same rate, so once their real
+// elapsedDays go essentially flat, ordering falls back to whichever was tapped
+// earliest in real time — deterministic, but not aging. Fixed at the three call
+// sites (ts: realNow().getTime()), harmless in prod where realNow() === Date.now().
+function lastRealTs(log, actId, actionId) {
+  let last = null;
+  for (const e of log) {
+    if (e.activityId !== actId) continue;
+    if (actionId != null && e.actionId !== actionId) continue;
+    if (!last || e.ts > last) last = e.ts;
+  }
+  return last;
+}
+// --- eligible-days-since (added 10/07-h, pickAging only): elapsedDays used to
+// count raw calendar days since last done, even through days a row was
+// structurally ineligible (wrong place / work day) — a home-only row racks up
+// "5 days overdue" across a work stretch it could never have been drawn on,
+// then dominates the next home day purely from that artificial backlog. Verified
+// 10/07: Tapis marche / Parfum-exploration showed elapsedDays=5 across a
+// 15→20/07 span, but 4 of those 5 days (16-19/07, all work days) excluded them
+// outright via where:"home" — the real backlog was 1 home-day gap, not 5. Now
+// only days the row could actually have been picked count toward its overdue
+// clock; "anywhere" rows (Noticing, Erasure) are unaffected — every day is
+// eligible for them already, so this only discounts place/work-gated rows.
+function isDayEligible(a, action, d) {
+  if (a.skipWorkDays && isWorkDayToday(d)) return false;
+  const where = (action && action.where) || a.where;
+  return placeOkW(where, isWorkDayToday(d) ? "work" : "home");
+}
+function eligibleDaysSince(a, action, lastTs, nowTs) {
+  const dayMs = 86400000;
+  let total = 0, cursor = lastTs, guard = 0;
+  while (cursor < nowTs && guard++ < 400) {
+    const d = new Date(cursor);
+    const dayEnd = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1).getTime();
+    const segEnd = Math.min(nowTs, dayEnd);
+    if (isDayEligible(a, action, d)) total += (segEnd - cursor) / dayMs;
+    cursor = segEnd;
+  }
+  return total;
+}
+// shared draw→action resolution (extracted 11/07 so the force paths below can
+// return through the exact same LRU-substitution step as the normal weighted
+// draw — garniture's action text carries "(LRU)" and needs pickItemLRU to fill
+// in which flavor, same as any other drawn row).
+function resolveDraw(drawn, log) {
   const a = drawn.activity;
   let action = drawn.action
     ? drawn.action
@@ -349,13 +542,139 @@ function pick(activities, log, place, options = {}) {
       : hasDoingItems(a)
         ? itemStep(a, log)
         : a.actions[Math.floor(Math.random() * a.actions.length)];
-  // a per-action target (cuisiner's "recette choisie", linge's "faire une lessive")
-  // means the generic items-LRU path above never runs — apply it explicitly here
-  // whenever that specific action is the "(LRU)" one.
   if (drawn.action && action && /\(LRU\)/.test(action.text || "") && hasDoingItems(a)) {
     action = pickItemLRU(a, log, action);
   }
   return action ? { activity: a, action } : null;
+}
+function pickAging(activities, log, place, options = {}) {
+  const { avoidId = null, relax = false } = options;
+  // vaisselle: force immediately after the cook that opened the debt (Maxence
+  // 11/07) — "ça évite qu'elle reste dans l'évier" waiting for the lottery to
+  // happen to draw it. Only fires when the very last thing logged is the cook
+  // itself, so it never turns into a standing override — one rejected forced
+  // proposal (avoidId) and it falls straight through to the normal draw below.
+  const lastLogged = log.length ? log.reduce((x, y) => (x.ts > y.ts ? x : y)) : null;
+  if (lastLogged && avoidId !== "a_vaisselle" &&
+      (lastLogged.activityId === "a_cuisiner" || lastLogged.activityId === "a_mealprep") &&
+      pendingVaisselleFrom(log) > 0) {
+    const va = activities.find((x) => x.id === "a_vaisselle");
+    if (va && placeOk(va, place)) return resolveDraw({ activity: va, action: va.actions[0] }, log);
+  }
+  let rows = buildLotteryRows(activities, log, place, relax).filter((r) => r.activity.id !== avoidId);
+  if (!rows.length) return null;
+  // focaccia/garniture: hour-of-day deadline guarantee (see
+  // FOCACCIA_GARNITURE_DEADLINE_HOUR's definition above buildLotteryRows) —
+  // checked on the fresh pool, before the no-repeat/day-cap filters below, so a
+  // same-activity collision (e.g. an earlier mealprep session today) can't
+  // accidentally swallow the guarantee. Ramp itself lives in weight() below;
+  // this is only the hard floor once the deadline hour has passed on the row's
+  // own deadline day (focaccia: J-2, garniture: J-1 — never on any other day).
+  const today = todayKey();
+  const now = realNow();
+  const hourNow = now.getHours() + now.getMinutes() / 60;
+  const focacciaDeadlineDay = isTwoDaysBeforeWorkStretch(now);
+  const garnitureDeadlineDay = isOneDayBeforeWorkStretch(now);
+  if (hourNow >= FOCACCIA_GARNITURE_DEADLINE_HOUR) {
+    const forced = rows.find((r) => r.action && (
+      (r.action.id === "x_mp_focaccia" && focacciaDeadlineDay) ||
+      (r.action.id === "x_mp_garniture" && garnitureDeadlineDay)
+    ));
+    if (forced) return resolveDraw({ activity: forced.activity, action: forced.action }, log);
+  }
+  // no-immediate-repeat (added 10/07-k): `avoidId` already existed but was only
+  // ever wired to the relax-retry (never re-propose what a rejected relax draw
+  // just offered), not the primary draw — so the SAME activity could legitimately
+  // win twice in a row on the primary path. Confirmed in a real 28-day run:
+  // Piano→Piano, Chant→Chant, Cover→Cover each fired back-to-back (~1h apart)
+  // inside a longer same-family streak Maxence spotted (10/07). Monte-Carlo
+  // re-simulating that exact night 400× showed the broader "several different
+  // same-rate creative activities in a row" pattern is NOT a bug — the pool
+  // genuinely narrows to ~7 rows past midnight (chores meal-time-gated, other
+  // domains already at quota), so a 7-long same-family streak happens ~14% of
+  // nights from honest variance alone, unaffected by this fix. But the exact
+  // back-to-back SAME-activity repeats within it were a real, avoidable
+  // artifact — same safety pattern as the day-cap below: only excluded if it
+  // doesn't empty the pool, never blocks a proposal outright.
+  const lastEntry = log.length ? log.reduce((a, b) => (a.ts > b.ts ? a : b)) : null;
+  if (lastEntry) {
+    const noRepeat = rows.filter((r) => r.activity.id !== lastEntry.activityId);
+    if (noRepeat.length) rows = noRepeat;
+  }
+  // soft same-day repeat cap (added 10/07-d): confirmed by stress-testing a real
+  // multi-day-absence-then-normal-day pattern that argmax with zero randomness can
+  // still pile a catch-up day onto 1-2 activities if their backlog stays largest
+  // draw after draw. Cap any one activity at 2 completions/day regardless of
+  // relax/cap state; only lifted if it would empty the whole pool (never block a
+  // proposal outright — same philosophy as the cap/relax fallback itself).
+  const countToday = {};
+  for (const e of log) { if (e.date === today && isDone(e)) countToday[e.activityId] = (countToday[e.activityId] || 0) + 1; }
+  const capped = rows.filter((r) => (countToday[r.activity.id] || 0) < 2);
+  if (capped.length) rows = capped;
+  // weighted random draw, not argmax (rewritten 10/07-g). Every patch tried on top
+  // of "always serve the single highest priority" — jitter, kind-adjacency damping —
+  // just relocated the predictability instead of removing it (Maxence: "je sais
+  // aussi que ce ne sera pas un pipeline après un pipeline... ça reste prévisible").
+  // Argmax is inherently a deterministic rule on top of a signal; no amount of
+  // noise layered on the INPUT changes that the OUTPUT is always "take the max".
+  // So: draw like pick() does (cumulative weighted roll, genuinely independent
+  // every time), but weight = elapsedDays × rate instead of pick()'s plain rate —
+  // overdue rows get proportionally MORE chances, never a guarantee, nothing
+  // "remembers" what the last draw was. Never-done rows get a flat weight in the
+  // same range as a legitimately very-overdue row (not the old 900-1000 stand-in),
+  // so untried activities are favored early without being absolute about it.
+  // short-term diversity damping (added 11/07-c): different from the jitter/kind-
+  // adjacency damping tried and rejected 10/07-g — that was cosmetic noise on top
+  // of an argmax rule, which never removes an argmax's predictability. This instead
+  // reweights the INPUT to the same genuine weighted-random draw, so it doesn't
+  // fight the thing that guarantees long-run convergence to target. Targets the
+  // exact pattern Maxence flagged (notice→livre→sudoku opening every day): those
+  // rows reset to elapsedDays≈1 every morning with nothing else to tell them apart,
+  // so without this they win the day's first few draws almost every day, in a
+  // recognizable way. `drawsAgo` counts by DRAW COUNT, not calendar days — a row
+  // drawn recently gets ramped-down weight for roughly a day's worth of draws
+  // (Maxence's real pace, ~10/day, see [[throughline-target-cadence]]), then back
+  // to full strength; a genuinely due row is nudged, never blocked (floor 0.15,
+  // same "never block a proposal outright" philosophy as the caps above). Does NOT
+  // fix a structurally small pool (e.g. only ~4 anywhere/work day-rows eligible
+  // during a multi-day work stretch) — that's a catalogue/placement question, not
+  // something a weight tweak can diversify further.
+  const RECENCY_WINDOW = 10;
+  const doneLog = log.filter(isDone);
+  const drawsAgo = (actId, actionId) => {
+    for (let i = doneLog.length - 1, n = 0; i >= 0; i--, n++) {
+      const e = doneLog[i];
+      if (e.activityId === actId && (actionId == null || e.actionId === actionId)) return n;
+    }
+    return Infinity;
+  };
+  const weight = (r) => {
+    // sinceTs (vaisselle/garniture): age off the triggering cook/focaccia, not this
+    // row's own last completion — otherwise a debt that reopens right after an
+    // unrelated recent completion reads as "just done" and gets starved instead of
+    // surfacing soon (Maxence 11/07).
+    const last = r.sinceTs != null ? r.sinceTs : lastRealTs(log, r.activity.id, r.action ? r.action.id : null);
+    const base = last == null ? 6 : (eligibleDaysSince(r.activity, r.action, last, now.getTime()) * r.rate) / ((1 + (r.over || 0)) ** 2);
+    const da = drawsAgo(r.activity.id, r.action ? r.action.id : null);
+    const recencyDamp = da >= RECENCY_WINDOW ? 1 : 0.15 + 0.85 * (da / RECENCY_WINDOW);
+    let w = base * recencyDamp;
+    // focaccia/garniture hour-of-day ramp (Maxence 11/07-b): doubles every 2h of
+    // the day, on their respective deadline day only, so their odds climb toward
+    // the hard FOCACCIA_GARNITURE_DEADLINE_HOUR guarantee above instead of
+    // staying flat until it fires.
+    if (r.action && r.action.id === "x_mp_focaccia" && focacciaDeadlineDay) {
+      w *= Math.pow(2, hourNow / 2);
+    }
+    if (r.action && r.action.id === "x_mp_garniture" && garnitureDeadlineDay) {
+      w *= Math.pow(2, hourNow / 2);
+    }
+    return w;
+  };
+  const total = rows.reduce((s, r) => s + weight(r), 0);
+  let roll = Math.random() * total;
+  let drawn = rows[rows.length - 1];
+  for (const r of rows) { roll -= weight(r); if (roll <= 0) { drawn = r; break; } }
+  return resolveDraw(drawn, log);
 }
 
 // ---------- sandbox mode (?sim=1) ----------
@@ -368,9 +687,9 @@ const SIM = typeof location !== "undefined" && new URLSearchParams(location.sear
 const NS = (k) => (SIM && k !== "tlx_apiKey" ? k.replace("tlx_", "tlx_sim_") : k);
 
 // buildHat = the whole draw pool laid open (for the sandbox "Liste" view). Same
-// rows pick() draws from (buildLotteryRows), plus `done` (informational — how
-// many completions logged this period) and `rate` (its actual draw weight) for
-// display. Neither field affects what pick() does with the pool.
+// rows pickAging() draws from (buildLotteryRows), plus `done` (informational —
+// how many completions logged this period) and `rate` (its actual draw weight)
+// for display. Neither field affects what pickAging() does with the pool.
 function buildHat(activities, log, place) {
   return buildLotteryRows(activities, log, place, false).map((r) => ({
     key: r.activity.id + (r.action ? ":" + r.action.id : ""),
@@ -410,7 +729,7 @@ async function claudeJSON(key, prompt, schema, maxTokens = 400) {
 // Reads the taste profile from activity.note + last 20 session notes, returns a
 // one-line string ("title — subtitle") to replace the generic action text.
 // When the activity also keeps a curated items[] library (e.g. Cuisiner's recipe
-// rotation), the deterministic LRU pick still runs first (in pick()) — this only
+// rotation), the deterministic LRU pick still runs first (in pickAging()) — this only
 // dresses that choice up, or occasionally proposes something outside it. The
 // library keeps driving the rotation; recommandeur doesn't replace it.
 async function generateReco(key, activity, action, log) {
@@ -485,13 +804,15 @@ const css = `
 .navarr:hover{color:${C.mut}}
 .breathe{animation:breathe 3.6s ease-in-out infinite}
 @keyframes breathe{0%,100%{opacity:.4}50%{opacity:.95}}
+.sway{animation:sway 5.2s ease-in-out infinite}
+@keyframes sway{0%,100%{transform:rotate(calc(-1 * var(--tilt-amp,0deg)))}50%{transform:rotate(var(--tilt-amp,0deg))}}
 .link{font-family:var(--mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:${C.faint};background:none;border:none;cursor:pointer;transition:color .2s}
 .link:hover{color:${C.mut}}
 textarea.in{resize:vertical}
 input[type=range].sl{-webkit-appearance:none;appearance:none;height:2px;background:${C.line};outline:none;width:100%;margin:0}
 input[type=range].sl::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:16px;height:16px;border-radius:50%;background:${C.bone};cursor:pointer}
 input[type=range].sl::-moz-range-thumb{width:16px;height:16px;border:none;border-radius:50%;background:${C.bone};cursor:pointer}
-@media (prefers-reduced-motion:reduce){.fade{animation:none;opacity:1;transform:none}.breathe{animation:none;opacity:.7}}
+@media (prefers-reduced-motion:reduce){.fade{animation:none;opacity:1;transform:none}.breathe{animation:none;opacity:.7}.sway{animation:none;transform:none}}
 `;
 
 function Throughline() {
@@ -507,8 +828,8 @@ function Throughline() {
   const [current, setCurrent] = useState(null);
   const [lastId, setLastId] = useState(null);
   const [showWhy, setShowWhy] = useState(false);
-  const [simRes, setSimRes] = useState(null); // SIM-only: last in-app simulation result (visible, re-runnable)
-  const [simCfg, setSimCfg] = useState({ jours: 7, tirages: 10 }); // editable sim conditions
+  const [simRes, setSimRes] = useState(null); // SIM-only: last batch-run result (real, committed — see runSimBatch)
+  const [simCfg, setSimCfg] = useState({ jours: 7, tirages: 10 }); // editable batch-run conditions
 
   // the live line. While "running", it fills from the CENTRE outward as real time
   // elapses — reaching the margins at the action's estimated minutes, then spilling
@@ -594,6 +915,42 @@ function Throughline() {
   const [generating, setGenerating] = useState(false);
   const [apiKey, setApiKey] = useState("");
   const [keyOpen, setKeyOpen] = useState(false);
+  const [logOpen, setLogOpen] = useState(false);
+  const [logText, setLogText] = useState("");
+  const [logBusy, setLogBusy] = useState(false);
+  // "tap to begin" — shown exactly once, on the very first launch ever, then
+  // never again (Maxence 11/07: the app is otherwise chrome-free at entry on
+  // purpose — this is the one-time exception, not a standing affordance).
+  const [showTapHint, setShowTapHint] = useState(false);
+  // the domain-balance swing (see domainBalance()) stays completely hidden —
+  // no tilt, no class, line looks exactly as if the feature didn't exist —
+  // until a shake reveals it; another shake hides it again. Decided 12/07:
+  // even a silent/near-flat line is still a standing element that's always
+  // "on"; shake-to-reveal keeps it at zero footprint until asked for, the
+  // same instinct that killed the progress tab and the nav arrows.
+  const [balanceVisible, setBalanceVisible] = useState(false);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !window.DeviceMotionEvent) return;
+    let lastMag = null, lastShakeTs = 0;
+    const SHAKE_DELTA = 18; // m/s^2 jump between readings
+    const COOLDOWN_MS = 1200; // one toggle per shake gesture, not per spike
+    const onMotion = (e) => {
+      const a = e.accelerationIncludingGravity || e.acceleration;
+      if (!a || a.x == null) return;
+      const mag = Math.sqrt((a.x || 0) ** 2 + (a.y || 0) ** 2 + (a.z || 0) ** 2);
+      if (lastMag != null) {
+        const now = Date.now();
+        if (Math.abs(mag - lastMag) > SHAKE_DELTA && now - lastShakeTs > COOLDOWN_MS) {
+          lastShakeTs = now;
+          setBalanceVisible((v) => !v);
+        }
+      }
+      lastMag = mag;
+    };
+    window.addEventListener("devicemotion", onMotion);
+    return () => window.removeEventListener("devicemotion", onMotion);
+  }, []);
 
   useEffect(() => {
     // Ask the browser to keep our data — without this, phones may evict
@@ -612,6 +969,11 @@ function Throughline() {
       if (SIM && a == null) {
         try { const r = await fetch("throughline-catalogue.json", { cache: "no-store" }); if (r.ok) { const c = await r.json(); if (Array.isArray(c.activities)) a = c.activities; } } catch {}
       }
+      // first launch ever (per namespace — prod and sandbox track this separately)
+      // → show the tap hint this one time, mark it seen immediately so no later
+      // launch shows it again, even if this session never reaches "entry".
+      const hintSeen = await store.get(NS("tlx_hintSeen"));
+      if (!hintSeen) { setShowTapHint(true); store.set(NS("tlx_hintSeen"), "1"); }
       if (!alive) return;
       setActivities(a ?? SEED);
       setLog(l ?? []);
@@ -657,11 +1019,11 @@ function Throughline() {
     // juste", no stopping-point verdict to hit at the wrong moment). The "empty"
     // stage below now only fires when there's truly nothing eligible for this place
     // even with every gate relaxed (e.g. an empty catalogue for that context).
-    let p = pick(actsUse, logUse, pl, { relax, avoidId });
-    // the relax redraw skips every cap/gate, so without this the very thing that just
-    // hit its target could come right back — avoid at least an immediate repeat
-    // (decided 10/07, doesn't apply to the normal non-relax draw: that variance is accepted).
-    if (!p && !relax) p = pick(actsUse, logUse, pl, { relax: true, avoidId: avoidId ?? lastId });
+    let p = pickAging(actsUse, logUse, pl, { relax, avoidId });
+    // relax skips the quota gate too, so without this the very thing that just hit
+    // its target could come right back immediately — avoid at least that repeat.
+    // Its weight is damped by `over` (see pickAging), so it doesn't snowball either.
+    if (!p && !relax) p = pickAging(actsUse, logUse, pl, { relax: true, avoidId: avoidId ?? lastId });
     setShowWhy(false);
     setRunning(false); setElapsedMs(0);
     if (!p) { setCurrent(null); setStage("empty"); }
@@ -681,7 +1043,16 @@ function Throughline() {
       }
     }
   };
-  const start = () => propose();
+  const start = () => {
+    setShowTapHint(false);
+    // iOS requires an explicit user-gesture permission grant before
+    // devicemotion fires at all — piggyback on the very first tap rather
+    // than adding a dedicated prompt/button (Android needs no such call).
+    if (typeof DeviceMotionEvent !== "undefined" && typeof DeviceMotionEvent.requestPermission === "function") {
+      DeviceMotionEvent.requestPermission().catch(() => {});
+    }
+    propose();
+  };
   // swap the instruction for another — no judgement, no log. There is no "refuse"
   // anymore: if a suggestion doesn't fit you ask for another, or you engage for a
   // few seconds. The minimum viable move is a sliver of the line, not a clean exit.
@@ -721,7 +1092,7 @@ ${ctx}
 Commentaire laissé après la session :
 « ${text} »
 
-Détermine où en est la pièce APRÈS cette session. new_stage = index (0 à ${last}) de l'étape courante : si une étape vient d'être finie, avance à la suivante, sinon garde l'étape. piece_name = nom court (existant, ou tiré du commentaire si fraîche). progressed = true si cette session a fait avancer concrètement la pièce (même sans changer d'étape — un chunk appris, une itération réelle), false si elle n'a rien fait gagner (rejoué sans progrès, session avortée, bloqué). note = une ligne qui distille ce qui a été fait.`;
+Détermine où en est la pièce APRÈS cette session. new_stage = index (0 à ${last}) de l'étape courante : si une étape vient d'être finie, avance à la suivante, sinon garde l'étape. Cas particulier : si la session avait lieu SUR la dernière étape (${last} : ${(stages[last] || {}).text || "?"}) et que le commentaire indique qu'elle est terminée/réussie, new_stage = ${last + 1} — la pièce sort du funnel, terminée. Ne mets ${last + 1} QUE dans ce cas précis (jamais pour sauter directement d'une étape antérieure à la fin sans passer par la dernière étape elle-même). piece_name = nom court (existant, ou tiré du commentaire si fraîche). progressed = true si cette session a fait avancer concrètement la pièce (même sans changer d'étape — un chunk appris, une itération réelle), false si elle n'a rien fait gagner (rejoué sans progrès, session avortée, bloqué). note = une ligne qui distille ce qui a été fait.`;
     setSyncing(true); setSyncMsg("lecture du commentaire…");
     try {
       const out = await claudeJSON(key, prompt, {
@@ -730,17 +1101,23 @@ Détermine où en est la pièce APRÈS cette session. new_stage = index (0 à ${
         required: ["piece_name", "new_stage", "progressed", "note"],
         additionalProperties: false,
       });
-      const ns = Math.max(0, Math.min(last, parseInt(out.new_stage)));
+      // ns can reach last+1 — that's the sentinel for "graduated out of the funnel",
+      // only ever produced by a session held ON the last stage itself (fixed 11/07,
+      // see pipelineStep and the prompt above: the last stage is a real session to
+      // do and finish, not an automatic marker reached just by arriving at its index).
+      const ns = Math.max(0, Math.min(last + 1, parseInt(out.new_stage)));
       const aid = act.id;
       const pieceName = out.piece_name || (piece ? piece.text : "(sans nom)");
       // reaching the last stage this session (not already there) graduates the piece
       // into another activity's items[] — e.g. a mastered Piano piece joins Répertoire.
       // The comment is what drives it, same as everything else in the funnel.
       const prevStage = action.fresh ? 0 : (piece ? piece.stage : 0);
-      // the piece reached the funnel's last stage THIS session — the one thing that
-      // counts as a real completion (e.g. a_erasure.requireFinish uses this to gate
-      // its weekly target on a finished poem, not just any session touching a piece).
-      const justFinished = ns === last && prevStage < last;
+      // the piece finished the funnel THIS session (ns went past the last stage) —
+      // the one thing that counts as a real completion (e.g. a_erasure.requireFinish
+      // uses this to gate its weekly target on a finished poem, not just any session
+      // touching a piece). Only reachable from prevStage === last (mastery session
+      // itself reporting done), never a multi-stage skip.
+      const justFinished = ns > last && prevStage <= last;
       const justGraduated = act.graduatesTo && justFinished;
       setActivities((arr) => arr.map((a) => {
         if (a.id === aid) {
@@ -759,7 +1136,7 @@ Détermine où en est la pièce APRÈS cette session. new_stage = index (0 à ${
       // touching the piece isn't enough, but finishing the whole piece is too rare
       // a bar for a weekly cadence).
       if (doneEntryId) setLog((L) => L.map((en) => (en.id === doneEntryId ? { ...en, note: text, claudeNote: out.note, finished: justFinished, progressed: !!out.progressed } : en)));
-      setSyncMsg(`« ${out.piece_name} » → ${(stages[ns] || {}).text || "?"}`);
+      setSyncMsg(`« ${out.piece_name} » → ${ns > last ? "terminé" : (stages[ns] || {}).text || "?"}`);
     } catch (err) {
       setSyncMsg("lecture impossible (" + (err.message || "erreur") + ") — commentaire gardé");
     } finally {
@@ -793,12 +1170,17 @@ Commentaire laissé après cette session :
 Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui reste pertinent, condense, n'efface pas l'historique utile. ${reco ? "Affûte le profil pour mieux recommander la prochaine fois." : "Garde une mémoire de coaching actionnable."} updated_note = la note complète réécrite (concise). log_note = une ligne qui distille cette session.`;
     setSyncing(true); setSyncMsg("lecture du commentaire…");
     try {
+      // maxTokens explicit here: the default (400) truncates mid-JSON once an
+      // activity's note has grown past a paragraph or two (Parfum-exploration,
+      // Écoute...) — Claude's completion gets cut off, JSON.parse then throws
+      // ("lecture impossible... erreur json"), while short-note activities pass
+      // fine. Found 10/07: the whole-note rewrite needs real headroom.
       const out = await claudeJSON(key, prompt, {
         type: "object",
         properties: { updated_note: { type: "string" }, log_note: { type: "string" } },
         required: ["updated_note", "log_note"],
         additionalProperties: false,
-      });
+      }, 1600);
       const aid = act.id;
       setActivities((arr) => arr.map((a) => (a.id === aid ? { ...a, note: out.updated_note } : a)));
       if (doneEntryId) setLog((L) => L.map((en) => (en.id === doneEntryId ? { ...en, note: text, claudeNote: out.log_note } : en)));
@@ -815,7 +1197,6 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
     const text = comment.trim();
     const parsedManual = manualMin.trim() ? parseInt(manualMin) : null;
     const existing = log.find((en) => en.id === doneEntryId);
-    const finalMin = parsedManual > 0 ? parsedManual : existing?.min;
     if (doneEntryId) {
       setLog((L) => L.map((en) => {
         if (en.id !== doneEntryId) return en;
@@ -825,7 +1206,12 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
         return { ...en, ...patch };
       }));
     }
-    if (SIM && finalMin) simAdvanceMinutes(finalMin);
+    // finish() already advanced the clock by the logged minutes — only apply the
+    // extra delta here if a manual override changes the duration after the fact.
+    if (SIM && parsedManual > 0 && existing) {
+      const delta = parsedManual - (existing.min || 0);
+      if (delta) simAdvanceMinutes(delta);
+    }
     const kind = current && current.activity.kind;
     // every commented session reaches Claude — pipeline advances the piece, practice
     // and recommandeur grow the note. tasks just keep the comment locally.
@@ -841,7 +1227,7 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
   };
 
   // section navigation — no tab bar; swipe left/right or tap the faint edge arrows.
-  const TABS = SIM ? ["now", "liste", "simulateur", "activities", "progress"] : ["now", "activities", "progress"];
+  const TABS = SIM ? ["now", "liste", "simulateur", "activities"] : ["now", "activities"];
   const go = (dir) => {
     const i = TABS.indexOf(tab);
     const ni = Math.min(TABS.length - 1, Math.max(0, i + dir));
@@ -873,12 +1259,20 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
   // tap "done" — log real time (or manual override), trigger vaisselle if cooking done
   const finish = () => {
     if (!current) { resetFlow(); return; }
-    const realSec = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
-    const minLogged = Math.max(1, Math.round(realSec / 60));
+    // SIM: real elapsed time is meaningless for a hand-run test (tapping through fast) —
+    // default to the activity/action's catalogue duration instead, so the sandbox clock
+    // (advanced below) reflects a plausible session length; the "done" screen still lets
+    // Maxence type an explicit override, which submitComment() applies as a delta on top.
+    // Prod (SIM=false) is untouched: it always logs the real elapsed duration.
+    const minLogged = SIM
+      ? Math.max(1, Math.round(actDurMin))
+      : Math.max(1, Math.round(Math.max(1, Math.round((Date.now() - startedAt) / 1000)) / 60));
     const aid = current.activity.id;
     setLastId(aid);
     const e = {
-      id: uid(), date: todayKey(), ts: Date.now(), type: "done",
+      // realNow() not Date.now(): identical in prod (no debug clock), but in the
+      // sandbox this must track the simulated clock (see comment on the fix below).
+      id: uid(), date: todayKey(), ts: realNow().getTime(), type: "done",
       activityId: aid, actionId: current.action.id, actionText: current.action.text,
       min: minLogged, sec: minLogged * 60, domain: current.activity.domain, note: "",
       ...(current.action.itemId ? { itemId: current.action.itemId } : {}),
@@ -888,6 +1282,10 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
     }
     setDoneEntryId(e.id);
     setLog((L) => [...L, e]);
+    // sandbox clock: advance right away by the catalogue default duration, so it
+    // already reflects a plausible length before any override is typed — tapping
+    // the line on "done" (submitComment) applies the delta if one is.
+    if (SIM) simAdvanceMinutes(minLogged);
     setRunning(false); setShowWhy(false);
     setComment(""); setManualMin("");
     setStage("done");
@@ -895,7 +1293,11 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
 
   // ----- the line is the whole control surface: short tap acts, long hold retracts & re-picks -----
   const tapAction = () => {
-    if (stage === "entry" || stage === "done") start();
+    if (stage === "entry") start();
+    // tapping the line from "done" submits whatever's in the duration/comment fields
+    // (same as the old "passer"/"valider" button) then moves on — one control surface,
+    // no separate button needed.
+    else if (stage === "done") submitComment();
     else if (stage === "proposal") begin();
     else if (stage === "running" && !paused) finish(); // resume before finishing — paused time shouldn't count
   };
@@ -974,12 +1376,55 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
     upd(id, { items });
   };
   const delItem = (id, iid) => upd(id, { items: activities.find((a) => a.id === id).items.filter((it) => it.id !== iid) });
-  const quickLog = (a) => {
-    const ac = a.actions[0] || { id: uid(), text: a.name, min: 15 };
-    setLog((L) => [...L, { id: uid(), date: todayKey(), ts: Date.now(), activityId: a.id, actionId: ac.id, actionText: ac.text, min: ac.min, domain: a.domain }]);
-    setMsg(`logged: ${a.name}`); setTimeout(() => setMsg(""), 1500);
+  // free-text log for anything done outside the app — one field, one Claude call
+  // resolves it against the catalogue instead of hunting for the right button.
+  // Replaces the old per-activity quick-log buttons (removed with the progress tab).
+  const submitFreeLog = async () => {
+    const text = logText.trim();
+    if (!text) return;
+    const key = (await store.get("tlx_apiKey")) || "";
+    if (!key) { setMsg("pas de clé API — impossible de logger"); setTimeout(() => setMsg(""), 2000); return; }
+    setLogBusy(true);
+    const catalogue = activities.map((a) => {
+      const acts = (a.actions || []).map((ac) => `${ac.id}: ${ac.text}`).join(" · ") || "(pas d'action fixe)";
+      return `${a.id} — ${a.name} (${a.domain}) : ${acts}`;
+    }).join("\n");
+    const prompt = `Tu identifies quelle activité du catalogue correspond à ce que Maxence vient de faire hors de l'app, pour la logger.
+
+Catalogue (id — nom (domaine) : actions[id: texte]) :
+${catalogue}
+
+Ce qu'il a fait, en ses mots :
+« ${text} »
+
+Réponds avec : activity_id = l'id exact du catalogue qui correspond le mieux. action_id = l'id de l'action qui correspond (omets-le si aucune ne colle, l'activité seule suffit). min = durée en minutes (déduite du texte, estimation raisonnable si non précisée). note = une ligne qui résume ce qui a été fait.`;
+    try {
+      const out = await claudeJSON(key, prompt, {
+        type: "object",
+        properties: { activity_id: { type: "string" }, action_id: { type: "string" }, min: { type: "integer" }, note: { type: "string" } },
+        required: ["activity_id", "min", "note"],
+        additionalProperties: false,
+      }, 300);
+      const a = activities.find((x) => x.id === out.activity_id);
+      if (!a) throw new Error("activité non reconnue");
+      const action = out.action_id ? (a.actions || []).find((x) => x.id === out.action_id) : null;
+      const m = Math.max(1, Math.round(out.min) || 15);
+      const e = {
+        id: uid(), date: todayKey(), ts: realNow().getTime(), type: "done",
+        activityId: a.id, actionId: action ? action.id : null,
+        actionText: action ? action.text : a.name,
+        min: m, sec: m * 60, domain: a.domain, note: out.note || text,
+      };
+      if (a.kind === "task") setActivities((arr) => arr.map((x) => (x.id === a.id ? { ...x, done: true } : x)));
+      setLog((L) => [...L, e]);
+      setMsg(`logged: ${e.actionText}`); setLogText(""); setLogOpen(false);
+    } catch (err) {
+      setMsg("lecture impossible (" + (err.message || "erreur") + ")");
+    } finally {
+      setLogBusy(false);
+      setTimeout(() => setMsg(""), 2200);
+    }
   };
-  const delLog = (id) => setLog((L) => L.filter((e) => e.id !== id));
 
   // sandbox quick-complete: tick one checklist obligation. Same log shape as
   // finish(), but no timer flow — a tap (with optional minutes/comment) is enough.
@@ -990,7 +1435,7 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
     const a = row.activity, action = row.action;
     const m = parseInt(min) || a.dur || (action && action.min) || 15;
     const e = {
-      id: uid(), date: todayKey(), ts: Date.now(), type: "done",
+      id: uid(), date: todayKey(), ts: realNow().getTime(), type: "done",
       activityId: a.id, actionId: action ? action.id : (a.actions[0] ? a.actions[0].id : null),
       actionText: action ? action.text : (a.actions[0] ? a.actions[0].text : a.name),
       min: m, sec: m * 60, domain: a.domain, note: (note || "").trim(),
@@ -1003,7 +1448,9 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
         if (x.id !== a.id) return x;
         const last = (x.stages || []).length - 1;
         const pieces = (x.items || []).filter((it) => typeof it.stage === "number");
-        const live = pieces.filter((p) => p.stage < last).sort((u, v) => v.stage - u.stage);
+        // <= last, not < last (fixed 11/07 alongside pipelineStep/advanceViaClaude):
+        // the last stage is itself a step to advance through, not an instant-done marker.
+        const live = pieces.filter((p) => p.stage <= last).sort((u, v) => v.stage - u.stage);
         if (live.length) return { ...x, items: x.items.map((it) => (it.id === live[0].id ? { ...it, stage: it.stage + 1 } : it)) };
         return { ...x, items: [...(x.items || []), { id: uid(), text: e.note || "pièce " + (pieces.length + 1), stage: 0 }] };
       }));
@@ -1013,73 +1460,115 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
     simAdvanceMinutes(m); // the session took m minutes — the sim clock lives it
     setMsg(`✓ ${a.name} (+${m}m)`); setTimeout(() => setMsg(""), 1200);
   };
-  // SIM-only week driver — plays the sandbox forward the way a human would, using
-  // the REAL shipped engine (pick, the proportional lottery) on deep copies of the
-  // live state, so the numbers come from the engine that ships, not a
-  // re-implementation. Time is NEVER a constraint here (corrected 09/07 — an
-  // earlier version capped a work-night's home block at 60min then 4h of shift,
-  // which made 15 draws/day look like it "didn't fit" some nights; Maxence has
-  // ~10h free both at work and at home, so that ceiling was fiction). The ONLY
-  // thing that bounds a simulated day is drawsPerDay — the click count. A work
-  // day is 100% work-context, a free day 100% home-context (corrected again
-  // 09/07 — no more splitting one day into a home slice then a work slice:
-  // Maxence only engages the app at work on days he works, full stop).
-  // Pipelines are logged like any other activity here — no finished/progressed
-  // completion-rate tracking (removed 09/07: the point is session rate, advancing,
-  // not hitting a "poems finished/week" objective).
-  const simWeek = ({ days = 7, drawsPerDay = 13 } = {}) => {
-    const acts = JSON.parse(JSON.stringify(activities));
-    const logArr = JSON.parse(JSON.stringify(log));
+  // Multi-day auto-run — rewritten 11/07 (Maxence: garder l'onglet, mais qu'il
+  // simule "comme si c'était fait à la main"). The old version (simWeek/
+  // runSimViz) computed on a throwaway deep copy and only ever showed a stats
+  // readout — it never touched the real sandbox log/activities, so "liste" and
+  // "progress" told a different story than the simulateur's numbers. That
+  // disconnect was the "pas fiable" complaint. This version still draws with the
+  // real shipped engine (pickAging) on a working copy for correctness across the
+  // run, but at the end COMMITS the result to the real sandbox state via
+  // setActivities/setLog — so afterward "liste"/"progress"/"activities" show
+  // exactly what a hand-run of that many sessions would have left behind.
+  // Pipeline pieces advance stage-by-stage exactly like simComplete's single tap
+  // (last stage included, graduates only past it — same fix as pipelineStep) —
+  // no Claude call here (no comment to read), but the mechanics now agree.
+  // seedActivities/seedLog let a caller run the batch against freshly-fetched
+  // data instead of the current `activities`/`log` closure — needed when
+  // chaining right after a reseed, since React state updates aren't visible
+  // in the same synchronous continuation (stale-closure trap, caught 12/07
+  // testing the balance swing: a reseed-then-runSimBatch call silently ran
+  // against the OLD pre-reseed log).
+  const runSimBatch = ({ days = 7, drawsPerDay = 13, seedActivities = null, seedLog = null } = {}) => {
+    const acts = JSON.parse(JSON.stringify(seedActivities || activities));
+    const logArr = JSON.parse(JSON.stringify(seedLog || log));
     const savedDebug = _debugDate;
+    const before = logArr.length;
 
-    const runBlock = (cur, startHour, maxDraws = Infinity, place) => {
-      const dayKey = keyOf(cur); // the simulated day, fixed — never drifts even if `now` crosses midnight
-      let now = new Date(cur); now.setHours(startHour, 0, 0, 0);
-      let guard = 0, draws = 0;
-      while (draws < maxDraws && guard++ < 400) {
-        // gate clock: same hour/minute as `now` (meal-time / dry-time gates need the
-        // real hour), but the DATE stays pinned to dayKey. Without this, enough idle
-        // 30min hops (or a long run of draws) push `now` past midnight while dayKey
-        // stays put — todayKey() would then read the NEXT day and the day-cap gate
-        // resets mid-block, letting a day-period row (e.g. Livre) log more than once
-        // under the SAME dayKey. Found 10/07 verifying the week-cap fix.
+    // one hand-run-equivalent session: pick's activity/action, advance its
+    // pipeline stage (or start a fresh piece) exactly like simComplete, push the
+    // log entry. Mutates `acts`/`logArr` in place — a local working copy, not
+    // yet the real state.
+    const completeDraw = (row, now, dayKey) => {
+      const a = acts.find((x) => x.id === row.activity.id);
+      const action = row.action;
+      const m = a.dur || (action && (action.dur || action.min)) || 15;
+      const e = {
+        id: uid(), date: dayKey, ts: now.getTime(), type: "done",
+        activityId: a.id, actionId: action ? action.id : (a.actions[0] ? a.actions[0].id : null),
+        actionText: action ? action.text : (a.actions[0] ? a.actions[0].text : a.name),
+        min: m, sec: m * 60, domain: a.domain, note: "",
+        ...(action && action.itemId ? { itemId: action.itemId } : {}),
+      };
+      if (a.kind === "task") a.done = true;
+      if (a.kind === "pipeline") {
+        const last = (a.stages || []).length - 1;
+        const pieces = (a.items || []).filter((it) => typeof it.stage === "number");
+        const live = pieces.filter((p) => p.stage <= last).sort((u, v) => v.stage - u.stage);
+        let ns;
+        if (live.length) { live[0].stage += 1; ns = live[0].stage; }
+        else { a.items = [...(a.items || []), { id: uid(), text: "pièce " + (pieces.length + 1), stage: 0 }]; ns = 0; }
+        e.progressed = true;
+        e.finished = ns > last;
+        if (e.finished && a.graduatesTo) {
+          const dest = acts.find((x) => x.id === a.graduatesTo);
+          if (dest) dest.items = [...(dest.items || []), { id: uid(), text: "pièce graduée", status: "doing" }];
+        }
+      }
+      logArr.push(e);
+      return m;
+    };
+
+    const runBlock = (cur, maxDraws, place) => {
+      const dayKey = keyOf(cur);
+      let now = new Date(cur); now.setHours(20, 0, 0, 0);
+      const windowEnd = new Date(cur); windowEnd.setDate(windowEnd.getDate() + 1); windowEnd.setHours(8, 0, 0, 0);
+      let guard = 0, draws = 0, lastId = null;
+      while (draws < maxDraws && now < windowEnd && guard++ < 400) {
         _debugDate = fromKey(dayKey);
         _debugDate.setHours(now.getHours(), now.getMinutes(), now.getSeconds(), 0);
-        const pl = place; // forced, not derived from the clock — a work day is 100% work-context, a free day 100% home
-        const p = pick(acts, logArr, pl, {});
-        if (!p) { now = new Date(now.getTime() + 30 * 60000); continue; } // nothing owed → idle 30min
-        const a = acts.find((x) => x.id === p.activity.id);
-        const action = p.action;
-        const m = a.dur || (action && (action.dur || action.min)) || 15;
-        const e = {
-          id: uid(), date: dayKey, ts: now.getTime(), type: "done",
-          activityId: a.id, actionId: action ? action.id : (a.actions[0] ? a.actions[0].id : null),
-          actionText: action ? action.text : (a.actions[0] ? a.actions[0].text : a.name),
-          min: m, sec: m * 60, domain: a.domain, note: "",
-          ...(action && action.itemId ? { itemId: action.itemId } : {}),
-        };
-        logArr.push(e);
+        let p = pickAging(acts, logArr, place, { avoidId: lastId });
+        if (!p) p = pickAging(acts, logArr, place, { relax: true, avoidId: lastId });
+        if (!p) { now = new Date(now.getTime() + 30 * 60000); continue; }
+        const m = completeDraw(p, now, dayKey);
         draws += 1;
-        now = new Date(now.getTime() + m * 60000);
+        lastId = p.activity.id;
+        const gap = Math.floor(Math.random() * 41);
+        now = new Date(now.getTime() + (m + gap) * 60000);
       }
-      return draws;
     };
 
     let day = _debugDate ? new Date(_debugDate) : new Date();
     day.setHours(0, 0, 0, 0);
+    const rate = drawsPerDay > 0 ? drawsPerDay : 13;
+    let cumBefore = 0;
     for (let d = 0; d < days; d++) {
       const cur = new Date(day); cur.setDate(cur.getDate() + d);
-      const dayCap = drawsPerDay > 0 ? drawsPerDay : 13; // clicks are the only budget for a simulated day
-      const workEve = isWorkShift(new Date(cur.getFullYear(), cur.getMonth(), cur.getDate(), 21, 0, 0));
-      if (workEve) {
-        runBlock(cur, 20, dayCap, "work");                 // work day: 100% work-context, no home block
-      } else {
-        runBlock(cur, 10, dayCap, "home");                 // free day: 100% home-context
-      }
+      const cumAfter = Math.floor(rate * (d + 1));
+      runBlock(cur, cumAfter - cumBefore, isWorkShift(new Date(cur.getFullYear(), cur.getMonth(), cur.getDate(), 21, 0, 0)) ? "work" : "home");
+      cumBefore = cumAfter;
     }
+
+    // commit — this is now the real sandbox state, same as if every draw above
+    // had been a hand tap through simComplete.
+    setActivities(acts); setLog(logArr);
     _debugDate = savedDebug; setClock((c) => c + 1);
-    return { app: "throughline", version: 4, days,
-      exportedAt: new Date().toISOString(), activities: acts, log: logArr };
+
+    const added = logArr.slice(before);
+    const acc = {}, labels = {};
+    added.forEach((e) => {
+      const act = acts.find((x) => x.id === e.activityId);
+      const ownTarget = act && act.actions.some((x) => typeof x.target === "number");
+      const key = ownTarget ? `${e.activityId}:${e.actionId}` : e.activityId;
+      acc[key] = (acc[key] || 0) + 1;
+      if (!labels[key]) {
+        labels[key] = { activityId: e.activityId, actionId: ownTarget ? e.actionId : null,
+          name: ownTarget ? `${(act || {}).name || e.activityId} — ${e.actionText}` : ((act || {}).name || e.activityId) };
+      }
+    });
+    const rows = Object.keys(acc).map((key) => ({ key, ...labels[key], count: acc[key] })).sort((x, y) => y.count - x.count);
+    setSimRes({ sessions: added.length, days, rows });
+    setMsg(`${added.length} séances simulées sur ${days}j — appliquées au sandbox`); setTimeout(() => setMsg(""), 2400);
   };
 
   const simReseed = async () => {
@@ -1091,50 +1580,9 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
     setTimeout(() => setMsg(""), 1800);
   };
 
-  // SIM-only: run simWeek and aggregate into a visible, re-runnable result. Same
-  // params every time so results are comparable: N days, ~tirages draws/day,
-  // averaged over 5 runs. Sessions/week only — no completion-rate stat (removed
-  // 09/07, kept as a possible future idea, not a current goal: avancer > objectifs
-  // clairs). Rows split per-action for activities whose cadence lives on the
-  // action (own target), so the simulateur tab can edit the real lever either way
-  // (added 09/07 — was showing an un-editable "par action" placeholder before).
-  const runSimViz = () => {
-    const RUNS = 5, DAYS = Math.max(1, simCfg.jours), WEEKS = DAYS / 7;
-    const opts = { days: DAYS, drawsPerDay: Math.max(1, simCfg.tirages) };
-    const acc = {}, names = {}, labels = {};
-    let tot = 0; const drawsDays = [];
-    for (let r = 0; r < RUNS; r++) {
-      const exp = simWeek(opts);
-      (exp.activities || []).forEach((a) => { names[a.id] = a.name; });
-      const lg = exp.log.filter((e) => e.type !== "skip");
-      tot += lg.length;
-      const byDay = {}; lg.forEach((e) => { byDay[e.date] = (byDay[e.date] || 0) + 1; });
-      Object.values(byDay).forEach((v) => drawsDays.push(v));
-      lg.forEach((e) => {
-        // group by activity, unless the LIVE catalogue gives this activity's
-        // actions their own target — then group by action, so the sub-cadences
-        // that actually drive the draw can each get their own editable row
-        const act = activities.find((x) => x.id === e.activityId);
-        const ownTarget = act && act.actions.some((x) => typeof x.target === "number");
-        const key = ownTarget ? `${e.activityId}:${e.actionId}` : e.activityId;
-        acc[key] = (acc[key] || 0) + 1;
-        if (!labels[key]) {
-          labels[key] = {
-            activityId: e.activityId, actionId: ownTarget ? e.actionId : null,
-            name: ownTarget ? `${names[e.activityId] || e.activityId} — ${e.actionText}` : (names[e.activityId] || e.activityId),
-          };
-        }
-      });
-    }
-    const rows = Object.keys(acc).map((key) => ({ key, ...labels[key], spw: acc[key] / RUNS / WEEKS })).sort((a, b) => b.spw - a.spw);
-    const avgDraws = drawsDays.reduce((s, x) => s + x, 0) / Math.max(drawsDays.length, 1);
-    setSimRes({
-      drawsPerDay: +avgDraws.toFixed(1), totalPerWeek: +(tot / RUNS / WEEKS).toFixed(0), rows,
-    });
-  };
-
   // ----- data -----
-  const exportObj = () => ({ app: "throughline", version: 4, exportedAt: new Date().toISOString(), savedOn: fmtLong(todayKey()), activities, log });
+  const exportObj = () => ({ app: "throughline", version: 4, exportedAt: new Date().toISOString(), savedOn: fmtLong(todayKey()),
+    activities, log });
   const exportText = () => JSON.stringify(exportObj(), null, 2);
   const download = () => {
     const blob = new Blob([exportText()], { type: "application/json" });
@@ -1163,13 +1611,29 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
     try {
       const o = JSON.parse(text);
       if (!o.activities) throw new Error("no activities");
-      setActivities(o.activities); setLog(o.log || []);
+      // "load" updates activity definitions only, never the log — a catalogue file
+      // always carries a "log" key (even if just []), and blindly importing it used
+      // to silently wipe or reintroduce stale dated history into a live session,
+      // producing debts (e.g. vaisselle) that looked like a bug but were really old
+      // data leaking back in (Maxence 11/07). Progress data is never touched by load.
+      setActivities(o.activities);
       setMsg("loaded ✓"); setTab("now"); setStage("entry"); setPasteVal("");
     } catch { setMsg("couldn't read that — check the file/text"); }
     setTimeout(() => setMsg(""), 2200);
   };
   const onFile = (ev) => { const f = ev.target.files?.[0]; if (!f) return; const r = new FileReader(); r.onload = () => applyImport(String(r.result)); r.readAsText(f); ev.target.value = ""; };
-  const resetAll = () => { if (typeof window !== "undefined" && !window.confirm("Wipe all activities and history?")) return; setActivities(SEED); setLog([]); setMsg("reset to defaults"); setTimeout(() => setMsg(""), 1800); };
+  const resetAll = () => {
+    if (typeof window !== "undefined" && !window.confirm("Wipe all activities and history?")) return;
+    // a real reset means real zero — a debug date left jumped ahead used to survive
+    // this, so post-reset taps kept logging under a stale simulated clock, making
+    // it look like old data hadn't actually gone away (Maxence 11/07).
+    clockReal();
+    setActivities(SEED); setLog([]);
+    setStage("entry"); setCurrent(null); setLastId(null);
+    setHoldMs(BASE_HOLD_MS); setHoldDate(todayKey());
+    setSimRes(null);
+    setMsg("reset to defaults"); setTimeout(() => setMsg(""), 1800);
+  };
 
   // sandbox test harness — call window.__tlx.* from devtools/preview_eval instead of
   // simulating pointer events on the DOM. Runs every render so closures stay fresh.
@@ -1178,7 +1642,7 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
     window.__tlx = {
       stage, tab, current, activities, log, holdMs, holdDate, place,
       begin, finish, tapAction, submitComment, start, resetFlow,
-      setManualMin, setComment, setTab, applyDebugTime, simWeek, simReseed,
+      setManualMin, setComment, setTab, applyDebugTime, simReseed, runSimBatch,
       setLog, setActivities,
       debugNow: () => (_debugDate || new Date()).toString(),
     };
@@ -1202,19 +1666,38 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
       <div className="grain" />
       <div className="wrap" onTouchStart={onTouchStart} onTouchEnd={onTouchEnd}>
 
-        {/* sandbox banner — makes it impossible to confuse the clone with the real app */}
+        {/* sandbox banner — makes it impossible to confuse the clone with the real app. */}
         {SIM && (
           <div className="mono" style={{ textAlign: "center", fontSize: 9.5, letterSpacing: ".14em", textTransform: "uppercase",
-            color: C.bg, background: C.bone, padding: "5px 10px", margin: "-8px -20px 14px", }}>
-            bac à sable · données de test isolées · {_debugDate ? fmtLong(todayKey()) + " · " + fmtHM(_debugDate) + " · " + computePlace() : "temps réel"}
+            color: C.bg, background: C.bone, padding: "5px 10px", margin: "-8px -20px 14px",
+            display: "flex", justifyContent: "center", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <div style={{ width: "100%", display: "flex", justifyContent: "center", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <span>bac à sable · {fmtLong(todayKey())} · {fmtHM(realNow())} · {computePlace()} · {log.filter((e) => e.date === todayKey() && isDone(e)).length} clics</span>
+            </div>
+            {/* time controls, same actions as the "liste" tab's clock block, surfaced
+                here too (added 10/07) so a hand-run week never needs a tab switch just
+                to advance the clock or jump a day. */}
+            <div style={{ width: "100%", display: "flex", justifyContent: "center", alignItems: "center", gap: 4, flexWrap: "wrap" }}>
+              {[["+5m", () => simAdvanceMinutes(5)], ["+10m", () => simAdvanceMinutes(10)], ["+1h", () => simAdvanceMinutes(60)],
+                ["+1j", () => jumpDays(1)], ["+1sem", () => jumpDays(7)], ["temps réel", clockReal]].map(([label, fn]) => (
+                <button key={label} onClick={fn}
+                  style={{ font: "inherit", letterSpacing: "inherit", textTransform: "inherit", cursor: "pointer",
+                    border: `1px solid ${C.bg}`, borderRadius: 20, padding: "1px 7px", background: "transparent", color: C.bg }}>
+                  {label}
+                </button>
+              ))}
+            </div>
           </div>
         )}
 
-        {/* the only chrome: two faint arrows. swipe left/right works too. */}
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", height: 22 }}>
-          <button className="navarr" style={{ visibility: tab === TABS[0] ? "hidden" : "visible" }} onClick={() => go(-1)} aria-label="previous">‹</button>
-          <button className="navarr" style={{ visibility: tab === TABS[TABS.length - 1] ? "hidden" : "visible" }} onClick={() => go(1)} aria-label="next">›</button>
-        </div>
+        {/* prod: swipe only, no visible chrome at all — the arrows stay in the sandbox
+            only, where testing from a desktop preview needs a click-through option. */}
+        {SIM && (
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", height: 22 }}>
+            <button className="navarr" style={{ visibility: tab === TABS[0] ? "hidden" : "visible" }} onClick={() => go(-1)} aria-label="previous">‹</button>
+            <button className="navarr" style={{ visibility: tab === TABS[TABS.length - 1] ? "hidden" : "visible" }} onClick={() => go(1)} aria-label="next">›</button>
+          </div>
+        )}
 
         {/* =================== NOW =================== */}
         {tab === "now" && (
@@ -1254,12 +1737,21 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
                 // overshoot it — that overshoot is the felt dépassement.
                 const trackTransition = holding ? `transform ${effHold}ms linear` : "transform .3s cubic-bezier(.2,.7,.2,1)";
                 const fillColor = current ? dColor(current.activity.domain) : C.bone; // the line carries the activity's colour
+                // domain balance, felt not read: the line sways wider AND faster when
+                // one domain is neglected relative to the others, settles wide and slow
+                // as it evens out — like something physically unsettled, not a metronome
+                // with a parameter. Motion carries the signal, a static lean read as a glitch.
+                // Hidden by default (zero footprint) — a shake reveals it, another hides it.
+                const balanceSpread = balanceVisible ? domainBalance(activities, log) : 0;
+                const tiltAmpDeg = balanceSpread * 6;
+                const swayDurationSec = 7 - balanceSpread * 3.5;
                 return (
-                  <div onPointerDown={onLineDown} onPointerUp={onLineUp} onPointerLeave={onLineCancel} onPointerCancel={onLineCancel}
+                  <div className={balanceVisible ? "sway" : ""} onPointerDown={onLineDown} onPointerUp={onLineUp} onPointerLeave={onLineCancel} onPointerCancel={onLineCancel}
                     onContextMenu={(e) => e.preventDefault()}
                     style={{ position: "relative", height: 44, width: "82%", margin: "0 auto",
                       display: "flex", justifyContent: "center", alignItems: "center",
-                      overflow: "visible", cursor: "pointer", touchAction: "manipulation", userSelect: "none", WebkitUserSelect: "none" }}>
+                      overflow: "visible", cursor: "pointer", touchAction: "manipulation", userSelect: "none", WebkitUserSelect: "none",
+                      ...(balanceVisible ? { "--tilt-amp": `${tiltAmpDeg}deg`, animationDuration: `${swayDurationSec}s` } : {}) }}>
                     {/* hollow track — inset, never touches the edges */}
                     <div className={stage === "entry" && !holding ? "breathe" : ""}
                       style={{ position: "absolute", left: 0, right: 0, top: "50%", height: 2, background: stage === "entry" ? C.bone : C.soft,
@@ -1279,7 +1771,12 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
               {/* ---------- below the line: controls ---------- */}
               <div style={{ minHeight: 130, marginTop: 30, textAlign: "center" }}>
 
-                {/* entry: nothing. just the breathing line above. */}
+                {/* entry: nothing, except the one-time first-launch hint. */}
+                {stage === "entry" && showTapHint && (
+                  <div className="fade mono" style={{ fontSize: 10, letterSpacing: ".14em", textTransform: "uppercase", color: C.faint }}>
+                    tape pour commencer
+                  </div>
+                )}
 
                 {/* proposal: nothing under the line, except in the sandbox — testing wants
                     to reroll fast without the hold gesture, just to see what comes up. */}
@@ -1313,11 +1810,13 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
                           <span className="mono" style={{ fontSize: 10, color: C.faint, letterSpacing: ".1em" }}>temps réel :</span>
                           {SIM ? (
                             // sandbox only — testing needs to fake a duration without waiting it out.
-                            // placeholder (not a forced value) so the field can actually go empty while typing.
+                            // placeholder shows the catalogue default (same one finish() already
+                            // logged the clock advance with) — not a forced value, the field can
+                            // still go empty while typing an explicit override.
                             <input
                               type="number" min="1" className="in mono"
                               value={manualMin}
-                              placeholder={String(Math.max(1, Math.round((Date.now() - startedAt) / 60000)))}
+                              placeholder={String(Math.max(1, Math.round(actDurMin)))}
                               onChange={(e) => setManualMin(e.target.value)}
                               style={{ width: 44, fontSize: 12, textAlign: "center", borderBottom: `1px solid ${C.line}`, color: C.mut }}
                             />
@@ -1333,7 +1832,6 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
                           onChange={(e) => setComment(e.target.value)}
                           onKeyDown={(e) => { if (e.key === "Enter") submitComment(); }}
                           style={{ fontSize: 14, textAlign: "center", maxWidth: 360, margin: "0 auto", display: "block", borderBottom: `1px solid ${C.line}`, paddingBottom: 8, fontStyle: comment ? "normal" : "italic", color: comment ? C.text : C.faint }} />
-                        <button className="link" style={{ marginTop: 18 }} onClick={submitComment}>{comment.trim() ? "valider" : "passer"}</button>
                         {current && (() => {
                           const k = current.activity.kind;
                           const hint = k === "pipeline" ? "ton mot fait avancer la pièce dans le funnel"
@@ -1427,9 +1925,9 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
             <div style={{ marginTop: 20 }}>
               {/* the sim clock — where you are right now in the playthrough */}
               <div className="mono" style={{ textAlign: "center", fontSize: 13, color: C.bone, letterSpacing: ".06em", marginBottom: 4 }}>
-                {_debugDate ? fmtLong(todayKey()) + " · " + fmtHM(_debugDate) : "temps réel (pas encore figé)"}
+                {fmtLong(todayKey())} · {fmtHM(realNow())}
               </div>
-              <div className="mono" style={{ textAlign: "center", fontSize: 9.5, color: C.faint, marginBottom: 14 }}>lieu : {place}</div>
+              <div className="mono" style={{ textAlign: "center", fontSize: 9.5, color: C.faint, marginBottom: 14 }}>lieu : {place} · {log.filter((e) => e.date === todayKey() && isDone(e)).length} clics aujourd'hui</div>
 
               {/* pause — advance the clock without doing anything, to feel time between actions */}
               <div style={{ display: "flex", justifyContent: "center", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
@@ -1468,14 +1966,16 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
           );
         })()}
 
-        {/* =================== SIMULATEUR (dédié — régler target/lieu et voir le résultat au même endroit) =================== */}
+        {/* =================== SIMULATEUR (comme à la main, en rafale — commit réel au sandbox) =================== */}
         {tab === "simulateur" && SIM && (() => {
-          const max = simRes ? Math.max(...simRes.rows.map((r) => r.spw), 1) : 1;
+          const max = simRes ? Math.max(...simRes.rows.map((r) => r.count), 1) : 1;
           return (
             <div style={{ marginTop: 20 }}>
-              <div className="lab" style={{ marginBottom: 10, color: C.bone }}>simulateur — moteur loterie proportionnelle</div>
+              <div className="lab" style={{ marginBottom: 10, color: C.bone }}>simulateur — rafale de séances « comme à la main »</div>
+              <div className="mono" style={{ fontSize: 9.5, color: C.faint, marginBottom: 14, lineHeight: 1.6 }}>
+                tire avec le vrai moteur (pickAging), avance les pipelines pièce par pièce comme un tap réel, et écrit le résultat directement dans le log/activités du sandbox — pas un aperçu jetable.
+              </div>
 
-              {/* config + bouton toujours en haut, à portée de main */}
               <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center", marginBottom: 16 }}>
                 {[{ k: "jours", lab: "jours" }, { k: "tirages", lab: "tirages/j" }].map(({ k, lab }) => (
                   <label key={k} className="mono" style={{ fontSize: 9.5, color: C.faint, display: "flex", alignItems: "center", gap: 5, letterSpacing: ".08em" }}>
@@ -1485,75 +1985,34 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
                     {lab}
                   </label>
                 ))}
-                <button className="seg on" onClick={runSimViz}>simuler</button>
+                <button className="seg on" onClick={() => runSimBatch({ days: Math.max(1, simCfg.jours), drawsPerDay: Math.max(1, simCfg.tirages) })}>simuler</button>
               </div>
 
               {!simRes ? (
-                <div className="mono" style={{ fontSize: 11, color: C.faint, padding: "10px 0" }}>appuie sur simuler pour voir la répartition</div>
+                <div className="mono" style={{ fontSize: 11, color: C.faint, padding: "10px 0" }}>appuie sur simuler pour jouer N jours et voir la répartition</div>
               ) : (
                 <>
                   <div className="mono" style={{ fontSize: 10, color: C.mut, marginBottom: 14 }}>
-                    {simRes.drawsPerDay} tirages/jour réels · {simRes.totalPerWeek} séances/sem
+                    {simRes.sessions} séances ajoutées sur {simRes.days}j — déjà dans le log
                   </div>
-                  {(() => {
-                    const seenActivity = new Set();
-                    return simRes.rows.map((r) => {
-                      const a = activities.find((x) => x.id === r.activityId);
-                      if (!a) return null; // supprimée depuis le dernier tirage
-                      const action = r.actionId ? a.actions.find((x) => x.id === r.actionId) : null;
-                      if (r.actionId && !action) return null; // action supprimée depuis le dernier tirage
-                      // ⚙ (lieu + suppression) s'applique à l'activité entière — un seul
-                      // panneau par activité même quand elle est éclatée en plusieurs lignes
-                      const isFirstForActivity = !seenActivity.has(a.id);
-                      seenActivity.add(a.id);
-                      const editingParams = paramEdit === a.id;
-                      return (
-                        <div key={r.key} style={{ borderBottom: `1px solid ${C.soft}`, padding: "7px 0" }}>
-                          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                            <span className="dot" style={{ background: dColor(a.domain), flex: "none", opacity: action ? 0.4 : 1 }} />
-                            <span style={{ width: 148, flex: "none", fontSize: 11.5, color: C.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.name}</span>
-                            <div style={{ display: "flex", alignItems: "center", gap: 4, flex: "none" }}>
-                              <input type="number" min="0" className="in mono" value={(action ? action.target : a.target) ?? 1}
-                                onChange={(e) => {
-                                  const v = Math.max(0, parseFloat(e.target.value) || 0);
-                                  if (action) editAction(a.id, action.id, { target: v }); else upd(a.id, { target: v });
-                                }}
-                                style={{ width: 26, fontSize: 11, textAlign: "right", borderBottom: `1px solid ${C.line}`, color: C.text }} />
-                              <div style={{ display: "flex", gap: 2 }}>
-                                {["day", "week"].map((p) => (
-                                  <button key={p} className={`chip ${((action ? action.period : a.period) || "week") === p ? "on" : ""}`}
-                                    onClick={() => action ? editAction(a.id, action.id, { period: p }) : upd(a.id, { period: p })}
-                                    style={{ fontSize: 9, padding: "1px 5px" }}>{p === "day" ? "/j" : "/sem"}</button>
-                                ))}
-                              </div>
-                            </div>
-                            <div style={{ flex: 1, height: 8, background: C.soft }}>
-                              <div style={{ width: `${Math.round((r.spw / max) * 100)}%`, height: 8, background: C.faint }} />
-                            </div>
-                            <span className="mono" style={{ width: 30, textAlign: "right", fontSize: 10, color: C.mut }}>{r.spw.toFixed(1)}</span>
-                            {isFirstForActivity && (
-                              <button className="ghost" style={{ fontSize: 10 }}
-                                onClick={() => setParamEdit(editingParams ? null : a.id)}>{editingParams ? "−" : "⚙"}</button>
-                            )}
+                  {simRes.rows.map((r) => {
+                    const a = activities.find((x) => x.id === r.activityId);
+                    if (!a) return null;
+                    const action = r.actionId ? a.actions.find((x) => x.id === r.actionId) : null;
+                    if (r.actionId && !action) return null;
+                    return (
+                      <div key={r.key} style={{ borderBottom: `1px solid ${C.soft}`, padding: "7px 0" }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          <span className="dot" style={{ background: dColor(a.domain), flex: "none", opacity: action ? 0.4 : 1 }} />
+                          <span style={{ width: 148, flex: "none", fontSize: 11.5, color: C.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.name}</span>
+                          <div style={{ flex: 1, height: 8, background: C.soft }}>
+                            <div style={{ width: `${Math.round((r.count / max) * 100)}%`, height: 8, background: C.faint }} />
                           </div>
-                          {editingParams && isFirstForActivity && (
-                            <div className="fade" style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8, marginTop: 8, paddingLeft: 16 }}>
-                              <div style={{ display: "flex", gap: 3 }}>
-                                {WHERES.map((w) => (
-                                  <button key={w} className={`chip ${a.where === w ? "on" : ""}`}
-                                    onClick={() => upd(a.id, { where: w })} style={{ fontSize: 10, padding: "2px 6px" }}>{w}</button>
-                                ))}
-                              </div>
-                              <button className="link" style={{ color: C.line, fontSize: 10 }}
-                                onClick={() => { if (window.confirm(`Supprimer "${a.name}" ?`)) { delActivity(a.id); setParamEdit(null); } }}>
-                                supprimer l'activité
-                              </button>
-                            </div>
-                          )}
+                          <span className="mono" style={{ width: 24, textAlign: "right", fontSize: 10, color: C.mut }}>{r.count}</span>
                         </div>
-                      );
-                    });
-                  })()}
+                      </div>
+                    );
+                  })}
                 </>
               )}
             </div>
@@ -1573,9 +2032,6 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
           </div>
         )}
 
-        {/* =================== PROGRESS =================== */}
-        {tab === "progress" && <Progress activities={activities} log={log} quickLog={quickLog} delLog={delLog} />}
-
         {/* =================== FOOTER — save / load centered, reset tucked further below. no rule: the only line is the one in the centre. =================== */}
         <div className="fade" style={{ marginTop: 72, textAlign: "center" }}>
           <div style={{ display: "flex", justifyContent: "center", alignItems: "center", gap: 26 }}>
@@ -1584,6 +2040,7 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
               <input type="file" accept="application/json,.json,text/plain,.txt" onChange={onFile} style={{ display: "none" }} />
             </label>
             <button className="link" onClick={() => setKeyOpen((o) => !o)}>key{apiKey ? " ·" : ""}</button>
+            <button className="link" onClick={() => setLogOpen((o) => !o)}>log</button>
           </div>
           {keyOpen && (
             <div style={{ marginTop: 18, maxWidth: 320, marginLeft: "auto", marginRight: "auto" }}>
@@ -1599,27 +2056,43 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
               </div>
             </div>
           )}
+          {logOpen && (
+            <div style={{ marginTop: 18, maxWidth: 320, marginLeft: "auto", marginRight: "auto" }}>
+              <input className="in" value={logText} placeholder="qu'as-tu fait ?"
+                onChange={(e) => setLogText(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") submitFreeLog(); }}
+                disabled={logBusy}
+                style={{ fontSize: 14, textAlign: "center", borderBottom: `1px solid ${C.line}`, paddingBottom: 8, fontStyle: logText ? "normal" : "italic", color: logText ? C.text : C.faint }} />
+              {logBusy && <div className="mono" style={{ fontSize: 10, color: C.faint, marginTop: 10 }}>…</div>}
+            </div>
+          )}
           <div style={{ marginTop: 22, textAlign: "center" }}>
             <button className="link" style={{ color: C.line }} onClick={resetAll}>reset</button>
-            <div style={{ marginTop: 14, display: "flex", justifyContent: "center", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-              <input type="date"
-                value={debugDay}
-                onChange={e => { setDebugDay(e.target.value); applyDebugTime(e.target.value, debugHour); }}
-                className="mono"
-                style={{ fontSize: 11, color: C.mut, background: "transparent", border: "none", borderBottom: `1px solid ${C.soft}`, outline: "none", padding: "2px 4px" }} />
-              <input type="number" min="0" max="23" placeholder="h"
-                value={debugHour}
-                onChange={e => { setDebugHour(e.target.value); applyDebugTime(debugDay, e.target.value); }}
-                className="mono"
-                style={{ width: 38, fontSize: 11, color: C.mut, background: "transparent", border: "none", borderBottom: `1px solid ${C.soft}`, outline: "none", padding: "2px 4px", textAlign: "center" }} />
-              <span className="mono" style={{ fontSize: 11, color: C.faint }}>h</span>
-              {_debugDate && (
-                <>
-                  <span className="mono" style={{ fontSize: 10, color: C.faint, letterSpacing: ".08em" }}>→ {computePlace()}</span>
-                  <button className="link" style={{ color: C.faint, fontSize: 10 }} onClick={() => { setDebugDay(""); setDebugHour(""); applyDebugTime("", ""); }}>↺</button>
-                </>
-              )}
-            </div>
+            {/* fake-clock override — sandbox only. Shipping this in prod meant the real
+                app could have its date/time silently forced away from realNow(), which
+                the live engine (pickAging, caps, place) reads directly — a real user has
+                no legitimate reason to lie to the engine about what time it is. */}
+            {SIM && (
+              <div style={{ marginTop: 14, display: "flex", justifyContent: "center", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                <input type="date"
+                  value={debugDay}
+                  onChange={e => { setDebugDay(e.target.value); applyDebugTime(e.target.value, debugHour); }}
+                  className="mono"
+                  style={{ fontSize: 11, color: C.mut, background: "transparent", border: "none", borderBottom: `1px solid ${C.soft}`, outline: "none", padding: "2px 4px" }} />
+                <input type="number" min="0" max="23" placeholder="h"
+                  value={debugHour}
+                  onChange={e => { setDebugHour(e.target.value); applyDebugTime(debugDay, e.target.value); }}
+                  className="mono"
+                  style={{ width: 38, fontSize: 11, color: C.mut, background: "transparent", border: "none", borderBottom: `1px solid ${C.soft}`, outline: "none", padding: "2px 4px", textAlign: "center" }} />
+                <span className="mono" style={{ fontSize: 11, color: C.faint }}>h</span>
+                {_debugDate && (
+                  <>
+                    <span className="mono" style={{ fontSize: 10, color: C.faint, letterSpacing: ".08em" }}>→ {computePlace()}</span>
+                    <button className="link" style={{ color: C.faint, fontSize: 10 }} onClick={() => { setDebugDay(""); setDebugHour(""); applyDebugTime("", ""); }}>↺</button>
+                  </>
+                )}
+              </div>
+            )}
           </div>
         </div>
 
@@ -1812,109 +2285,6 @@ function Meta({ label, children }) {
     <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
       <span className="lab">{label}</span>
       {children}
-    </div>
-  );
-}
-
-/* ------------------------- progress ------------------------- */
-function Progress({ activities, log, quickLog, delLog }) {
-  const ws = weekStartKey();
-  const today = todayKey();
-  const nameOf = (id) => (activities.find((a) => a.id === id) || {}).name || "—";
-  const minByDomain = {};
-  DOMAINS.forEach((d) => (minByDomain[d.key] = 0));
-  log.filter((e) => e.date >= ws && isDone(e)).forEach((e) => { minByDomain[e.domain] = (minByDomain[e.domain] || 0) + (e.min || 0); });
-  const maxD = Math.max(1, ...Object.values(minByDomain));
-  const totalWeek = Object.values(minByDomain).reduce((s, n) => s + n, 0);
-  const todayLog = log.filter((e) => e.date === today && isDone(e)).slice().reverse();
-  const skipsWeek = log.filter((e) => e.date >= ws && !isDone(e)).length;
-
-  return (
-    <div style={{ marginTop: 30 }}>
-      {/* this week — time */}
-      <div className="fade">
-        <div className="lab" style={{ marginBottom: 16 }}>this week — time spent</div>
-        {totalWeek === 0 && <div className="mono" style={{ fontSize: 12, color: C.faint, marginBottom: 8 }}>nothing logged yet this week</div>}
-        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          {DOMAINS.map((d) => (
-            <div key={d.key} style={{ display: "flex", alignItems: "center", gap: 12 }}>
-              <span className="mono" style={{ fontSize: 10, width: 64, color: C.mut, letterSpacing: ".08em" }}>{d.label}</span>
-              <div style={{ flex: 1, height: 6, background: C.soft }}>
-                <div style={{ width: `${(minByDomain[d.key] / maxD) * 100}%`, height: "100%", background: d.color, opacity: 0.75 }} />
-              </div>
-              <span className="mono" style={{ fontSize: 10, width: 48, textAlign: "right", color: minByDomain[d.key] ? C.bone : C.faint }}>{fmtMin(minByDomain[d.key])}</span>
-            </div>
-          ))}
-        </div>
-        <div className="mono" style={{ fontSize: 9.5, color: C.faint, marginTop: 12, letterSpacing: ".06em" }}>
-          {fmtMin(totalWeek)} this week · time, not tallies.{skipsWeek > 0 ? `  ·  ${skipsWeek} passed on` : ""}
-        </div>
-      </div>
-
-      {/* today */}
-      <div className="fade" style={{ marginTop: 38 }}>
-        <hr className="softrule" />
-        <div className="lab" style={{ margin: "24px 0 16px" }}>today</div>
-        {todayLog.length === 0 && <div className="mono" style={{ fontSize: 12, color: C.faint }}>nothing logged today</div>}
-        <div style={{ display: "flex", flexDirection: "column", gap: 13 }}>
-          {todayLog.map((e) => (
-            <div key={e.id} style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
-              <span className="dot" style={{ background: dColor(e.domain), marginTop: 6 }} />
-              <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 15, fontWeight: 300 }}>{nameOf(e.activityId)} <span className="mono" style={{ fontSize: 10, color: C.faint }}>· {fmtMin(e.min)}</span></div>
-                {e.note ? <div style={{ fontSize: 13.5, fontWeight: 300, fontStyle: "italic", color: C.mut, marginTop: 2, lineHeight: 1.4 }}>{e.note}</div> : null}
-              </div>
-              <button className="x" onClick={() => delLog(e.id)} aria-label="remove">×</button>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      {/* by activity */}
-      <div className="fade" style={{ marginTop: 38 }}>
-        <hr className="softrule" />
-        <div className="lab" style={{ margin: "24px 0 18px" }}>by activity</div>
-        <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
-          {activities.map((a) => {
-            const wkMin = log.filter((e) => e.date >= ws && e.activityId === a.id && isDone(e)).reduce((s, e) => s + (e.min || 0), 0);
-            const totMin = log.filter((e) => e.activityId === a.id && isDone(e)).reduce((s, e) => s + (e.min || 0), 0);
-            const items = a.items || [];
-            const isPipe = a.kind === "pipeline";
-            const doneItems = items.filter((i) => i.status === "done").length;
-            const stageTxt = (it) => { const s = (a.stages || [])[it.stage ?? 0]; return s ? s.text : "—"; };
-            return (
-              <div key={a.id}>
-                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                  <span className="dot" style={{ background: dColor(a.domain) }} />
-                  <span style={{ flex: 1, fontSize: 16, fontWeight: 300 }}>{a.name || "untitled"}</span>
-                  <span className="mono" style={{ fontSize: 10, color: C.mut }}>{fmtMin(wkMin)} this wk · {fmtMin(totMin)} total</span>
-                </div>
-                {items.length > 0 && (
-                  <div style={{ paddingLeft: 18, marginTop: 8 }}>
-                    <span className="mono" style={{ fontSize: 9.5, color: C.faint, letterSpacing: ".08em" }}>{isPipe ? `${items.length} piece${items.length > 1 ? "s" : ""} in the funnel` : `${doneItems}/${items.length} done`}</span>
-                    <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 6 }}>
-                      {items.map((it) => (
-                        isPipe ? (
-                          <span key={it.id} className="mono" style={{ fontSize: 10.5, color: C.text }}>
-                            {it.text} <span style={{ color: C.faint }}>· {stageTxt(it)}</span>
-                          </span>
-                        ) : (
-                          <span key={it.id} className="mono" style={{ fontSize: 10.5, color: it.status === "done" ? C.mut : C.text, textDecoration: it.status === "done" ? "line-through" : "none" }}>
-                            {it.text}{it.status === "doing" ? " ·" : ""}
-                          </span>
-                        )
-                      ))}
-                    </div>
-                  </div>
-                )}
-                <div style={{ paddingLeft: 18, marginTop: 6 }}>
-                  <button className="link" onClick={() => quickLog(a)}>+ did this today</button>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </div>
     </div>
   );
 }
