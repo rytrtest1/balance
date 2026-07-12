@@ -762,7 +762,9 @@ Réponds avec un titre court (nom de l'œuvre, du plat, du morceau…) et un sou
     required: ["title"],
     additionalProperties: false,
   }, 250);
-  return out.subtitle ? `${out.title} — ${out.subtitle}` : out.title;
+  // title/desc kept separate (not pre-joined) — the "now" line shows only the title,
+  // subtitle (artist/director/note) lives in the collapsible description below it.
+  return { title: out.title, desc: out.subtitle || "" };
 }
 
 // ---------- palette / css ----------
@@ -909,10 +911,11 @@ function Throughline() {
 
   // after-session comment + the Claude bridge that advances pipeline pieces
   const [comment, setComment] = useState("");
-  // recommandeur (musique, film…): the after-session comment isn't required — Claude's
-  // suggestion stands on its own — so it starts collapsed behind a reveal link instead
-  // of an always-visible field (Maxence 12/07). Other kinds keep it visible as before.
-  const [noteOpen, setNoteOpen] = useState(false);
+  // recommandeur (musique, film…): the line shows ONLY the title Claude picked — what
+  // describes it (artist/director/note) sits in a dropdown, collapsed by default
+  // (Maxence 12/07: "je veux qu'apparaisse seulement le titre... et ce qui décrit la
+  // recommandation dans un champ séparé en dessous, genre drop-down").
+  const [descOpen, setDescOpen] = useState(false);
   const [doneEntryId, setDoneEntryId] = useState(null);
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState("");
@@ -1039,13 +1042,14 @@ function Throughline() {
           if (!key) return;
           setGenerating(true);
           try {
-            const text = await generateReco(key, p.activity, p.action, logUse);
+            const { title, desc } = await generateReco(key, p.activity, p.action, logUse);
             // baseText: the underlying sub-action (e.g. "écouter un titre" vs "écouter un
             // album") — Claude's generated title replaces `text` entirely, which used to
             // erase which sub-action was actually drawn (Maxence 12/07: espagnol/musique
             // etc — "bien afficher la sous-activité sinon on comprend mal"). Kept alongside
-            // so the UI can still show it.
-            setCurrent((c) => c && c.activity.id === p.activity.id ? { ...c, action: { ...c.action, baseText: c.action.baseText || c.action.text, text } } : c);
+            // so the UI can still show it. `desc` (artist/director/note) is what describes
+            // the pick — shown only in the collapsible dropdown, never on the main line.
+            setCurrent((c) => c && c.activity.id === p.activity.id ? { ...c, action: { ...c.action, baseText: c.action.baseText || c.action.text, text: title, desc } } : c);
           } catch (e) {}
           finally { setGenerating(false); }
         })();
@@ -1073,7 +1077,7 @@ function Throughline() {
     saveJSON(NS("tlx_hold"), { date: today, ms: next });
     propose(log, activities, false, current ? current.activity.id : null);
   };
-  const resetFlow = () => { setStage("entry"); setCurrent(null); setShowWhy(false); setRunning(false); setElapsedMs(0); setPaused(false); setComment(""); setNoteOpen(false); setSyncMsg(""); setSyncing(false); setGenerating(false); };
+  const resetFlow = () => { setStage("entry"); setCurrent(null); setShowWhy(false); setRunning(false); setElapsedMs(0); setPaused(false); setComment(""); setDescOpen(false); setSyncMsg(""); setSyncing(false); setGenerating(false); };
 
   // ----- after-session comment → advance the pipeline piece via a direct Claude call -----
   // The comment is the ONLY thing that moves a pipeline piece forward (no tap-to-advance).
@@ -1301,7 +1305,7 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
     // the line on "done" (submitComment) applies the delta if one is.
     if (SIM) simAdvanceMinutes(minLogged);
     setRunning(false); setShowWhy(false);
-    setComment(""); setManualMin(""); setNoteOpen(false);
+    setComment(""); setManualMin(""); setDescOpen(false);
     setStage("done");
   };
 
@@ -1740,6 +1744,17 @@ Réponds avec : activity_id = l'id exact du catalogue qui correspond le mieux. a
                     <div style={{ fontFamily: "var(--mono)", fontSize: 13, fontWeight: 400, lineHeight: 1.55, letterSpacing: ".02em", textTransform: "lowercase", color: stage === "done" ? C.mut : C.text }}>
                       {generating ? <span className="breathe" style={{ color: C.faint, letterSpacing: ".22em" }}>…</span> : current.action.text}
                     </div>
+                    {/* recommandeur (musique, film…): the line above is ONLY the title — what
+                        describes it (artist/director/note) sits behind a reveal/hide toggle,
+                        collapsed by default (Maxence 12/07). */}
+                    {current.action.desc && (
+                      <div style={{ marginTop: 10 }}>
+                        <button className="link" onClick={() => setDescOpen((o) => !o)}>{descOpen ? "cacher" : "détails"}</button>
+                        {descOpen && (
+                          <div className="fade mono" style={{ fontSize: 11, color: C.mut, marginTop: 8, lineHeight: 1.5 }}>{current.action.desc}</div>
+                        )}
+                      </div>
+                    )}
                   </div>
                 )}
 
@@ -1851,27 +1866,18 @@ Réponds avec : activity_id = l'id exact du catalogue qui correspond le mieux. a
                           )}
                           <span className="mono" style={{ fontSize: 10, color: C.faint }}>min</span>
                         </div>
-                        {/* recommandeur (musique, film…): not obligatory — Claude's suggestion
-                            stands on its own, so the field stays tucked behind a reveal link
-                            until asked for (Maxence 12/07). Other kinds keep it visible. */}
-                        {current && current.activity.kind === "recommandeur" && !noteOpen ? (
-                          <button className="link" onClick={() => setNoteOpen(true)}>un mot sur la reco ? (optionnel)</button>
-                        ) : (
-                          <>
-                            <input className="in" value={comment} placeholder="un mot sur cette session ?"
-                              onChange={(e) => setComment(e.target.value)}
-                              onKeyDown={(e) => { if (e.key === "Enter") submitComment(); }}
-                              style={{ fontSize: 14, textAlign: "center", maxWidth: 360, margin: "0 auto", display: "block", borderBottom: `1px solid ${C.line}`, paddingBottom: 8, fontStyle: comment ? "normal" : "italic", color: comment ? C.text : C.faint }} />
-                            {current && (() => {
-                              const k = current.activity.kind;
-                              const hint = k === "pipeline" ? "ton mot fait avancer la pièce dans le funnel"
-                                : k === "recommandeur" ? "ton mot affine le profil pour la prochaine reco"
-                                : k === "practice" ? "ton mot nourrit la mémoire de l'activité"
-                                : null;
-                              return hint ? <div className="mono" style={{ fontSize: 9, color: C.faint, marginTop: 14, letterSpacing: ".06em" }}>{hint}</div> : null;
-                            })()}
-                          </>
-                        )}
+                        <input className="in" value={comment} placeholder="un mot sur cette session ?"
+                          onChange={(e) => setComment(e.target.value)}
+                          onKeyDown={(e) => { if (e.key === "Enter") submitComment(); }}
+                          style={{ fontSize: 14, textAlign: "center", maxWidth: 360, margin: "0 auto", display: "block", borderBottom: `1px solid ${C.line}`, paddingBottom: 8, fontStyle: comment ? "normal" : "italic", color: comment ? C.text : C.faint }} />
+                        {current && (() => {
+                          const k = current.activity.kind;
+                          const hint = k === "pipeline" ? "ton mot fait avancer la pièce dans le funnel"
+                            : k === "recommandeur" ? "ton mot affine le profil pour la prochaine reco"
+                            : k === "practice" ? "ton mot nourrit la mémoire de l'activité"
+                            : null;
+                          return hint ? <div className="mono" style={{ fontSize: 9, color: C.faint, marginTop: 14, letterSpacing: ".06em" }}>{hint}</div> : null;
+                        })()}
                       </>
                     )}
                   </div>
