@@ -795,7 +795,7 @@ const css = `
 .ghost:hover{color:${C.mut}}
 .x{font-family:var(--mono);font-size:15px;color:${C.faint};background:none;border:none;cursor:pointer;padding:4px;transition:color .2s}
 .x:hover{color:${C.text}}
-.dot{width:8px;height:8px;border-radius:50%;flex:none}
+.dot{width:8px;height:8px;border-radius:50%;flex:none;padding:0;margin:0;line-height:0;-webkit-appearance:none;appearance:none}
 .chip{font-family:var(--mono);font-size:9.5px;letter-spacing:.1em;text-transform:uppercase;padding:4px 9px;border:1px solid ${C.line};color:${C.mut};background:transparent;cursor:pointer;transition:all .18s}
 .chip.on{color:${C.bg};background:${C.bone};border-color:${C.bone}}
 .fade{opacity:0;transform:translateY(8px);animation:fu .5s cubic-bezier(.2,.7,.2,1) forwards}
@@ -909,6 +909,10 @@ function Throughline() {
 
   // after-session comment + the Claude bridge that advances pipeline pieces
   const [comment, setComment] = useState("");
+  // recommandeur (musique, film…): the after-session comment isn't required — Claude's
+  // suggestion stands on its own — so it starts collapsed behind a reveal link instead
+  // of an always-visible field (Maxence 12/07). Other kinds keep it visible as before.
+  const [noteOpen, setNoteOpen] = useState(false);
   const [doneEntryId, setDoneEntryId] = useState(null);
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState("");
@@ -1036,7 +1040,12 @@ function Throughline() {
           setGenerating(true);
           try {
             const text = await generateReco(key, p.activity, p.action, logUse);
-            setCurrent((c) => c && c.activity.id === p.activity.id ? { ...c, action: { ...c.action, text } } : c);
+            // baseText: the underlying sub-action (e.g. "écouter un titre" vs "écouter un
+            // album") — Claude's generated title replaces `text` entirely, which used to
+            // erase which sub-action was actually drawn (Maxence 12/07: espagnol/musique
+            // etc — "bien afficher la sous-activité sinon on comprend mal"). Kept alongside
+            // so the UI can still show it.
+            setCurrent((c) => c && c.activity.id === p.activity.id ? { ...c, action: { ...c.action, baseText: c.action.baseText || c.action.text, text } } : c);
           } catch (e) {}
           finally { setGenerating(false); }
         })();
@@ -1064,7 +1073,7 @@ function Throughline() {
     saveJSON(NS("tlx_hold"), { date: today, ms: next });
     propose(log, activities, false, current ? current.activity.id : null);
   };
-  const resetFlow = () => { setStage("entry"); setCurrent(null); setShowWhy(false); setRunning(false); setElapsedMs(0); setPaused(false); setComment(""); setSyncMsg(""); setSyncing(false); setGenerating(false); };
+  const resetFlow = () => { setStage("entry"); setCurrent(null); setShowWhy(false); setRunning(false); setElapsedMs(0); setPaused(false); setComment(""); setNoteOpen(false); setSyncMsg(""); setSyncing(false); setGenerating(false); };
 
   // ----- after-session comment → advance the pipeline piece via a direct Claude call -----
   // The comment is the ONLY thing that moves a pipeline piece forward (no tap-to-advance).
@@ -1232,7 +1241,12 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
     const i = TABS.indexOf(tab);
     const ni = Math.min(TABS.length - 1, Math.max(0, i + dir));
     if (ni === i) return;
-    const t = TABS[ni]; setTab(t); if (t === "now") resetFlow();
+    // Fixed 12/07 (Maxence): this used to call resetFlow() on arriving back at
+    // "now", which silently wiped a running/awaiting-comment session — swiping to
+    // "activities" and back was a free, unpenalised skip that bypassed the hold-
+    // to-swap cost entirely. The flow state is already restored from tlx_flow on
+    // reload; a same-session tab switch needs no reset at all.
+    const t = TABS[ni]; setTab(t);
   };
   const touchRef = useRef(null);
   const onTouchStart = (e) => { const t = e.touches[0]; touchRef.current = { x: t.clientX, y: t.clientY }; };
@@ -1287,7 +1301,7 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
     // the line on "done" (submitComment) applies the delta if one is.
     if (SIM) simAdvanceMinutes(minLogged);
     setRunning(false); setShowWhy(false);
-    setComment(""); setManualMin("");
+    setComment(""); setManualMin(""); setNoteOpen(false);
     setStage("done");
   };
 
@@ -1700,8 +1714,11 @@ Réponds avec : activity_id = l'id exact du catalogue qui correspond le mieux. a
         )}
 
         {/* =================== NOW =================== */}
+        {/* full viewport height (not calc(100vh-150px) as before): guarantees the line is
+            the only thing on screen at open — save/load/log/reset below only reach the
+            fold on scroll (Maxence 12/07: was visible without scrolling on his phone). */}
         {tab === "now" && (
-          <div style={{ display: "flex", flexDirection: "column", minHeight: "calc(100vh - 150px)" }}>
+          <div style={{ display: "flex", flexDirection: "column", minHeight: "100vh" }}>
 
             {/* the stage: instruction above, the living line as hero, controls below — vertically centered */}
             <div style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "center", paddingBottom: 30 }}>
@@ -1714,6 +1731,12 @@ Réponds avec : activity_id = l'id exact du catalogue qui correspond le mieux. a
                     <div className="mono" style={{ fontSize: 10, letterSpacing: ".22em", textTransform: "uppercase", color: C.faint, marginBottom: 18 }}>
                       <span className="dot" style={{ background: dColor(current.activity.domain), display: "inline-block", marginRight: 10, verticalAlign: "middle" }} />{current.activity.name}
                     </div>
+                    {/* sub-activity: shown whenever the main line no longer carries it — a
+                        Claude-generated title (musique/film) replaces the underlying action
+                        entirely (titre vs album, etc.), so surface the original alongside it. */}
+                    {current.action.baseText && current.action.baseText !== current.action.text && (
+                      <div className="mono" style={{ fontSize: 10, letterSpacing: ".1em", color: C.faint, marginBottom: 8 }}>{current.action.baseText}</div>
+                    )}
                     <div style={{ fontFamily: "var(--mono)", fontSize: 13, fontWeight: 400, lineHeight: 1.55, letterSpacing: ".02em", textTransform: "lowercase", color: stage === "done" ? C.mut : C.text }}>
                       {generating ? <span className="breathe" style={{ color: C.faint, letterSpacing: ".22em" }}>…</span> : current.action.text}
                     </div>
@@ -1828,18 +1851,27 @@ Réponds avec : activity_id = l'id exact du catalogue qui correspond le mieux. a
                           )}
                           <span className="mono" style={{ fontSize: 10, color: C.faint }}>min</span>
                         </div>
-                        <input className="in" value={comment} placeholder="un mot sur cette session ?"
-                          onChange={(e) => setComment(e.target.value)}
-                          onKeyDown={(e) => { if (e.key === "Enter") submitComment(); }}
-                          style={{ fontSize: 14, textAlign: "center", maxWidth: 360, margin: "0 auto", display: "block", borderBottom: `1px solid ${C.line}`, paddingBottom: 8, fontStyle: comment ? "normal" : "italic", color: comment ? C.text : C.faint }} />
-                        {current && (() => {
-                          const k = current.activity.kind;
-                          const hint = k === "pipeline" ? "ton mot fait avancer la pièce dans le funnel"
-                            : k === "recommandeur" ? "ton mot affine le profil pour la prochaine reco"
-                            : k === "practice" ? "ton mot nourrit la mémoire de l'activité"
-                            : null;
-                          return hint ? <div className="mono" style={{ fontSize: 9, color: C.faint, marginTop: 14, letterSpacing: ".06em" }}>{hint}</div> : null;
-                        })()}
+                        {/* recommandeur (musique, film…): not obligatory — Claude's suggestion
+                            stands on its own, so the field stays tucked behind a reveal link
+                            until asked for (Maxence 12/07). Other kinds keep it visible. */}
+                        {current && current.activity.kind === "recommandeur" && !noteOpen ? (
+                          <button className="link" onClick={() => setNoteOpen(true)}>un mot sur la reco ? (optionnel)</button>
+                        ) : (
+                          <>
+                            <input className="in" value={comment} placeholder="un mot sur cette session ?"
+                              onChange={(e) => setComment(e.target.value)}
+                              onKeyDown={(e) => { if (e.key === "Enter") submitComment(); }}
+                              style={{ fontSize: 14, textAlign: "center", maxWidth: 360, margin: "0 auto", display: "block", borderBottom: `1px solid ${C.line}`, paddingBottom: 8, fontStyle: comment ? "normal" : "italic", color: comment ? C.text : C.faint }} />
+                            {current && (() => {
+                              const k = current.activity.kind;
+                              const hint = k === "pipeline" ? "ton mot fait avancer la pièce dans le funnel"
+                                : k === "recommandeur" ? "ton mot affine le profil pour la prochaine reco"
+                                : k === "practice" ? "ton mot nourrit la mémoire de l'activité"
+                                : null;
+                              return hint ? <div className="mono" style={{ fontSize: 9, color: C.faint, marginTop: 14, letterSpacing: ".06em" }}>{hint}</div> : null;
+                            })()}
+                          </>
+                        )}
                       </>
                     )}
                   </div>
@@ -2032,7 +2064,7 @@ Réponds avec : activity_id = l'id exact du catalogue qui correspond le mieux. a
           </div>
         )}
 
-        {/* =================== FOOTER — save / load centered, reset tucked further below. no rule: the only line is the one in the centre. =================== */}
+        {/* =================== FOOTER — save / load centered, reset tucked further below. no rule: the only line is the one in the centre. Stays on every tab including "now" (Maxence 12/07: not moved off it) — pushed below the fold instead via the "now" tab's full-viewport minHeight below, so opening the app shows only the line; scrolling down reveals this. =================== */}
         <div className="fade" style={{ marginTop: 72, textAlign: "center" }}>
           <div style={{ display: "flex", justifyContent: "center", alignItems: "center", gap: 26 }}>
             <button className="link" onClick={shareBackup}>save</button>
