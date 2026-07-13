@@ -1642,12 +1642,16 @@ Réponds avec : activity_id = l'id exact du catalogue qui correspond le mieux. a
     try {
       const o = JSON.parse(text);
       if (!o.activities) throw new Error("no activities");
-      // "load" updates activity definitions only, never the log — a catalogue file
-      // always carries a "log" key (even if just []), and blindly importing it used
-      // to silently wipe or reintroduce stale dated history into a live session,
-      // producing debts (e.g. vaisselle) that looked like a bug but were really old
-      // data leaking back in (Maxence 11/07). Progress data is never touched by load.
+      // Loading mid-session (log already has entries) must never touch the log —
+      // a catalogue file always carries a "log" key (even if just []), and blindly
+      // importing it used to silently wipe or reintroduce stale dated history into
+      // a live session, producing debts (e.g. vaisselle) that looked like a bug but
+      // were really old data leaking back in (Maxence 11/07).
+      // But when the live log is empty (fresh session — e.g. recovering after a
+      // lost session), a real backup file's log should come back too, or "load"
+      // can never actually restore history (Maxence 13/07).
       setActivities(o.activities);
+      if (log.length === 0 && Array.isArray(o.log) && o.log.length > 0) setLog(o.log);
       setMsg("loaded ✓"); setTab("now"); setStage("entry");
     } catch { setMsg("couldn't read that — check the file/text"); }
     setTimeout(() => setMsg(""), 2200);
