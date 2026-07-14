@@ -941,6 +941,8 @@ function Throughline() {
   // null while not yet computed (or between visits). Curated, not a dump of every
   // comment (Maxence 14/07: "un best of... comme dans ta maquette").
   const [bestOf, setBestOf] = useState(null);
+  // collapsed by default each time the rapport opens — tap the "moments" row to reveal.
+  const [momentsOpen, setMomentsOpen] = useState(false);
   const [logOpen, setLogOpen] = useState(false);
   const [logText, setLogText] = useState("");
   const [logBusy, setLogBusy] = useState(false);
@@ -983,6 +985,7 @@ function Throughline() {
   // worth surfacing (surprising, an emotion, a real insight — not a flat description).
   // No key → fall back to the 3 most recent rather than everything.
   useEffect(() => {
+    setMomentsOpen(false);
     if (stage !== "report") { setBestOf(null); return; }
     const todayAll = log.filter((e) => e.date === todayKey() && isDone(e));
     const withNotes = todayAll.filter((e) => e.note && e.note.trim());
@@ -1786,9 +1789,9 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
   // own label via actionText) and any comment left, as a quote. Closing goes back to
   // the live line via resetFlow(), same door as everywhere else.
   if (stage === "report") {
-    // real completions only (isClick) for the list/count/min — a free-log "note"
-    // entry (submitFreeLog) isn't an activity done, it shouldn't pad either. Quotes
-    // pull from every non-skip entry with a comment though, standalone notes included.
+    // real completions only (isClick) — a free-log "note" entry (submitFreeLog) isn't
+    // an activity done, it shouldn't take a share of the line. Quotes pull from every
+    // non-skip entry with a comment though, standalone notes included.
     const todayAll = log.filter((e) => e.date === todayKey() && isDone(e)).sort((a, b) => a.ts - b.ts);
     const todayLog = todayAll.filter(isClick);
     const totalMin = todayLog.reduce((s, e) => s + (e.min || 0), 0);
@@ -1796,6 +1799,28 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
     // best-of, not every comment (see the useEffect above) — null means still curating
     const quotes = bestOf === null ? [] : allQuotes.filter((e) => bestOf.includes(e.id));
     const curating = bestOf === null && allQuotes.length > 0;
+
+    // the day as one full line — no gaps for real elapsed time (a hole between two
+    // sessions read as "not enough was done", per Maxence 14/07). Each activity's
+    // share is relative to the day's total *active* minutes, always summing to 100%.
+    // A pause is marked with a dot exactly on the boundary (not sized to how long it
+    // lasted) only when the real gap to the next session clears PAUSE_MS — small
+    // natural gaps between sessions get nothing, just the plain 1px seam every
+    // boundary already has (an inset box-shadow, so it never eats into the 100%).
+    const PAUSE_MS = 45 * 60 * 1000;
+    let cum = 0, aboveN = 0, belowN = 0;
+    const segs = todayLog.map((e, i) => {
+      const wPct = totalMin ? (e.min / totalMin) * 100 : 0;
+      const leftPct = cum;
+      cum += wPct;
+      const next = todayLog[i + 1];
+      const pauseAfter = next ? (next.ts - next.min * 60000) - e.ts > PAUSE_MS : false;
+      const isAbove = i % 2 === 0;
+      const depth = 14 + ((isAbove ? aboveN : belowN) % 2) * 16;
+      if (isAbove) aboveN++; else belowN++;
+      return { e, leftPct, wPct, centerPct: leftPct + wPct / 2, rightPct: leftPct + wPct, pauseAfter, isAbove, depth };
+    });
+
     return (
       <div className="tl">
         <style dangerouslySetInnerHTML={{ __html: css }} />
@@ -1804,34 +1829,57 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
           <div className="mono" style={{ fontSize: 10, letterSpacing: ".22em", textTransform: "uppercase", color: C.faint, marginBottom: 24 }}>
             rapport · {fmtLong(todayKey())}
           </div>
-          <div className="mono" style={{ fontSize: 13, color: C.mut, marginBottom: 28 }}>
+          <div className="mono" style={{ fontSize: 13, color: C.mut, marginBottom: 78 }}>
             {todayLog.length} clics · {totalMin} min
           </div>
-          <div style={{ marginBottom: quotes.length ? 30 : 0 }}>
-            {todayLog.map((e) => (
-              <div key={e.id} style={{ display: "flex", alignItems: "center", gap: 10, borderBottom: `1px solid ${C.soft}`, padding: "9px 0" }}>
-                <span className="dot" style={{ background: C.mut, flex: "none" }} />
-                <span style={{ flex: 1, fontSize: 14, color: C.text, textTransform: "lowercase" }}>{e.actionText}</span>
-                <span className="mono" style={{ fontSize: 11, color: C.faint }}>{e.min} min</span>
-              </div>
+
+          <div style={{ position: "relative", height: 8, marginBottom: 78 }}>
+            {segs.map((s, i) => (
+              <div key={s.e.id} style={{
+                position: "absolute", left: `${s.leftPct}%`, width: `${s.wPct}%`, top: 0, height: 8,
+                background: C.bone,
+                boxShadow: i < segs.length - 1 ? `1px 0 0 ${C.bg} inset` : "none",
+              }} />
+            ))}
+            {segs.filter((s) => s.pauseAfter).map((s) => (
+              <div key={`p${s.e.id}`} style={{
+                position: "absolute", left: `${s.rightPct}%`, top: 4, width: 4, height: 4,
+                borderRadius: "50%", background: C.mut, transform: "translate(-50%, -50%)",
+              }} />
+            ))}
+            {segs.map((s) => (
+              <React.Fragment key={`l${s.e.id}`}>
+                <div style={{
+                  position: "absolute", left: `${s.centerPct}%`, width: 1, background: C.line,
+                  top: s.isAbove ? -s.depth : 4, height: s.depth,
+                }} />
+                <div className="mono" style={{
+                  position: "absolute", left: `${s.centerPct}%`, transform: "translateX(-50%)",
+                  top: s.isAbove ? -s.depth - 12 : s.depth + 4,
+                  fontSize: 9.5, color: C.faint, whiteSpace: "nowrap",
+                }}>{s.e.actionText}</div>
+              </React.Fragment>
             ))}
           </div>
-          {curating && (
-            <div className="mono" style={{ fontSize: 10, color: C.faint, marginBottom: 30 }}>…</div>
-          )}
-          {quotes.length > 0 && (
-            <div style={{ marginBottom: 30 }}>
-              <div className="mono" style={{ fontSize: 10, letterSpacing: ".14em", textTransform: "uppercase", color: C.faint, marginBottom: 14 }}>moments</div>
-              <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-                {quotes.map((e) => (
-                  <div key={e.id}>
-                    <div style={{ fontFamily: "var(--serif)", fontStyle: "italic", fontWeight: 300, fontSize: 14, color: C.text, lineHeight: 1.5 }}>« {e.note.trim()} »</div>
-                    <div className="mono" style={{ fontSize: 9.5, color: C.faint, marginTop: 5, letterSpacing: ".08em", textTransform: "uppercase" }}>{e.actionText || "note libre"}</div>
-                  </div>
-                ))}
-              </div>
+
+          <div className="tlx-toggle" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 0", borderTop: `1px solid ${C.line}`, cursor: "pointer" }}
+            onClick={() => setMomentsOpen((o) => !o)}>
+            <span className="mono" style={{ fontSize: 10, letterSpacing: ".14em", textTransform: "uppercase", color: C.faint }}>
+              moments{curating ? " …" : ""}
+            </span>
+            {!curating && quotes.length > 0 && <span className="mono" style={{ fontSize: 12, color: C.faint }}>{momentsOpen ? "−" : "+"}</span>}
+          </div>
+          {momentsOpen && quotes.length > 0 && (
+            <div className="fade" style={{ display: "flex", flexDirection: "column", gap: 16, paddingTop: 16 }}>
+              {quotes.map((e) => (
+                <div key={e.id}>
+                  <div style={{ fontFamily: "var(--serif)", fontStyle: "italic", fontWeight: 300, fontSize: 14, color: C.text, lineHeight: 1.5 }}>« {e.note.trim()} »</div>
+                  <div className="mono" style={{ fontSize: 9.5, color: C.faint, marginTop: 5, letterSpacing: ".08em", textTransform: "uppercase" }}>{e.actionText || "note libre"}</div>
+                </div>
+              ))}
             </div>
           )}
+
           <button className="link" style={{ alignSelf: "center", marginTop: "auto" }} onClick={() => resetFlow()}>fermer</button>
         </div>
       </div>
