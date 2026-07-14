@@ -937,6 +937,10 @@ function Throughline() {
   const [syncMsg, setSyncMsg] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [keyOpen, setKeyOpen] = useState(false);
+  // rapport "moments": ids of the comments Claude picked as most worth surfacing —
+  // null while not yet computed (or between visits). Curated, not a dump of every
+  // comment (Maxence 14/07: "un best of... comme dans ta maquette").
+  const [bestOf, setBestOf] = useState(null);
   const [logOpen, setLogOpen] = useState(false);
   const [logText, setLogText] = useState("");
   const [logBusy, setLogBusy] = useState(false);
@@ -973,6 +977,40 @@ function Throughline() {
     window.addEventListener("devicemotion", onMotion);
     return () => window.removeEventListener("devicemotion", onMotion);
   }, []);
+
+  // rapport "moments": curate rather than dump every comment of the day. ≤3 comments
+  // total → just show them, no call needed. Otherwise ask Claude to pick the 3-4 most
+  // worth surfacing (surprising, an emotion, a real insight — not a flat description).
+  // No key → fall back to the 3 most recent rather than everything.
+  useEffect(() => {
+    if (stage !== "report") { setBestOf(null); return; }
+    const todayAll = log.filter((e) => e.date === todayKey() && isDone(e));
+    const withNotes = todayAll.filter((e) => e.note && e.note.trim());
+    if (withNotes.length <= 3) { setBestOf(withNotes.map((e) => e.id)); return; }
+    let alive = true;
+    (async () => {
+      const key = (await store.get("tlx_apiKey")) || "";
+      if (!key) { if (alive) setBestOf(withNotes.slice(-3).map((e) => e.id)); return; }
+      try {
+        const list = withNotes.map((e, i) => `${i}: [${e.actionText || "note libre"}] ${e.note.trim()}`).join("\n");
+        const prompt = `Voici tous les commentaires que Maxence a laissés aujourd'hui dans throughline, en repère numéroté :
+${list}
+
+Choisis les 3 ou 4 index les plus notables pour un récap de fin de journée — privilégie ce qui est inattendu, une émotion forte, une vraie découverte ou un insight sur lui-même, pas une simple description factuelle. Réponds avec indices = la liste de ces index, dans l'ordre où ils apparaissent.`;
+        const out = await claudeJSON(key, prompt, {
+          type: "object",
+          properties: { indices: { type: "array", items: { type: "integer" } } },
+          required: ["indices"],
+          additionalProperties: false,
+        }, 200);
+        const chosen = (out.indices || []).map((i) => withNotes[i]).filter(Boolean).map((e) => e.id);
+        if (alive) setBestOf(chosen.length ? chosen : withNotes.slice(-3).map((e) => e.id));
+      } catch {
+        if (alive) setBestOf(withNotes.slice(-3).map((e) => e.id));
+      }
+    })();
+    return () => { alive = false; };
+  }, [stage]);
 
   useEffect(() => {
     // Ask the browser to keep our data — without this, phones may evict
@@ -1754,7 +1792,10 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
     const todayAll = log.filter((e) => e.date === todayKey() && isDone(e)).sort((a, b) => a.ts - b.ts);
     const todayLog = todayAll.filter(isClick);
     const totalMin = todayLog.reduce((s, e) => s + (e.min || 0), 0);
-    const quotes = todayAll.filter((e) => e.note && e.note.trim());
+    const allQuotes = todayAll.filter((e) => e.note && e.note.trim());
+    // best-of, not every comment (see the useEffect above) — null means still curating
+    const quotes = bestOf === null ? [] : allQuotes.filter((e) => bestOf.includes(e.id));
+    const curating = bestOf === null && allQuotes.length > 0;
     return (
       <div className="tl">
         <style dangerouslySetInnerHTML={{ __html: css }} />
@@ -1775,6 +1816,9 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
               </div>
             ))}
           </div>
+          {curating && (
+            <div className="mono" style={{ fontSize: 10, color: C.faint, marginBottom: 30 }}>…</div>
+          )}
           {quotes.length > 0 && (
             <div style={{ marginBottom: 30 }}>
               <div className="mono" style={{ fontSize: 10, letterSpacing: ".14em", textTransform: "uppercase", color: C.faint, marginBottom: 14 }}>moments</div>
