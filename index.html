@@ -829,6 +829,15 @@ const css = `
 .link{font-family:var(--mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:${C.faint};background:none;border:none;cursor:pointer;transition:color .2s}
 .link:hover{color:${C.mut}}
 textarea.in{resize:vertical}
+.tlx-line-wrap{margin-bottom:72px}
+.tlx-seg{background:${C.bone};opacity:.88}
+.tlx-tick{background:${C.soft}}
+.tlx-seg-label{font-family:var(--mono);font-size:9.5px;letter-spacing:.04em;color:${C.faint};white-space:nowrap}
+@media (orientation:landscape){
+.wrap{max-width:900px}
+.tlx-line-wrap{margin-bottom:100px}
+.tlx-seg-label{font-size:11px}
+}
 input[type=range].sl{-webkit-appearance:none;appearance:none;height:2px;background:${C.line};outline:none;width:100%;margin:0}
 input[type=range].sl::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:16px;height:16px;border-radius:50%;background:${C.bone};cursor:pointer}
 input[type=range].sl::-moz-range-thumb{width:16px;height:16px;border:none;border-radius:50%;background:${C.bone};cursor:pointer}
@@ -1803,22 +1812,19 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
     // the day as one full line — no gaps for real elapsed time (a hole between two
     // sessions read as "not enough was done", per Maxence 14/07). Each activity's
     // share is relative to the day's total *active* minutes, always summing to 100%.
-    // A pause is marked with a dot exactly on the boundary (not sized to how long it
-    // lasted) only when the real gap to the next session clears PAUSE_MS — small
-    // natural gaps between sessions get nothing, just the plain 1px seam every
-    // boundary already has (an inset box-shadow, so it never eats into the 100%).
-    const PAUSE_MS = 45 * 60 * 1000;
+    // No pause marker at all (dropped 14/07 — "on oublie le point") — just the plain
+    // 1px seam every boundary already has (an inset box-shadow, never eats into the
+    // 100%). Landscape is the intended way to read this (manifest no longer locks
+    // portrait) — .wrap widens and the labels grow a touch via the css block above.
     let cum = 0, aboveN = 0, belowN = 0;
     const segs = todayLog.map((e, i) => {
       const wPct = totalMin ? (e.min / totalMin) * 100 : 0;
       const leftPct = cum;
       cum += wPct;
-      const next = todayLog[i + 1];
-      const pauseAfter = next ? (next.ts - next.min * 60000) - e.ts > PAUSE_MS : false;
       const isAbove = i % 2 === 0;
       const depth = 14 + ((isAbove ? aboveN : belowN) % 2) * 16;
       if (isAbove) aboveN++; else belowN++;
-      return { e, leftPct, wPct, centerPct: leftPct + wPct / 2, rightPct: leftPct + wPct, pauseAfter, isAbove, depth };
+      return { e, leftPct, wPct, centerPct: leftPct + wPct / 2, isAbove, depth };
     });
 
     return (
@@ -1833,30 +1839,22 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
             {todayLog.length} clics · {totalMin} min
           </div>
 
-          <div style={{ position: "relative", height: 8, marginBottom: 78 }}>
+          <div className="tlx-line-wrap" style={{ position: "relative", height: 3 }}>
             {segs.map((s, i) => (
-              <div key={s.e.id} style={{
-                position: "absolute", left: `${s.leftPct}%`, width: `${s.wPct}%`, top: 0, height: 8,
-                background: C.bone,
+              <div key={s.e.id} className="tlx-seg" style={{
+                position: "absolute", left: `${s.leftPct}%`, width: `${s.wPct}%`, top: 0, height: 3, borderRadius: 1,
                 boxShadow: i < segs.length - 1 ? `1px 0 0 ${C.bg} inset` : "none",
-              }} />
-            ))}
-            {segs.filter((s) => s.pauseAfter).map((s) => (
-              <div key={`p${s.e.id}`} style={{
-                position: "absolute", left: `${s.rightPct}%`, top: 4, width: 4, height: 4,
-                borderRadius: "50%", background: C.mut, transform: "translate(-50%, -50%)",
               }} />
             ))}
             {segs.map((s) => (
               <React.Fragment key={`l${s.e.id}`}>
-                <div style={{
-                  position: "absolute", left: `${s.centerPct}%`, width: 1, background: C.line,
-                  top: s.isAbove ? -s.depth : 4, height: s.depth,
+                <div className="tlx-tick" style={{
+                  position: "absolute", left: `${s.centerPct}%`, width: 1,
+                  top: s.isAbove ? -s.depth : 3, height: s.depth,
                 }} />
-                <div className="mono" style={{
+                <div className="tlx-seg-label" style={{
                   position: "absolute", left: `${s.centerPct}%`, transform: "translateX(-50%)",
-                  top: s.isAbove ? -s.depth - 12 : s.depth + 4,
-                  fontSize: 9.5, color: C.faint, whiteSpace: "nowrap",
+                  top: s.isAbove ? -s.depth - 14 : s.depth + 6,
                 }}>{s.e.actionText}</div>
               </React.Fragment>
             ))}
