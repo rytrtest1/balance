@@ -1,6 +1,6 @@
 {
-  "name": "throughline",
-  "short_name": "throughline",
+  "name": "BALANCE",
+  "short_name": "BALANCE",
   "description": "Got time but no drive? It tells you one thing to do.",
   "start_url": "./index.html",
   "scope": "./",

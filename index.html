@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-<title>throughline</title>
+<title>BALANCE</title>
 <link rel="manifest" href="manifest.json" />
 <meta name="theme-color" content="#0a0a0b" />
 <meta name="mobile-web-app-capable" content="yes" />
@@ -20,7 +20,7 @@
 const { useState, useEffect, useRef } = React;
 
 /* ============================================================
- * throughline — the daily engine
+ * BALANCE (née throughline) — the daily engine
  * You tell it how much time you have; it tells you one thing to do.
  * No menu to skip through, no streaks, no scores. A record you own.
  * ============================================================ */
@@ -658,8 +658,24 @@ function pickAging(activities, log, place, options = {}) {
     // row's own last completion — otherwise a debt that reopens right after an
     // unrelated recent completion reads as "just done" and gets starved instead of
     // surfacing soon (Maxence 11/07).
-    const last = r.sinceTs != null ? r.sinceTs : lastRealTs(log, r.activity.id, r.action ? r.action.id : null);
-    const base = last == null ? 6 : (eligibleDaysSince(r.activity, r.action, last, now.getTime()) * r.rate) / ((1 + (r.over || 0)) ** 2);
+    let last = r.sinceTs != null ? r.sinceTs : lastRealTs(log, r.activity.id, r.action ? r.action.id : null);
+    // never done ever: seed a virtual "last done" ONCE (persisted on the action/
+    // activity object itself, like pipeline stage or item status already are) —
+    // a random point up to 2 of its own periods ago, then let it age through the
+    // exact same elapsedDays x rate formula as every other row. Replaces a flat
+    // stand-in (was 6 regardless of rate — Maxence 15/07: gave a 1x/week row the
+    // same boost as a 1x/day row, and made same-rate untried rows tie exactly).
+    // Seeding once and reusing eligibleDaysSince means it ages and competes
+    // exactly like a real row from here on — no separate branch downstream.
+    if (last == null) {
+      const target = r.action || r.activity;
+      if (target.seedTs == null) {
+        target.seedTs = now.getTime() - Math.random() * 2 * periodDays(r.period) * 86400000;
+        if (options.seeded) options.seeded.push(target);
+      }
+      last = target.seedTs;
+    }
+    const base = (eligibleDaysSince(r.activity, r.action, last, now.getTime()) * r.rate) / ((1 + (r.over || 0)) ** 2);
     const da = drawsAgo(r.activity.id, r.action ? r.action.id : null);
     const recencyDamp = da >= RECENCY_WINDOW ? 1 : 0.15 + 0.85 * (da / RECENCY_WINDOW);
     let w = base * recencyDamp;
@@ -736,7 +752,9 @@ async function claudeJSON(key, prompt, schema, maxTokens = 400, tools = null) {
     if (!res.ok) {
       const retryable = res.status === 429 || res.status >= 500;
       if (retryable && attempt < maxAttempts - 1) continue;
-      throw new Error("http " + res.status);
+      let detail = "";
+      try { detail = (await res.json())?.error?.message || ""; } catch {}
+      throw new Error("http " + res.status + (detail ? " — " + detail : ""));
     }
     const data = await res.json();
     const txt = (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("");
@@ -783,8 +801,8 @@ Réponds avec un titre court (nom de l'œuvre, du plat, du morceau…) et un sou
   // discovery path where Claude invented a reco outside the library.
   const out = await claudeJSON(key, prompt, {
     type: "object",
-    properties: { title: { type: "string" }, subtitle: { type: "string" } },
-    required: ["title"],
+    properties: { title: { type: "string" }, subtitle: { type: ["string", "null"] } },
+    required: ["title", "subtitle"],
     additionalProperties: false,
   }, 400);
   // title/desc kept separate (not pre-joined) — the "now" line shows only the title,
@@ -1008,7 +1026,7 @@ function Throughline() {
       if (!key) { if (alive) setBestOf(withNotes.slice(-3).map((e) => e.id)); return; }
       try {
         const list = withNotes.map((e, i) => `${i}: [${e.actionText || "note libre"}] ${e.note.trim()}`).join("\n");
-        const prompt = `Voici tous les commentaires que Maxence a laissés aujourd'hui dans throughline, en repère numéroté :
+        const prompt = `Voici tous les commentaires que Maxence a laissés aujourd'hui dans BALANCE, en repère numéroté :
 ${list}
 
 Choisis les 3 ou 4 index les plus notables pour un récap de fin de journée — privilégie ce qui est inattendu, une émotion forte, une vraie découverte ou un insight sur lui-même, pas une simple description factuelle. Réponds avec indices = la liste de ces index, dans l'ordre où ils apparaissent.`;
@@ -1057,7 +1075,7 @@ Choisis les 3 ou 4 index les plus notables pour un récap de fin de journée —
       // sandbox with no data yet → seed from the served catalogue copy so the
       // clone opens on the REAL activities. Falls back to SEED if it isn't there.
       if (SIM && a == null) {
-        try { const r = await fetch("throughline-catalogue.json", { cache: "no-store" }); if (r.ok) { const c = await r.json(); if (Array.isArray(c.activities)) a = c.activities; } } catch {}
+        try { const r = await fetch("balance-catalogue.json", { cache: "no-store" }); if (r.ok) { const c = await r.json(); if (Array.isArray(c.activities)) a = c.activities; } } catch {}
       }
       // first launch ever (per namespace — prod and sandbox track this separately)
       // → show the tap hint this one time, mark it seen immediately so no later
@@ -1109,11 +1127,17 @@ Choisis les 3 ou 4 index les plus notables pour un récap de fin de journée —
     // juste", no stopping-point verdict to hit at the wrong moment). The "empty"
     // stage below now only fires when there's truly nothing eligible for this place
     // even with every gate relaxed (e.g. an empty catalogue for that context).
-    let p = pickAging(actsUse, logUse, pl, { relax, avoidId });
+    const seeded = [];
+    let p = pickAging(actsUse, logUse, pl, { relax, avoidId, seeded });
     // relax skips the quota gate too, so without this the very thing that just hit
     // its target could come right back immediately — avoid at least that repeat.
     // Its weight is damped by `over` (see pickAging), so it doesn't snowball either.
-    if (!p && !relax) p = pickAging(actsUse, logUse, pl, { relax: true, avoidId: avoidId ?? lastId });
+    if (!p && !relax) p = pickAging(actsUse, logUse, pl, { relax: true, avoidId: avoidId ?? lastId, seeded });
+    // pickAging seeds a never-done row's virtual "last done" directly onto the
+    // activity/action object (actsUse === activities, same references) — bump
+    // the array reference so the existing persistence effect actually saves it,
+    // otherwise a reload before that row's first real completion would re-roll it.
+    if (seeded.length) setActivities((prev) => [...prev]);
     setRunning(false); setElapsedMs(0);
     if (!p) { setCurrent(null); setStage("empty"); }
     else {
@@ -1520,7 +1544,7 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
       const acts = (a.actions || []).map((ac) => `${ac.id}: ${ac.text}`).join(" · ") || "(pas d'action fixe)";
       return `${a.id} — ${a.name} (${a.domain}) : ${acts}`;
     }).join("\n");
-    const prompt = `Tu lis ce que Maxence vient de taper dans la case "log" de throughline, et tu détermines son intention.
+    const prompt = `Tu lis ce que Maxence vient de taper dans la case "log" de BALANCE, et tu détermines son intention.
 
 Catalogue (id — nom (domaine) : actions[id: texte]) :
 ${catalogue}
@@ -1540,10 +1564,15 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
         type: "object",
         properties: {
           intent: { type: "string", enum: ["rapport", "activity", "note"] },
-          activity_id: { type: "string" }, action_id: { type: "string" },
-          min: { type: "integer" }, note: { type: "string" },
+          // structured-outputs strict mode requires every property in `required` —
+          // nullable type + explicit null is how an LLM field stays optional under that
+          // constraint. Omitting these from `required` was producing the http 400 on
+          // submit (found 15/07: this is the only claudeJSON schema in the app with
+          // optional properties not listed in `required`).
+          activity_id: { type: ["string", "null"] }, action_id: { type: ["string", "null"] },
+          min: { type: ["integer", "null"] }, note: { type: "string" },
         },
-        required: ["intent", "note"],
+        required: ["intent", "activity_id", "action_id", "min", "note"],
         additionalProperties: false,
       }, 300);
 
@@ -1728,21 +1757,21 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
 
   const simReseed = async () => {
     try {
-      const r = await fetch("throughline-catalogue.json", { cache: "no-store" });
+      const r = await fetch("balance-catalogue.json", { cache: "no-store" });
       const c = await r.json();
       if (Array.isArray(c.activities)) { setActivities(c.activities); setLog([]); setMsg("catalogue rechargé — sandbox vidé"); }
-    } catch { setMsg("throughline-catalogue.json introuvable"); }
+    } catch { setMsg("balance-catalogue.json introuvable"); }
     setTimeout(() => setMsg(""), 1800);
   };
 
   // ----- data -----
-  const exportObj = () => ({ app: "throughline", version: 4, exportedAt: new Date().toISOString(), savedOn: fmtLong(todayKey()),
+  const exportObj = () => ({ app: "balance", version: 4, exportedAt: new Date().toISOString(), savedOn: fmtLong(todayKey()),
     activities, log });
   const exportText = () => JSON.stringify(exportObj(), null, 2);
   const download = () => {
     const blob = new Blob([exportText()], { type: "application/json" });
     const url = URL.createObjectURL(blob); const a = document.createElement("a");
-    a.href = url; a.download = `throughline-${stampKey()}.json`; a.click(); URL.revokeObjectURL(url);
+    a.href = url; a.download = `balance-${stampKey()}.json`; a.click(); URL.revokeObjectURL(url);
     setMsg("file downloaded"); setTimeout(() => setMsg(""), 1800);
   };
   const copy = async () => { try { await navigator.clipboard.writeText(exportText()); setMsg("copied to clipboard"); } catch { setMsg("copy failed — use the file"); } setTimeout(() => setMsg(""), 1800); };
@@ -1752,11 +1781,11 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
     // Share as .txt / text/plain: .json is NOT on Chrome's Web Share allowlist,
     // so canShare({files}) returns false for it and we'd silently fall to download
     // (no destination prompt). The body is still JSON; load parses by content.
-    const fname = `throughline-${stampKey()}.txt`;
+    const fname = `balance-${stampKey()}.txt`;
     try {
       const file = new File([exportText()], fname, { type: "text/plain" });
       if (navigator.canShare && navigator.canShare({ files: [file] })) {
-        await navigator.share({ files: [file], title: "throughline backup" });
+        await navigator.share({ files: [file], title: "BALANCE backup" });
         setMsg("shared ✓"); setTimeout(() => setMsg(""), 1800); return;
       }
     } catch (e) { if (e && e.name === "AbortError") return; }
