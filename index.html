@@ -331,34 +331,39 @@ function isMealTime(now) {
 }
 
 // --- meal prep sequencing: same toggle pattern as vaisselle (Maxence 11/07, asked
-// explicitly to make both pairs work identically) — a validated focaccia is owed
-// one garniture; once that garniture is validated, none is owed again until the
-// next focaccia. Debt-counted like pendingVaisselleFrom, no staleness ceiling (an
-// earlier 48h-expiry attempt was overcomplicating exactly what he'd just rejected
-// for vaisselle — dropped). The one thing that stays separate: dough needs a real
-// 24h to rest (Maxence 10/07), so even with a garniture owed, it isn't proposed
-// until that minimum has passed — a floor, not a window.
-const FOCACCIA_REST_MS = 24 * 3600000;
-// hour-of-day deadline (Maxence 11/07-b, replacing an earlier click-count
-// version): focaccia is only ever eligible on its one J-2 day, garniture on the
-// J-1 day right after — miss either day and the window doesn't reopen for a
-// whole work-stretch cycle (focaccia) or just goes back to being an ordinary
-// undated debt (garniture). A click-count guarantee meant a slow-click day could
-// never reach the threshold at all; a wall-clock deadline holds regardless of
-// how much the app got used that day, and matches the shape a future todo
-// "due by X" would need. Both ramp up in pickAging's weight() as this hour
-// approaches, forced outright at/after it on their respective deadline day.
-const FOCACCIA_GARNITURE_DEADLINE_HOUR = 20;
-function lastFocacciaTs(log) {
+// explicitly to make both pairs work identically) — a validated bake ("cuire la
+// focaccia") is owed one garniture; once that garniture is validated, none is
+// owed again until the next bake. Debt-counted like pendingVaisselleFrom, no
+// staleness ceiling (an earlier 48h-expiry attempt was overcomplicating exactly
+// what he'd just rejected for vaisselle — dropped).
+// Fixed 16/07 (Maxence): the debt used to key off "préparer la focaccia" (mixing
+// the dough) plus a blind 24h rest timer as a stand-in for "it must be baked by
+// now" — but a slow/late bake could still leave garniture proposed on dough that
+// wasn't actually cooked yet. "cuire la focaccia" is a new action, logged only
+// through the free-text field at the bottom of the app (never drawn/proposed,
+// see its skip in buildLotteryRows below) — it's the real-world bake event, so
+// the debt and the rest-timer both key off it directly now; no more guessing.
+function lastCuireTs(log) {
   let ts = null;
-  for (const e of log) if (e.activityId === "a_mealprep" && e.actionId === "x_mp_focaccia" && isDone(e) && (!ts || e.ts > ts)) ts = e.ts;
+  for (const e of log) if (e.activityId === "a_mealprep" && e.actionId === "x_mp_cuire" && isDone(e) && (!ts || e.ts > ts)) ts = e.ts;
   return ts;
 }
 function pendingGarnitureFrom(log) {
-  const focaccia = log.filter((e) => e.activityId === "a_mealprep" && e.actionId === "x_mp_focaccia" && isDone(e)).length;
+  const cuit = log.filter((e) => e.activityId === "a_mealprep" && e.actionId === "x_mp_cuire" && isDone(e)).length;
   const garniture = log.filter((e) => e.activityId === "a_mealprep" && e.actionId === "x_mp_garniture" && isDone(e)).length;
-  return Math.max(0, focaccia - garniture);
+  return Math.max(0, cuit - garniture);
 }
+// hour-of-day deadline (Maxence 11/07-b, replacing an earlier click-count
+// version): focaccia (préparer) is only ever eligible on its one J-2 day, garniture
+// ramps on J-1 and the work day(s) themselves (Maxence 16/07: "le jour J du travail
+// (plus J-1)" — a debt still open by the day the stretch starts shouldn't lose its
+// urgency) — miss the whole window and it just goes back to being an ordinary
+// undated debt (garniture) or waits a full cycle (focaccia). A click-count
+// guarantee meant a slow-click day could never reach the threshold at all; a
+// wall-clock deadline holds regardless of how much the app got used that day.
+// Both ramp up in pickAging's weight() as this hour approaches, forced outright
+// at/after it on their respective deadline day(s).
+const FOCACCIA_GARNITURE_DEADLINE_HOUR = 20;
 // which cook created the OLDEST still-open dish debt (Maxence 11/07: "l'app
 // propose peu de temps après l'action qui ramène à 0" — eligible ≠ prioritized;
 // pickAging's weight() ages a row off when THAT ROW was last done, so a vaisselle
@@ -423,6 +428,10 @@ function buildLotteryRows(activities, log, place, skipQuota = false) {
         // the widget). relax now only ever bypasses the quota cap.
         if (action.id === "x_cu_faire" && !isMealTime(realNow())) continue;
         if (action.id === "x_mp_focaccia" && !isTwoDaysBeforeWorkStretch()) continue;
+        // log-only, never drawn (Maxence 16/07) — the only door in is the free-text
+        // field at the bottom of the app (submitFreeLog), typed once he's actually
+        // baked. See pendingGarnitureFrom/lastCuireTs above for what this unlocks.
+        if (action.id === "x_mp_cuire") continue;
         if (action.id === "x_mp_garniture") {
           // debt-driven like vaisselle, not target/quota-driven — pushed straight in
           // and skips the completions/rolling-week gate below entirely. Needed
@@ -430,9 +439,7 @@ function buildLotteryRows(activities, log, place, skipQuota = false) {
           // the current rolling-7-day window and falsely read as "already at
           // target", blocking a garniture a brand-new focaccia just re-owed.
           if (pendingGarnitureFrom(log) <= 0) continue;
-          const fts = lastFocacciaTs(log);
-          if (!fts || realNow().getTime() - fts < FOCACCIA_REST_MS) continue;
-          rows.push({ activity: a, action, period: "week", target: 1, rate: 1 / 7, over: 0, sinceTs: fts });
+          rows.push({ activity: a, action, period: "week", target: 1, rate: 1 / 7, over: 0, sinceTs: lastCuireTs(log) });
           continue;
         }
         const period = action.period || a.period || "week";
@@ -574,12 +581,13 @@ function pickAging(activities, log, place, options = {}) {
   // same-activity collision (e.g. an earlier mealprep session today) can't
   // accidentally swallow the guarantee. Ramp itself lives in weight() below;
   // this is only the hard floor once the deadline hour has passed on the row's
-  // own deadline day (focaccia: J-2, garniture: J-1 — never on any other day).
+  // own deadline day (focaccia: J-2 only; garniture: J-1 plus the work day(s)
+  // themselves, widened 16/07 — see FOCACCIA_GARNITURE_DEADLINE_HOUR's comment).
   const today = todayKey();
   const now = realNow();
   const hourNow = now.getHours() + now.getMinutes() / 60;
   const focacciaDeadlineDay = isTwoDaysBeforeWorkStretch(now);
-  const garnitureDeadlineDay = isOneDayBeforeWorkStretch(now);
+  const garnitureDeadlineDay = isOneDayBeforeWorkStretch(now) || isWorkDayToday(now);
   if (hourNow >= FOCACCIA_GARNITURE_DEADLINE_HOUR) {
     const forced = rows.find((r) => r.action && (
       (r.action.id === "x_mp_focaccia" && focacciaDeadlineDay) ||
@@ -951,6 +959,16 @@ function Throughline() {
   // (Maxence 12/07: "je veux qu'apparaisse seulement le titre... et ce qui décrit la
   // recommandation dans un champ séparé en dessous, genre drop-down").
   const [descOpen, setDescOpen] = useState(false);
+  // Album de la semaine (Maxence 16/07, item 4 — redesigned same day per feedback:
+  // no native <input type=range>, no separate review screen; reuse the hero line's own
+  // visual language instead). albumTitles holds {id, text, rating(0-100)}; there is
+  // always exactly one trailing empty slot (the title currently being typed/rated) —
+  // advanceAlbumTitle() below commits it and opens the next one. albumIdx points at
+  // whichever slot is focused (a dot tap can move it back to an earlier, already-
+  // committed title to revise its rating). Only ever used when
+  // current.activity.id === "a_ecoute_album" (see isAlbumActivity).
+  const [albumTitles, setAlbumTitles] = useState([]);
+  const [albumIdx, setAlbumIdx] = useState(0);
   const [doneEntryId, setDoneEntryId] = useState(null);
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState("");
@@ -1152,6 +1170,7 @@ Choisis les 3 ou 4 index les plus notables pour un récap de fin de journée —
         setStartedAt(fl.startedAt || 0); setElapsedMs(fl.startedAt ? Date.now() - fl.startedAt : 0);
         setRunning(!!fl.running); setPaused(!!fl.paused);
         setDoneEntryId(fl.doneEntryId || null); setComment(fl.comment || ""); setManualMin(fl.manualMin || "");
+        setAlbumTitles(fl.albumTitles || []); setAlbumIdx(fl.albumIdx || 0);
       }
       setLoading(false);
       loaded.current = true;
@@ -1163,8 +1182,8 @@ Choisis les 3 ou 4 index les plus notables pour un récap de fin de journée —
   // persist the live flow so it survives a tab getting backgrounded and killed
   useEffect(() => {
     if (!loaded.current) return;
-    saveJSON(NS("tlx_flow"), { date: todayKey(), stage, current, startedAt, running, paused, doneEntryId, comment, manualMin });
-  }, [stage, current, startedAt, running, paused, doneEntryId, comment, manualMin]);
+    saveJSON(NS("tlx_flow"), { date: todayKey(), stage, current, startedAt, running, paused, doneEntryId, comment, manualMin, albumTitles, albumIdx });
+  }, [stage, current, startedAt, running, paused, doneEntryId, comment, manualMin, albumTitles, albumIdx]);
 
   // tick the live line while running — re-read the wall clock so it stays accurate
   // even if the tab was backgrounded.
@@ -1236,7 +1255,46 @@ Choisis les 3 ou 4 index les plus notables pour un récap de fin de journée —
     saveJSON(NS("tlx_hold"), { date: today, ms: next });
     propose(log, activities, false, current ? current.activity.id : null);
   };
-  const resetFlow = (nextStage = "entry") => { setStage(nextStage); setCurrent(null); setRunning(false); setElapsedMs(0); setPaused(false); setComment(""); setDescOpen(false); setSyncMsg(""); setSyncing(false); };
+  const resetFlow = (nextStage = "entry") => { setStage(nextStage); setCurrent(null); setRunning(false); setElapsedMs(0); setPaused(false); setComment(""); setDescOpen(false); setSyncMsg(""); setSyncing(false); setAlbumTitles([]); setAlbumIdx(0); };
+  // Album de la semaine title-by-title appreciation (Maxence 16/07, item 4/5) —
+  // isAlbumActivity gates the extra running-stage UI to that one activity only.
+  const isAlbumActivity = !!(current && current.activity.id === "a_ecoute_album");
+  const albumLineRef = useRef(null);
+  const albumDragging = useRef(false);
+  const albumTouchRef = useRef(null);
+  // dragging the mini line sets the CURRENT slot's rating — magnitude from centre,
+  // same read as the hero line's own centre-out fill (see setAlbumRatingFromPointer).
+  const setAlbumRatingFromPointer = (clientX) => {
+    const el = albumLineRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const half = rect.width / 2 || 1;
+    const rating = Math.round(Math.max(0, Math.min(1, Math.abs(clientX - (rect.left + half)) / half)) * 100);
+    setAlbumTitles((arr) => arr.map((t, i) => (i === albumIdx ? { ...t, rating } : t)));
+  };
+  const onAlbumLineDown = (e) => { albumDragging.current = true; e.currentTarget.setPointerCapture(e.pointerId); setAlbumRatingFromPointer(e.clientX); };
+  const onAlbumLineMove = (e) => { if (albumDragging.current) setAlbumRatingFromPointer(e.clientX); };
+  const onAlbumLineUp = () => { albumDragging.current = false; };
+  // swipe right (or a dot tap, wired at render time) moves between titles. Advancing
+  // past the last slot only opens a fresh one once the current one has real text —
+  // an empty slot has nothing to commit yet, swiping right from it does nothing.
+  const advanceAlbumTitle = (dir) => {
+    if (dir > 0 && albumIdx === albumTitles.length - 1) {
+      const cur = albumTitles[albumIdx];
+      if (!cur || !cur.text.trim()) return;
+      const next = [...albumTitles, { id: uid(), text: "", rating: 50 }];
+      setAlbumTitles(next);
+      setAlbumIdx(next.length - 1);
+      return;
+    }
+    setAlbumIdx((i) => Math.max(0, Math.min(albumTitles.length - 1, i + dir)));
+  };
+  const onAlbumTouchStart = (e) => { const t = e.touches[0]; albumTouchRef.current = { x: t.clientX, y: t.clientY }; };
+  const onAlbumTouchEnd = (e) => {
+    const s = albumTouchRef.current; albumTouchRef.current = null; if (!s) return;
+    const t = e.changedTouches[0]; const dx = t.clientX - s.x, dy = t.clientY - s.y;
+    if (Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy) * 1.5) advanceAlbumTitle(dx < 0 ? 1 : -1);
+  };
   // rapport: a day-close screen, unlocked only by naming it — typing "rapport" once
   // the day's click count clears the bar (Maxence 14/07, tested as a mockup first).
   // Reachable two ways: the after-session comment (here) and the free-log box
@@ -1408,6 +1466,14 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
       setTimeout(() => { setSyncMsg(""); finishFlow(text); }, 2200);
       return;
     }
+    // recommandeur/task with a comment: no Claude round-trip (cut 13/07), but still
+    // show the same brief loading chip as pipeline/practice so submitting a comment
+    // reads identically everywhere (Maxence 16/07 — écoute felt broken without it).
+    if (text) {
+      setSyncing(true); setSyncMsg("commentaire enregistré…");
+      setTimeout(() => { setSyncing(false); setSyncMsg(""); finishFlow(text); }, 700);
+      return;
+    }
     finishFlow(text);
   };
 
@@ -1445,8 +1511,26 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
     setElapsedMs(preMs);
     setManualMin("");
     setPaused(false);
+    // Album de la semaine: seed the one always-present empty slot (see albumTitles doc).
+    setAlbumTitles(isAlbumActivity ? [{ id: uid(), text: "", rating: 50 }] : []);
+    setAlbumIdx(0);
     setRunning(true); setStage("running");
   };
+
+  // auto-start (Maxence 16/07): a proposal used to need its own separate tap before
+  // running started — one click too many for "yes, this". Now it begins on its own
+  // after a short beat, no tap needed; pause/resume already covers "not right now".
+  // Paused while `holding` (the hold-to-swap gesture, still the way to reject a
+  // proposal) so the two never race — effHold starts at 10s and doubles per swap
+  // that day, always far longer than this delay, but auto-start firing mid-hold
+  // would yank the line out from under an in-progress swap. An aborted hold (let go
+  // before the swap threshold) restarts the countdown fresh rather than resuming it.
+  const AUTO_START_MS = 2200;
+  useEffect(() => {
+    if (stage !== "proposal" || holding) return;
+    const t = setTimeout(() => { begin(); }, AUTO_START_MS);
+    return () => clearTimeout(t);
+  }, [stage, current, holding]);
 
   // tap "done" — log real time (or manual override), trigger vaisselle if cooking done
   const finish = () => {
@@ -1473,13 +1557,30 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
       setActivities((arr) => arr.map((a) => (a.id === aid ? { ...a, done: true } : a)));
     }
     setDoneEntryId(e.id);
-    setLog((L) => [...L, e]);
+    // Album de la semaine (item 5): each title noted during the session gets its own
+    // log entry too, type "note" so isDone/isClick/minutesInPeriod never see it — these
+    // are stats-only, additive to the one real completion `e` above, never a second
+    // completion of the album itself.
+    const notedTitles = albumTitles.filter((t) => t.text && t.text.trim());
+    const titleEntries = (aid === "a_ecoute_album" && notedTitles.length)
+      ? notedTitles.map((t) => ({
+          id: uid(), date: todayKey(), ts: realNow().getTime(), type: "note",
+          activityId: aid, parentId: e.id, titleText: t.text.trim(), rating: t.rating,
+          note: `titre : ${t.text.trim()}`,
+        }))
+      : [];
+    setLog((L) => [...L, e, ...titleEntries]);
+    setAlbumTitles([]); setAlbumIdx(0);
     // sandbox clock: advance right away by the catalogue default duration, so it
     // already reflects a plausible length before any override is typed — tapping
     // the line on "done" (submitComment) applies the delta if one is.
     if (SIM) simAdvanceMinutes(minLogged);
     setRunning(false);
-    setComment(""); setManualMin(""); setDescOpen(false);
+    // comment NOT cleared here (fixed 16/07): finish() used to always blank it before
+    // "done" ever showed, harmless back when the field only existed on "done" — now
+    // that it's also open during "running" (see the effect above), clearing it here
+    // would silently throw away whatever was typed mid-session.
+    setManualMin(""); setDescOpen(false);
     setStage("done");
   };
 
@@ -1886,7 +1987,8 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
       stage, tab, current, activities, log, holdMs, holdDate, place,
       begin, finish, tapAction, submitComment, start, resetFlow,
       setManualMin, setComment, setTab, applyDebugTime, simReseed, runSimBatch,
-      setLog, setActivities, setStage,
+      setLog, setActivities, setStage, setCurrent,
+      albumTitles, albumIdx, setAlbumTitles, setAlbumIdx, advanceAlbumTitle,
       reportIdx, reportPhase, setReportIdx, setReportPhase,
       debugNow: () => (_debugDate || new Date()).toString(),
     };
@@ -2230,12 +2332,67 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                 )}
 
                 {/* running: a quiet pause, for when something outside interrupts the session
-                    (a call, someone at the door) — not for skipping, just for stopping the clock. */}
-                {stage === "running" && (
+                    (a call, someone at the door) — not for skipping, just for stopping the clock.
+                    Comment field open here too (Maxence 16/07): a thought worth catching mid-session
+                    used to have nowhere to go until "done" — same `comment` state either way, so
+                    whatever's typed here is just already there once the session ends. */}
+                {stage === "running" && (() => {
+                  const curTitle = isAlbumActivity ? (albumTitles[albumIdx] || { text: "", rating: 50 }) : null;
+                  const curFrac = curTitle ? curTitle.rating / 100 : 0;
+                  return (
                   <div className="fade">
+                    {/* Album de la semaine (Maxence 16/07, item 4 — redesigned same day: no
+                        native sliders, no separate screen. The hero line above already carries
+                        the album name; this is the same visual family, half-scale, repurposed as
+                        a draggable appreciation control for whichever title is focused. Swipe (or
+                        tap a dot) to move between titles already noted; the trailing slot is
+                        always a fresh, uncommitted one. Finishing is still just tapping the main
+                        line, same as every other activity. */}
+                    {isAlbumActivity && (
+                      <div onTouchStart={onAlbumTouchStart} onTouchEnd={onAlbumTouchEnd} style={{ marginBottom: 22 }}>
+                        {/* same font/case as the main title above the hero line — no border, no
+                            gap: this and the slider just below read as one piece, not a form field
+                            sitting over a separate control (Maxence 16/07, round 2). */}
+                        <input className="in" value={curTitle.text} placeholder="titre écouté"
+                          onChange={(e) => { const v = e.target.value; setAlbumTitles((arr) => arr.map((t, i) => (i === albumIdx ? { ...t, text: v } : t))); }}
+                          onKeyDown={(e) => { if (e.key === "Enter") advanceAlbumTitle(1); }}
+                          style={{ fontFamily: "var(--mono)", fontSize: 13, fontWeight: 400, lineHeight: 1.55, letterSpacing: ".02em", textTransform: "lowercase",
+                            textAlign: "center", maxWidth: 360, margin: "0 auto", display: "block",
+                            fontStyle: curTitle.text ? "normal" : "italic", color: curTitle.text ? C.text : C.faint }} />
+                        {/* the slider itself — dragging/tapping it sets the rating directly (see
+                            setAlbumRatingFromPointer), it never advances on its own. Same centre-out
+                            fill language as the hero line, half its width, thinner track and fill. */}
+                        <div ref={albumLineRef} onPointerDown={onAlbumLineDown} onPointerMove={onAlbumLineMove} onPointerUp={onAlbumLineUp} onPointerCancel={onAlbumLineUp}
+                          onContextMenu={(e) => e.preventDefault()}
+                          style={{ position: "relative", height: 16, width: "55%", margin: "10px auto 0", display: "flex", justifyContent: "center", alignItems: "center", cursor: "pointer", touchAction: "none", userSelect: "none" }}>
+                          <div style={{ position: "absolute", left: 0, right: 0, top: "50%", height: 1, background: C.soft, transform: "translateY(-50%)" }} />
+                          {curFrac > 0 && (
+                            <div style={{ position: "relative", height: 2, width: `${curFrac * 100}%`, background: C.bone, opacity: 0.9 }} />
+                          )}
+                        </div>
+                        {albumTitles.length > 1 && (
+                          <div style={{ display: "flex", justifyContent: "center", gap: 6, marginTop: 10 }}>
+                            {albumTitles.map((t, i) => (
+                              <button key={t.id} className="dot" onClick={() => setAlbumIdx(i)}
+                                style={{ width: 4, height: 4, background: i === albumIdx ? C.bone : C.line, border: "none", cursor: "pointer" }} />
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    {/* running: a quiet pause, for when something outside interrupts the session
+                        (a call, someone at the door) — not for skipping, just for stopping the
+                        clock. Comment field open here too (Maxence 16/07): a thought worth
+                        catching mid-session used to have nowhere to go until "done" — same
+                        `comment` state either way, so whatever's typed here is already there
+                        once the session ends. */}
+                    <input className="in" value={comment} placeholder="un mot, même en cours ?"
+                      onChange={(e) => setComment(e.target.value)}
+                      style={{ fontSize: 14, textAlign: "center", maxWidth: 360, margin: "0 auto 16px", display: "block", borderBottom: `1px solid ${C.line}`, paddingBottom: 8, fontStyle: comment ? "normal" : "italic", color: comment ? C.text : C.faint }} />
                     <button className="link" onClick={togglePause}>{paused ? "reprendre" : "pause"}</button>
                   </div>
-                )}
+                  );
+                })()}
 
                 {stage === "empty" && (
                   <div className="fade">
