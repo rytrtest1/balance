@@ -1003,6 +1003,10 @@ function Throughline() {
   // never again (Maxence 11/07: the app is otherwise chrome-free at entry on
   // purpose — this is the one-time exception, not a standing affordance).
   const [showTapHint, setShowTapHint] = useState(false);
+  // same one-time-ever treatment for the "ton mot fait avancer…" hint under the
+  // done-stage comment field (Maxence 16/07) — an instruction, not a standing
+  // affordance, so it teaches once then gets out of the way like the tap hint.
+  const [showDoneHint, setShowDoneHint] = useState(false);
   // the domain-balance swing (see domainBalance()) stays completely hidden —
   // no tilt, no class, line looks exactly as if the feature didn't exist —
   // until a shake reveals it. Changed 16/07: no longer a manual on/off toggle —
@@ -1174,6 +1178,8 @@ Choisis les 3 ou 4 index les plus notables pour un récap de fin de journée —
       // launch shows it again, even if this session never reaches "entry".
       const hintSeen = await store.get(NS("tlx_hintSeen"));
       if (!hintSeen) { setShowTapHint(true); store.set(NS("tlx_hintSeen"), "1"); }
+      const doneHintSeen = await store.get(NS("tlx_doneHintSeen"));
+      if (!doneHintSeen) { setShowDoneHint(true); store.set(NS("tlx_doneHintSeen"), "1"); }
       if (!alive) return;
       setActivities(a ?? SEED);
       setLog(l ?? []);
@@ -2312,8 +2318,12 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                 // as unnaturally sluggish once he actually watched it — 8-12s lands between
                 // the two (Maxence 16/07, round 4). (3) the angle itself is half the
                 // shake's ampDeg — full amplitude read as too marked sustained over a
-                // whole session (round 3, kept).
-                const tiltActive = LINE_MODE === "tilt" && (stage === "running" || stage === "done");
+                // whole session (round 3, kept). (4) "done" is excluded here (was
+                // included before) — finishing early left frac<1 and the line still
+                // visibly crooked on the done screen, which read as unresolved/frustrating
+                // instead of settled (Maxence 16/07, round 5). Done always reads flat now,
+                // regardless of how much of the estimate was actually used.
+                const tiltActive = LINE_MODE === "tilt" && stage === "running";
                 const tiltSpread = sessionTiltRef.current;
                 const tiltAmpDeg = tiltSpread * 6 * 0.5;
                 const tiltPeriodMs = (12 - tiltSpread * 4) * 1000; // 8s (very imbalanced) to 12s (near-balanced)
@@ -2428,14 +2438,23 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                     <button className="link" onClick={togglePause}>{paused ? "reprendre" : "pause"}</button>
                     {/* comment field, open here too so a thought worth catching mid-session has
                         somewhere to go before "done" (same `comment` state either way) — sits
-                        below pause. autoFocus popped the keyboard on every session start, too
-                        aggressive (Maxence 16/07, round 4) — a quiet "« … »" placeholder (dim via
-                        the shared .in::placeholder rule) hints it's writable without forcing
-                        focus. Same size/color as the activity text above once you actually type —
-                        a different register there read as inconsistent. */}
-                    <input className="in" value={comment} placeholder="« … »"
-                      onChange={(e) => setComment(e.target.value)}
-                      style={{ fontSize: 13, textAlign: "center", maxWidth: 320, margin: "10px auto 0", display: "block", color: C.text }} />
+                        below pause, same 30px gap as line→pause above it (Maxence 16/07, round
+                        5 — was hugging pause at 10px). autoFocus popped the keyboard on every
+                        session start, too aggressive (round 4) — a quiet "« … »" hint instead,
+                        rendered as its own overlay (not the native placeholder) so the dots can
+                        be bright while the guillemets stay dim, gone the moment you type. Same
+                        font/size/color as the activity text above once you actually type — a
+                        different register there read as inconsistent. */}
+                    <div style={{ position: "relative", maxWidth: 320, margin: "30px auto 0" }}>
+                      <input className="in" value={comment}
+                        onChange={(e) => setComment(e.target.value)}
+                        style={{ fontFamily: "var(--mono)", fontSize: 13, textAlign: "center", display: "block", color: C.text }} />
+                      {!comment && (
+                        <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", pointerEvents: "none", fontFamily: "var(--mono)", fontSize: 13 }}>
+                          <span style={{ color: C.faint }}>« </span><span style={{ color: C.text }}>…</span><span style={{ color: C.faint }}> »</span>
+                        </div>
+                      )}
+                    </div>
                   </div>
                   );
                 })()}
@@ -2468,11 +2487,24 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                             <span className="mono" style={{ fontSize: 10, color: C.faint }}>min</span>
                           </div>
                         )}
-                        <input className="in" value={comment} placeholder="un mot sur cette session ?"
-                          onChange={(e) => setComment(e.target.value)}
-                          onKeyDown={(e) => { if (e.key === "Enter") submitComment(); }}
-                          style={{ fontSize: 14, textAlign: "center", maxWidth: 360, margin: "0 auto", display: "block", borderBottom: `1px solid ${C.line}`, paddingBottom: 8, fontStyle: comment ? "normal" : "italic", color: comment ? C.text : C.faint }} />
-                        {current && (() => {
+                        {/* same "« … »" idea as the running field (Maxence 16/07, round 5): a
+                            styled overlay, not the native placeholder, so the dots read bright
+                            and the guillemets stay dim; same font/size as the activity text. */}
+                        <div style={{ position: "relative", maxWidth: 360, margin: "0 auto", borderBottom: `1px solid ${C.line}`, paddingBottom: 8 }}>
+                          <input className="in" value={comment}
+                            onChange={(e) => setComment(e.target.value)}
+                            onKeyDown={(e) => { if (e.key === "Enter") submitComment(); }}
+                            style={{ fontFamily: "var(--mono)", fontSize: 13, textAlign: "center", display: "block", color: C.text }} />
+                          {!comment && (
+                            <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", pointerEvents: "none", fontFamily: "var(--mono)", fontSize: 13 }}>
+                              <span style={{ color: C.faint }}>« </span><span style={{ color: C.text }}>…</span><span style={{ color: C.faint }}> »</span>
+                            </div>
+                          )}
+                        </div>
+                        {/* the "what your word does" hint teaches once (showDoneHint, seen-once-
+                            ever like the tap hint) then gets out of the way for good — an
+                            instruction, not a standing affordance (Maxence 16/07). */}
+                        {showDoneHint && current && (() => {
                           const k = current.activity.kind;
                           const hint = k === "pipeline" ? "ton mot fait avancer la pièce dans le funnel"
                             : k === "recommandeur" ? "ton mot affine le profil pour la prochaine reco"
