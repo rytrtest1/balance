@@ -864,8 +864,8 @@ const css = `
 .navarr:hover{color:${C.mut}}
 .breathe{animation:breathe 3.6s ease-in-out infinite}
 @keyframes breathe{0%,100%{opacity:.4}50%{opacity:.95}}
-.hintcursor{display:inline-block;width:1px;height:1em;background:#fff;opacity:.22;animation:blink 1.1s steps(1) infinite}
-@keyframes blink{0%,49%{opacity:.22}50%,100%{opacity:0}}
+.hintcursor{display:inline-block;width:1px;height:1em;background:${C.soft};animation:blink 1.1s steps(1) infinite}
+@keyframes blink{0%,49%{opacity:1}50%,100%{opacity:0}}
 .link{font-family:var(--mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:${C.faint};background:none;border:none;cursor:pointer;transition:color .2s}
 .link:hover{color:${C.mut}}
 textarea.in{resize:vertical}
@@ -2458,20 +2458,20 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                     <button className="link" onClick={togglePause}>{paused ? "reprendre" : "pause"}</button>
                     {/* comment field, open here too so a thought worth catching mid-session has
                         somewhere to go before "done" (same `comment` state either way) — sits
-                        below pause, same 30px gap as line→pause above it (Maxence 16/07, round
-                        5 — was hugging pause at 10px). autoFocus popped the keyboard on every
-                        session start, too aggressive (round 4) — a quiet "« … »" hint instead,
-                        rendered as its own overlay (not the native placeholder) so the dots get
-                        real spacing between them and the guillemets, not a fused "…" glyph
-                        (round 6 — kept grey throughout, the earlier bright-dots idea didn't
-                        stick). Same font/size/color as the activity text above once you
-                        actually type — a different register there read as inconsistent. */}
-                    <div style={{ position: "relative", maxWidth: 320, margin: "30px auto 0" }}>
+                        below pause. Margin tuned so the gap from pause down to the cursor hint's
+                        top matches the gap from the line's visual bottom up to pause (44px, not
+                        the line wrapper's own 30px margin — that box has 22px of invisible
+                        touch-target padding above/below the actual stroke) (Maxence 16/07, round
+                        7). autoFocus popped the keyboard on every session start, too aggressive
+                        (round 4) — a quiet cursor hint instead, rendered as its own overlay (not
+                        the native placeholder). Same font/size/color as the activity text above
+                        once you actually type — a different register there read as inconsistent. */}
+                    <div style={{ position: "relative", maxWidth: 320, margin: "54px auto 0" }}>
                       <input className="in" value={comment}
                         onChange={(e) => setComment(e.target.value)}
                         style={{ fontFamily: "var(--mono)", fontSize: 13, textAlign: "center", display: "block", color: C.text }} />
                       {!comment && (
-                        <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, pointerEvents: "none", fontFamily: "var(--mono)", fontSize: 13, color: C.faint }}>
+                        <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: COMMENT_HINT_MODE === "cursor" ? "flex-start" : "center", justifyContent: "center", gap: 6, pointerEvents: "none", fontFamily: "var(--mono)", fontSize: 13, color: C.faint }}>
                           {COMMENT_HINT_MODE === "cursor"
                             ? <span className="hintcursor" />
                             : <><span>«</span><span>...</span><span>»</span></>}
@@ -2521,7 +2521,7 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                             onKeyDown={(e) => { if (e.key === "Enter") submitComment(); }}
                             style={{ fontFamily: "var(--mono)", fontSize: 13, textAlign: "center", display: "block", color: C.text }} />
                           {!comment && (
-                            <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, pointerEvents: "none", fontFamily: "var(--mono)", fontSize: 13, color: C.faint }}>
+                            <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: COMMENT_HINT_MODE === "cursor" ? "flex-start" : "center", justifyContent: "center", gap: 6, pointerEvents: "none", fontFamily: "var(--mono)", fontSize: 13, color: C.faint }}>
                               {COMMENT_HINT_MODE === "cursor"
                                 ? <span className="hintcursor" />
                                 : <><span>«</span><span>...</span><span>»</span></>}
