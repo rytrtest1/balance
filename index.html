@@ -844,6 +844,10 @@ const css = `
 @keyframes breathe{0%,100%{opacity:.4}50%{opacity:.95}}
 .sway{animation:sway 5.2s ease-in-out infinite}
 @keyframes sway{0%,100%{transform:rotate(calc(-1 * var(--tilt-amp,0deg)))}50%{transform:rotate(var(--tilt-amp,0deg))}}
+/* lets --tilt-amp be transitioned as a real angle instead of jumping instantly —
+   needed so the settle (amplitude eased down to 0 while "sway" keeps running,
+   see startBalanceReveal) damps smoothly instead of snapping at the end. */
+@property --tilt-amp{syntax:'<angle>';inherits:false;initial-value:0deg}
 .link{font-family:var(--mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:${C.faint};background:none;border:none;cursor:pointer;transition:color .2s}
 .link:hover{color:${C.mut}}
 textarea.in{resize:vertical}
@@ -2038,17 +2042,18 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
       <div className="grain" />
       <div className="wrap" onTouchStart={onTouchStart} onTouchEnd={onTouchEnd}>
 
-        {/* clics du jour — rangé avec le shake : n'apparaît que pendant la fenêtre où
-            la ligne est de toute façon sortie de son repos (sway + settle), et
-            disparaît avec elle. Du coup peut se permettre d'être lisible plutôt que
-            planqué, plutôt qu'un repère en permanence à l'écran. Demandé par Maxence 16/07. */}
+        {/* actions loguées du jour — rangé avec le shake : n'apparaît que pendant la
+            fenêtre où la ligne est de toute façon sortie de son repos (sway + settle),
+            et disparaît avec elle. Du coup peut se permettre d'être lisible plutôt que
+            planqué, plutôt qu'un repère en permanence à l'écran. isDone (pas isClick) —
+            compte aussi les logs hors clic (free-log). Demandé par Maxence 16/07. */}
         {tab === "now" && balanceVisible && (
           <div className="mono" style={{ position: "absolute", top: 14, right: 18, textAlign: "right",
             opacity: swaySettling ? 0 : 1, transition: `opacity ${SETTLE_MS}ms ease`, pointerEvents: "none" }}>
             <div style={{ fontSize: 16, color: C.bone, letterSpacing: ".02em" }}>
-              {log.filter((e) => e.date === todayKey() && isClick(e)).length}
+              {log.filter((e) => e.date === todayKey() && isDone(e)).length}
             </div>
-            <div style={{ fontSize: 8, color: C.faint, letterSpacing: ".14em", textTransform: "uppercase", marginTop: 1 }}>clics</div>
+            <div style={{ fontSize: 8, color: C.faint, letterSpacing: ".14em", textTransform: "uppercase", marginTop: 1 }}>actions</div>
           </div>
         )}
 
@@ -2156,15 +2161,23 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                 const balanceSpread = balanceVisible ? domainBalance(activities, log) : 0;
                 const tiltAmpDeg = balanceSpread * 6;
                 const swayDurationSec = 7 - balanceSpread * 3.5;
-                const swaying = balanceVisible && !swaySettling;
+                // settle without a snap: the "sway" keyframe animation stays running the
+                // whole time (transform is never handed off between animation and
+                // transition — that handoff is what caused the jump at the end). Only the
+                // --tilt-amp amplitude it reads eases down to 0deg, damping the swing to
+                // nothing in place, like a real pendulum losing energy rather than being
+                // stopped by a wall.
                 return (
-                  <div className={swaying ? "sway" : ""} onPointerDown={onLineDown} onPointerUp={onLineUp} onPointerLeave={onLineCancel} onPointerCancel={onLineCancel}
+                  <div className={balanceVisible ? "sway" : ""} onPointerDown={onLineDown} onPointerUp={onLineUp} onPointerLeave={onLineCancel} onPointerCancel={onLineCancel}
                     onContextMenu={(e) => e.preventDefault()}
                     style={{ position: "relative", height: 44, width: "82%", margin: "0 auto",
                       display: "flex", justifyContent: "center", alignItems: "center",
                       overflow: "visible", cursor: "pointer", touchAction: "manipulation", userSelect: "none", WebkitUserSelect: "none",
-                      ...(swaying ? { "--tilt-amp": `${tiltAmpDeg}deg`, animationDuration: `${swayDurationSec}s` }
-                        : swaySettling ? { transform: "rotate(0deg)", transition: `transform ${SETTLE_MS}ms cubic-bezier(.3,.85,.4,1)` } : {}) }}>
+                      ...(balanceVisible ? {
+                        "--tilt-amp": `${swaySettling ? 0 : tiltAmpDeg}deg`,
+                        animationDuration: `${swayDurationSec}s`,
+                        ...(swaySettling ? { transitionProperty: "--tilt-amp", transitionDuration: `${SETTLE_MS}ms`, transitionTimingFunction: "ease-out" } : {}),
+                      } : {}) }}>
                     {/* hollow track — inset, never touches the edges */}
                     <div className={stage === "entry" && !holding ? "breathe" : ""}
                       style={{ position: "absolute", left: 0, right: 0, top: "50%", height: 2, background: stage === "entry" ? C.bone : C.soft,
