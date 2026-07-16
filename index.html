@@ -2463,8 +2463,8 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                         onChange={(e) => setComment(e.target.value)}
                         style={{ fontFamily: "var(--mono)", fontSize: 13, textAlign: "center", display: "block", color: C.text }} />
                       {!comment && (
-                        <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", gap: 5, pointerEvents: "none", fontFamily: "var(--mono)", fontSize: 13, color: C.faint }}>
-                          <span>«</span><span>.</span><span>.</span><span>.</span><span>»</span>
+                        <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, pointerEvents: "none", fontFamily: "var(--mono)", fontSize: 13, color: C.faint }}>
+                          <span>«</span><span>...</span><span>»</span>
                         </div>
                       )}
                     </div>
@@ -2511,8 +2511,8 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                             onKeyDown={(e) => { if (e.key === "Enter") submitComment(); }}
                             style={{ fontFamily: "var(--mono)", fontSize: 13, textAlign: "center", display: "block", color: C.text }} />
                           {!comment && (
-                            <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", gap: 5, pointerEvents: "none", fontFamily: "var(--mono)", fontSize: 13, color: C.faint }}>
-                              <span>«</span><span>.</span><span>.</span><span>.</span><span>»</span>
+                            <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, pointerEvents: "none", fontFamily: "var(--mono)", fontSize: 13, color: C.faint }}>
+                              <span>«</span><span>...</span><span>»</span>
                             </div>
                           )}
                         </div>
