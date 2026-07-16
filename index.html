@@ -2302,17 +2302,20 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                 const trackTransition = holding ? `transform ${effHold}ms linear` : "transform .3s cubic-bezier(.2,.7,.2,1)";
                 const fillColor = C.bone; // monochrome — the line is always bone, the one living mark
                 // LINE_MODE "tilt": no clock read at all — same sin sway as the shake
-                // reveal (startBalanceReveal above), same ampDeg/periodMs formulas from
-                // the same domainBalance() spread (frozen at begin(), not recomputed).
-                // The difference is only which envelope damps it: the shake settles over
-                // its own fixed ~5s timer, this settles over the session's own progress
-                // (frac 0→1) — so it swings at full amplitude near the start and calms
-                // as the estimated duration runs out, flat exactly at frac=1. Overshoot
-                // (frac>1) stays flat too, no reward shape for going long (Maxence's call).
+                // reveal (startBalanceReveal above), same ampDeg formula and spread
+                // reading (frozen at begin(), not recomputed). Two differences from the
+                // shake: (1) the envelope damps over the session's own progress (frac
+                // 0→1) instead of a fixed ~5s timer — full swing near the start, calm as
+                // the estimated duration runs out, flat exactly at frac=1, and overshoot
+                // (frac>1) stays flat too, no reward shape for going long (Maxence's
+                // call). (2) the period is much longer than the shake's — a running
+                // session sits on screen for minutes, not ~5s, so it reads as a slow,
+                // untroubled sway rather than something nervous (Maxence 16/07: the
+                // shake's pace here "felt rushed").
                 const tiltActive = LINE_MODE === "tilt" && (stage === "running" || stage === "done");
                 const tiltSpread = sessionTiltRef.current;
                 const tiltAmpDeg = tiltSpread * 6;
-                const tiltPeriodMs = (7 - tiltSpread * 3.5) * 1000;
+                const tiltPeriodMs = (18 - tiltSpread * 6) * 1000; // 12s (very imbalanced) to 18s (near-balanced)
                 const tiltEnvelope = tiltActive ? Math.max(0, 1 - Math.min(frac, 1)) : 0;
                 const tiltDeg = tiltActive
                   ? tiltAmpDeg * Math.sin((2 * Math.PI * elapsedMs) / tiltPeriodMs) * tiltEnvelope
@@ -2424,11 +2427,12 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                     <button className="link" onClick={togglePause}>{paused ? "reprendre" : "pause"}</button>
                     {/* comment field, open here too so a thought worth catching mid-session has
                         somewhere to go before "done" (same `comment` state either way) — sits
-                        below pause, deliberately quiet (no border, small/faint) rather than
-                        reading as a form field (Maxence 16/07, toned down same day). */}
-                    <input className="in" value={comment} placeholder="un mot, même en cours ?"
+                        below pause, no placeholder copy at all: tap it and the blinking caret
+                        alone says "you can write here", nothing to read until you do
+                        (Maxence 16/07, round 2 — placeholder text felt like too much). */}
+                    <input className="in" value={comment}
                       onChange={(e) => setComment(e.target.value)}
-                      style={{ fontSize: 11, textAlign: "center", maxWidth: 320, margin: "10px auto 0", display: "block", fontStyle: comment ? "normal" : "italic", color: comment ? C.mut : C.faint }} />
+                      style={{ fontSize: 11, textAlign: "center", maxWidth: 320, margin: "10px auto 0", display: "block", color: C.mut }} />
                   </div>
                   );
                 })()}
