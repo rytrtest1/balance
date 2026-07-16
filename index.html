@@ -933,6 +933,10 @@ function Throughline() {
   // sandbox-only: which list row has its target/period/where controls expanded —
   // lets Maxence tweak the catalogue right where he tests it, no tab switch
   const [paramEdit, setParamEdit] = useState(null);
+  // sandbox-only: Activities editor filtered to the current place (audit 11/07 —
+  // 22 cards is a wall; computePlace() already drives the real engine, reusing it
+  // here needs no new concept). Off by default (shows everything, as before).
+  const [placeFilterOn, setPlaceFilterOn] = useState(false);
   const [clock, setClock] = useState(0); // bump to re-render after a time jump
 
   const applyDebugTime = (day, hour) => {
@@ -985,6 +989,14 @@ function Throughline() {
   // current.activity.id === "a_ecoute_album" (see isAlbumActivity).
   const [albumTitles, setAlbumTitles] = useState([]);
   const [albumIdx, setAlbumIdx] = useState(0);
+  // recommandeur rating (16/07-d, replaces the Claude-guessed doing/liked/neutral/
+  // disliked status): the hero line itself becomes the rating control on "done" for
+  // ANY recommandeur action (Film, Titre, Cuisiner, Album's overall verdict at the
+  // very end…) — same centre-out drag read as the album per-title mini slider above,
+  // just applied to the main line instead of a secondary one (Maxence 16/07: "garde
+  // la valeur du curseur sur 100 donnée aux titres, c'est beaucoup mieux"). Default
+  // 50 (neutral) if never touched, mirroring albumTitles' own default.
+  const [rating, setRating] = useState(50);
   const [doneEntryId, setDoneEntryId] = useState(null);
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState("");
@@ -1023,8 +1035,6 @@ function Throughline() {
   // count rides along with it (visible only for that window, hidden again once
   // the line is back at rest). A shake mid-reveal is ignored so the settle
   // always finishes.
-  const [balanceVisible, setBalanceVisible] = useState(false);
-  const [swaySettling, setSwaySettling] = useState(false); // only drives the click-counter's own opacity fade
   const revealActiveRef = useRef(false);
   const lineRef = useRef(null); // the swaying div — tilt is driven on it directly, not through React state
   const rafRef = useRef(null);
@@ -1044,30 +1054,47 @@ function Throughline() {
   // oscillation (sin) never stops or resets, only its envelope eases from 1 to 0 with
   // a smoothstep (zero velocity at both ends), so there is no instant in the whole
   // reveal where the angle's rate of change jumps.
+  // clicks-remaining bascules (16/07-c, M.'s idea right after shipping the "actions"
+  // digit below — see [[throughline-feature-ideas]]): a felt/counted gesture instead
+  // of a read number. Replaces that digit with a short discrete prefix on the SAME
+  // shake reveal — N alternating tilts (N = clicks left before RAPPORT_MIN_CLICS),
+  // then the existing continuous domain-balance sway plays exactly as before,
+  // unchanged. Goal already met (N=0) → the prefix is zero-length, straight to the
+  // sway, the line never bascules. My call on "replace vs coexist" (the idea note
+  // flagged both as open) — told to M., easy to revert to a digit if he prefers.
+  const BASCULE_MS = 550; // one discrete tilt-and-return
+  const BASCULE_AMP = 5; // degrees — a clearly separate, countable motion from the sway
   const startBalanceReveal = () => {
     cancelAnimationFrame(rafRef.current);
     revealActiveRef.current = true;
-    setSwaySettling(false);
-    setBalanceVisible(true);
     const startedAt = performance.now();
     const spread = domainBalance(activities, log); // frozen for this reveal, not recomputed per frame
     const ampDeg = spread * 6;
     const periodMs = (7 - spread * 3.5) * 1000;
-    const totalMs = SWAY_MS + SETTLE_MS;
+    const swayTotalMs = SWAY_MS + SETTLE_MS;
     const smoothstep = (x) => x * x * (3 - 2 * x);
-    let settlingFlagged = false;
+    const clicksLeft = Math.max(0, RAPPORT_MIN_CLICS - log.filter((e) => e.date === todayKey() && isClick(e)).length);
+    const bascMs = clicksLeft * BASCULE_MS;
+    const totalMs = bascMs + swayTotalMs;
     const tick = (now) => {
       const elapsed = now - startedAt;
       if (elapsed >= totalMs) {
         if (lineRef.current) lineRef.current.style.transform = "";
-        setBalanceVisible(false);
-        setSwaySettling(false);
         revealActiveRef.current = false;
         return;
       }
-      if (!settlingFlagged && elapsed >= SWAY_MS) { settlingFlagged = true; setSwaySettling(true); }
-      const envelope = elapsed <= SWAY_MS ? 1 : 1 - smoothstep(Math.min(1, (elapsed - SWAY_MS) / SETTLE_MS));
-      const angle = ampDeg * Math.sin((2 * Math.PI * elapsed) / periodMs) * envelope;
+      if (elapsed < bascMs) {
+        const idx = Math.floor(elapsed / BASCULE_MS);
+        const localT = (elapsed - idx * BASCULE_MS) / BASCULE_MS;
+        const sign = idx % 2 === 0 ? 1 : -1;
+        const shape = Math.sin(Math.PI * localT); // 0 → 1 → 0, one bascule
+        if (lineRef.current) lineRef.current.style.transform = `rotate(${BASCULE_AMP * sign * shape}deg)`;
+        rafRef.current = requestAnimationFrame(tick);
+        return;
+      }
+      const swayElapsed = elapsed - bascMs;
+      const envelope = swayElapsed <= SWAY_MS ? 1 : 1 - smoothstep(Math.min(1, (swayElapsed - SWAY_MS) / SETTLE_MS));
+      const angle = ampDeg * Math.sin((2 * Math.PI * swayElapsed) / periodMs) * envelope;
       if (lineRef.current) lineRef.current.style.transform = `rotate(${angle}deg)`;
       rafRef.current = requestAnimationFrame(tick);
     };
@@ -1111,6 +1138,52 @@ function Throughline() {
     };
     window.addEventListener("devicemotion", onMotion);
     return () => window.removeEventListener("devicemotion", onMotion);
+  }, []);
+
+  // deferred reminder (16/07-c — "lessive : lancer la machine, revenir l'étendre
+  // plus tard", see [[throughline-feature-ideas]]). Generic: any action can carry
+  // `deferredReminder: {afterMin, text}` in the catalogue; logging it schedules a
+  // plain notification after that delay. No server, no push (not feasible for a
+  // static PWA, see [[throughline-reco-library-vs-llm]] point 5) — two paths cover
+  // the app staying open vs. being closed/backgrounded: (1) a setTimeout fires it
+  // directly while the tab is alive; (2) the due timestamp is persisted, so if the
+  // tab was closed past the delay, the very next time the app becomes visible it
+  // fires immediately instead of silently having missed it.
+  const fireReminder = async (text) => {
+    try {
+      if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
+      const reg = "serviceWorker" in navigator ? await navigator.serviceWorker.ready.catch(() => null) : null;
+      if (reg && reg.showNotification) reg.showNotification("balance", { body: text, icon: "icon-192.png" });
+      else new Notification("balance", { body: text });
+    } catch {}
+  };
+  const checkDueReminder = async () => {
+    const r = await loadJSON(NS("tlx_reminder"), null);
+    if (!r || Date.now() < r.dueTs) return;
+    fireReminder(r.text);
+    saveJSON(NS("tlx_reminder"), null);
+  };
+  const scheduleReminder = (text, afterMin) => {
+    // same piggyback-on-a-real-tap pattern as devicemotion's permission grab in
+    // start() above — no dedicated prompt/button.
+    if (typeof Notification !== "undefined" && Notification.permission === "default") {
+      Notification.requestPermission().catch(() => {});
+    }
+    const dueTs = Date.now() + afterMin * 60000;
+    saveJSON(NS("tlx_reminder"), { text, dueTs });
+    setTimeout(checkDueReminder, afterMin * 60000 + 500);
+  };
+  useEffect(() => {
+    (async () => {
+      const r = await loadJSON(NS("tlx_reminder"), null);
+      if (!r) return;
+      const remain = r.dueTs - Date.now();
+      if (remain <= 0) { fireReminder(r.text); saveJSON(NS("tlx_reminder"), null); }
+      else setTimeout(checkDueReminder, remain + 500);
+    })();
+    const onVis = () => { if (document.visibilityState === "visible") checkDueReminder(); };
+    document.addEventListener("visibilitychange", onVis);
+    return () => document.removeEventListener("visibilitychange", onVis);
   }, []);
 
   // rapport "moments": curate rather than dump every comment of the day. ≤3 comments
@@ -1288,7 +1361,7 @@ Choisis les 3 ou 4 index les plus notables pour un récap de fin de journée —
     saveJSON(NS("tlx_hold"), { date: today, ms: next });
     propose(log, activities, false, current ? current.activity.id : null);
   };
-  const resetFlow = (nextStage = "entry") => { setStage(nextStage); setCurrent(null); setRunning(false); setElapsedMs(0); setPaused(false); setComment(""); setDescOpen(false); setSyncMsg(""); setSyncing(false); setAlbumTitles([]); setAlbumIdx(0); };
+  const resetFlow = (nextStage = "entry") => { setStage(nextStage); setCurrent(null); setRunning(false); setElapsedMs(0); setPaused(false); setComment(""); setDescOpen(false); setSyncMsg(""); setSyncing(false); setAlbumTitles([]); setAlbumIdx(0); setRating(50); };
   // Album de la semaine title-by-title appreciation (Maxence 16/07, item 4/5) —
   // isAlbumActivity gates the extra running-stage UI to that one activity only.
   const isAlbumActivity = !!(current && current.activity.id === "a_ecoute_album");
@@ -1428,13 +1501,14 @@ Détermine où en est la pièce APRÈS cette session. new_stage = index (0 à ${
   // ----- practice: the comment feeds the activity's living `note` (coaching memory:
   // patterns, adjustments, observations). Claude rewrites the whole note integrating
   // this session, and distils a one-line log note.
-  // NOT used for recommandeur (Film/Écoute/Cuisiner) anymore — 13/07: this used to also
+  // NOT used for recommandeur (Film/Écoute/Cuisiner) — 13/07: this used to also
   // rewrite `note` as a "taste profile" for recos, but for Cuisiner `note` holds engine
   // rules (NO-GO list, meal-time windows, garniture logic), and a passing comment ("trop
   // sucré") triggering a full LLM rewrite of that text risked silently corrupting it. The
   // comment is still captured (submitComment always writes log.note regardless of kind) —
-  // recommandeur taste signal now lives in items[] status, set explicitly, not inferred
-  // by rewriting free text. See [[throughline-reco-library-vs-llm]].
+  // recommandeur taste signal lives in items[] status instead, set explicitly by
+  // recoStatusViaClaude below (16/07 — was manual/conversational until now, see
+  // [[throughline-reco-library-vs-llm]] point 5), never by rewriting this free text.
   const coachViaClaude = async (key, text) => {
     const act = current.activity;
     const prompt = `Activité : « ${act.name} » (type: ${act.kind}, domaine: ${act.domain}).
@@ -1475,16 +1549,57 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
     }
   };
 
+  // ----- recommandeur (Film/Musique/Cuisiner…): the drawn item keeps the PRECISE
+  // rating (0-100, from the hero-line slider) — no liked/neutral/disliked bucketing
+  // (Maxence 16/07, round 3: tried a 3-way status derived from the number first, he
+  // asked to remove it — the number itself IS the note, interpreting it later reads
+  // it together with the text comment rather than the app collapsing it into a label
+  // now). `item.rating` is set synchronously in submitComment() below, never gated on
+  // an API key or a Claude call succeeding. This function's only job is the
+  // qualitative nuance: turn the free-text comment into a distilled one-line note,
+  // same pattern as coachViaClaude — it never touches the rating or the item.
+  const recoNoteViaClaude = async (key, text) => {
+    const act = current.activity, action = current.action;
+    const item = (act.items || []).find((it) => it.id === action.itemId);
+    const prompt = `Un commentaire est laissé après une session de « ${act.name} » (domaine : ${act.domain}).
+
+Item : « ${item ? item.text : action.text} ». Note donnée sur le curseur : ${rating}/100 (déjà appliquée, ne la change pas).
+
+Commentaire laissé après la session :
+« ${text} »
+
+Écris une seule ligne qui nuance cet avis — le ressenti réel derrière le commentaire, pas juste répéter ou traduire la note chiffrée en mots. Condense, garde le ton d'origine.`;
+    setSyncing(true); setSyncMsg("lecture du commentaire…");
+    try {
+      const out = await claudeJSON(key, prompt, {
+        type: "object",
+        properties: { log_note: { type: "string" } },
+        required: ["log_note"],
+        additionalProperties: false,
+      }, 300);
+      if (doneEntryId) setLog((L) => L.map((en) => (en.id === doneEntryId ? { ...en, note: text, claudeNote: out.log_note } : en)));
+      setSyncMsg("commentaire affiné ✓");
+    } catch (err) {
+      setSyncMsg("lecture impossible (" + (err.message || "erreur") + ") — commentaire gardé");
+    } finally {
+      setSyncing(false);
+      setTimeout(() => { setSyncMsg(""); finishFlow(text); }, 2400);
+    }
+  };
+
   const submitComment = async () => {
     const text = comment.trim();
     const parsedManual = manualMin.trim() ? parseInt(manualMin) : null;
     const existing = log.find((en) => en.id === doneEntryId);
+    const kind = current && current.activity.kind;
+    const isRecoWithItem = kind === "recommandeur" && !!current.action.itemId;
     if (doneEntryId) {
       setLog((L) => L.map((en) => {
         if (en.id !== doneEntryId) return en;
         const patch = {};
         if (parsedManual > 0) { patch.min = parsedManual; patch.sec = parsedManual * 60; }
         if (text) patch.note = text;
+        if (isRecoWithItem) patch.rating = rating;
         return { ...en, ...patch };
       }));
     }
@@ -1494,20 +1609,35 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
       const delta = parsedManual - (existing.min || 0);
       if (delta) simAdvanceMinutes(delta);
     }
-    const kind = current && current.activity.kind;
-    // pipeline advances the piece, practice grows the coaching note. recommandeur and
-    // task just keep the comment locally (log.note, patched above) — see coachViaClaude
-    // for why recommandeur was cut out 13/07.
-    const wantsClaude = !!text && (kind === "pipeline" || kind === "practice");
+    // recommandeur (with a drawn item): keep the PRECISE rating, no liked/neutral/
+    // disliked bucketing (Maxence 16/07, round 3 — "garder la note précise... quand
+    // besoin d'interpréter, la note est utile couplée au commentaire texte", i.e. the
+    // interpretation happens later by reading rating+comment together, not by the app
+    // collapsing the number into a 3-way label now). `rating` lands on the item itself
+    // (not just the log entry) so it's still there next time this item comes up in
+    // conversation/curation. `status` only tracks in-rotation vs already-experienced —
+    // "doing" → "done" removes it from the LRU candidate pool (hasDoingItems/
+    // pickItemLRU only ever check for "doing", any other value works the same way).
+    if (isRecoWithItem) {
+      const aid = current.activity.id, itemId = current.action.itemId;
+      setActivities((arr) => arr.map((a) => (a.id === aid
+        ? { ...a, items: (a.items || []).map((it) => (it.id === itemId ? { ...it, status: "done", rating } : it)) }
+        : a)));
+    }
+    // pipeline advances the piece, practice grows the coaching note, recommandeur (with
+    // a drawn item) already had its status set above — this Claude pass only refines
+    // the comment into a distilled note. Plain task, or a recommandeur draw with no
+    // item, just keeps the comment locally (log.note, patched above).
+    const wantsClaude = !!text && (kind === "pipeline" || kind === "practice" || isRecoWithItem);
     if (wantsClaude) {
       const key = (await store.get("tlx_apiKey")) || "";
-      if (key) { (kind === "pipeline" ? advanceViaClaude : coachViaClaude)(key, text); return; }
-      setSyncMsg(kind === "pipeline" ? "pas de clé API — commentaire gardé, pièce non avancée" : "pas de clé API — commentaire gardé, note non mise à jour");
+      if (key) { (kind === "pipeline" ? advanceViaClaude : isRecoWithItem ? recoNoteViaClaude : coachViaClaude)(key, text); return; }
+      setSyncMsg(kind === "pipeline" ? "pas de clé API — commentaire gardé, pièce non avancée" : isRecoWithItem ? "pas de clé API — note gardée telle quelle" : "pas de clé API — commentaire gardé, note non mise à jour");
       setTimeout(() => { setSyncMsg(""); finishFlow(text); }, 2200);
       return;
     }
-    // recommandeur/task with a comment: no Claude round-trip (cut 13/07), but still
-    // show the same brief loading chip as pipeline/practice so submitting a comment
+    // task, or a recommandeur draw with no item: no Claude round-trip, but still show
+    // the same brief loading chip as pipeline/practice/reco so submitting a comment
     // reads identically everywhere (Maxence 16/07 — écoute felt broken without it).
     if (text) {
       setSyncing(true); setSyncMsg("commentaire enregistré…");
@@ -1613,6 +1743,9 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
     if (current.activity.kind === "task") {
       setActivities((arr) => arr.map((a) => (a.id === aid ? { ...a, done: true } : a)));
     }
+    if (current.action.deferredReminder) {
+      scheduleReminder(current.action.deferredReminder.text, current.action.deferredReminder.afterMin);
+    }
     setDoneEntryId(e.id);
     // Album de la semaine (item 5): each title noted during the session gets its own
     // log entry too, type "note" so isDone/isClick/minutesInPeriod never see it — these
@@ -1627,7 +1760,7 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
         }))
       : [];
     setLog((L) => [...L, e, ...titleEntries]);
-    setAlbumTitles([]); setAlbumIdx(0);
+    setAlbumTitles([]); setAlbumIdx(0); setRating(50);
     // sandbox clock: advance right away by the catalogue default duration, so it
     // already reflects a plausible length before any override is typed — tapping
     // the line on "done" (submitComment) applies the delta if one is.
@@ -1653,8 +1786,24 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
   };
   const canHold = stage === "proposal"; // skip is only useful before you've started — once running, finish or pause
   const effHold = holdDate === todayKey() ? holdMs : BASE_HOLD_MS; // ignore a stale day if left open past midnight
-  const onLineDown = () => {
+  // hero-line-as-rating-slider (16/07-d): on "done", for ANY recommandeur action
+  // (single item or the album's own final verdict — see `rating` state above), the
+  // main line stops being a tap-to-submit control and becomes a drag control instead,
+  // same centre-out magnitude read as setAlbumRatingFromPointer. Submitting is still
+  // Enter in the comment field just below (already wired, untouched) — no separate
+  // button needed, the line is purely the slider while in this state.
+  const ratingActive = stage === "done" && current && current.activity.kind === "recommandeur";
+  const setRatingFromPointer = (clientX) => {
+    const el = lineRef.current;
+    if (!el || clientX == null) return;
+    const rect = el.getBoundingClientRect();
+    const half = rect.width / 2 || 1;
+    const r = Math.round(Math.max(0, Math.min(1, Math.abs(clientX - (rect.left + half)) / half)) * 100);
+    setRating(r);
+  };
+  const onLineDown = (e) => {
     didHold.current = false;
+    if (ratingActive) { setRatingFromPointer(e && e.clientX); return; }
     if (!canHold) return;
     holdStart.current = Date.now();
     setHolding(true); // the line begins retracting toward the centre over the full hold time
@@ -1663,8 +1812,10 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
       setHolding(false); swap(); // fully retracted → a different thing
     }, effHold);
   };
+  const onLineMove = (e) => { if (ratingActive) setRatingFromPointer(e.clientX); };
   const cancelHold = () => { if (holdTimer.current) { clearTimeout(holdTimer.current); holdTimer.current = null; } setHolding(false); };
   const onLineUp = () => {
+    if (ratingActive) return; // value is already set live by drag; no tap-to-submit here
     const heldFor = holdStart.current ? Date.now() - holdStart.current : 0;
     cancelHold();
     if (didHold.current) { didHold.current = false; return; } // swap already fired
@@ -2046,6 +2197,7 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
       setManualMin, setComment, setTab, applyDebugTime, simReseed, runSimBatch,
       setLog, setActivities, setStage, setCurrent,
       albumTitles, albumIdx, setAlbumTitles, setAlbumIdx, advanceAlbumTitle,
+      rating, setRating, setRatingFromPointer,
       reportIdx, reportPhase, setReportIdx, setReportPhase,
       debugNow: () => (_debugDate || new Date()).toString(),
     };
@@ -2228,20 +2380,6 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
       <div className="grain" />
       <div className="wrap" onTouchStart={onTouchStart} onTouchEnd={onTouchEnd}>
 
-        {/* actions loguées du jour — rangé avec le shake : n'apparaît que pendant la
-            fenêtre où la ligne est de toute façon sortie de son repos (sway + settle),
-            et disparaît avec elle. Du coup peut se permettre d'être lisible plutôt que
-            planqué, plutôt qu'un repère en permanence à l'écran. isDone (pas isClick) —
-            compte aussi les logs hors clic (free-log). Demandé par Maxence 16/07. */}
-        {tab === "now" && balanceVisible && (
-          <div className="mono" style={{ position: "absolute", top: 14, right: 18, textAlign: "right",
-            opacity: swaySettling ? 0 : 1, transition: `opacity ${SETTLE_MS}ms ease`, pointerEvents: "none" }}>
-            <div style={{ fontSize: 16, color: C.bone, letterSpacing: ".02em" }}>
-              {log.filter((e) => e.date === todayKey() && isDone(e)).length}
-            </div>
-            <div style={{ fontSize: 8, color: C.faint, letterSpacing: ".14em", textTransform: "uppercase", marginTop: 1 }}>actions</div>
-          </div>
-        )}
 
         {/* sandbox banner — makes it impossible to confuse the clone with the real app. */}
         {SIM && (
@@ -2373,16 +2511,16 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                 // 0, so there's no React re-render in the loop and no animation/transition
                 // handoff to snap.
                 return (
-                  <div ref={lineRef} onPointerDown={onLineDown} onPointerUp={onLineUp} onPointerLeave={onLineCancel} onPointerCancel={onLineCancel}
+                  <div ref={lineRef} onPointerDown={onLineDown} onPointerMove={onLineMove} onPointerUp={onLineUp} onPointerLeave={onLineCancel} onPointerCancel={onLineCancel}
                     onContextMenu={(e) => e.preventDefault()}
                     style={{ position: "relative", height: 44, width: "82%", margin: "0 auto",
                       display: "flex", justifyContent: "center", alignItems: "center",
-                      overflow: "visible", cursor: "pointer", touchAction: "manipulation", userSelect: "none", WebkitUserSelect: "none",
+                      overflow: "visible", cursor: "pointer", touchAction: ratingActive ? "none" : "manipulation", userSelect: "none", WebkitUserSelect: "none",
                       // done: eases back to flat over .7s instead of snapping — finishing
                       // early used to leave it crooked one frame then jump straight, which
                       // read as abrupt (Maxence 16/07, round 6). Running keeps the tight
                       // .1s linear so it tracks the tick-driven angle without lag.
-                      ...(LINE_MODE === "tilt" ? { transform: `rotate(${tiltDeg}deg)`,
+                      ...(LINE_MODE === "tilt" && !ratingActive ? { transform: `rotate(${tiltDeg}deg)`,
                         transition: stage === "done" ? "transform .7s cubic-bezier(.2,.7,.2,1)" : "transform .1s linear" } : {}) }}>
                     {/* hollow track — inset, never touches the edges */}
                     <div className={stage === "entry" && !holding ? "breathe" : ""}
@@ -2390,12 +2528,19 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                         transform: `translateY(-50%) scaleX(${holding ? 0 : 1})`, transformOrigin: "center", transition: trackTransition }} />
                     {/* centre fill — grows symmetrically from the middle, overshoots the track when you go beyond.
                         LINE_MODE "tilt" skips this entirely: the tilt on the wrapper above is the only signal. */}
-                    {LINE_MODE === "fill" && frac > 0 && (
+                    {!ratingActive && LINE_MODE === "fill" && frac > 0 && (
                       <div style={{ position: "relative", flexShrink: 0, height: over ? 8 : 6, width: `${widthPct}%`,
                         background: fillColor, opacity: over ? 1 : 0.9,
                         boxShadow: over ? `0 0 14px ${fillColor}` : "none",
                         transform: `scaleX(${holding ? 0 : 1})`, transformOrigin: "center",
                         transition: holding ? `transform ${effHold}ms linear` : "width .25s linear, height .35s, box-shadow .35s, transform .3s" }} />
+                    )}
+                    {/* recommandeur "done": the same centre-out fill, driven by `rating`
+                        (drag) instead of session-time frac — reuses the exact visual
+                        language of the mini album slider, just on the hero line itself. */}
+                    {ratingActive && (
+                      <div style={{ position: "relative", flexShrink: 0, height: 6, width: `${rating}%`,
+                        background: fillColor, opacity: 0.9, transition: "width .08s linear" }} />
                     )}
                   </div>
                 );
@@ -2551,7 +2696,7 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                         {showDoneHint && current && (() => {
                           const k = current.activity.kind;
                           const hint = k === "pipeline" ? "ton mot fait avancer la pièce dans le funnel"
-                            : k === "recommandeur" ? "ton mot affine le profil pour la prochaine reco"
+                            : k === "recommandeur" ? "glisse la ligne pour noter, ton mot nuance"
                             : k === "practice" ? "ton mot nourrit la mémoire de l'activité"
                             : null;
                           return hint ? <div className="mono" style={{ fontSize: 9, color: C.faint, marginTop: 14, letterSpacing: ".06em" }}>{hint}</div> : null;
@@ -2738,7 +2883,13 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
         {/* =================== ACTIVITIES =================== */}
         {tab === "activities" && (
           <div style={{ marginTop: 26 }}>
-            {activities.map((a) => (
+            <div style={{ textAlign: "center", marginBottom: 10 }}>
+              <button className="link" style={{ fontSize: 10.5, color: placeFilterOn ? C.text : C.faint }}
+                onClick={() => setPlaceFilterOn((v) => !v)}>
+                {placeFilterOn ? `ici (${computePlace()})` : "toutes"}
+              </button>
+            </div>
+            {(placeFilterOn ? activities.filter((a) => placeOk(a, computePlace())) : activities).map((a) => (
               <ActivityCard key={a.id} a={a} upd={upd} del={delActivity}
                 addAction={addAction} editAction={editAction} delAction={delAction}
                 addStage={addStage} editStage={editStage} delStage={delStage} moveStage={moveStage}
