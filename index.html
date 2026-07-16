@@ -2307,15 +2307,16 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                 // damps over the session's own progress (frac 0→1) instead of a fixed
                 // ~5s timer — full swing near the start, calm as the estimated duration
                 // runs out, flat exactly at frac=1, and overshoot (frac>1) stays flat too,
-                // no reward shape for going long (Maxence's call). (2) the period is much
-                // longer than the shake's — a session sits on screen for minutes, not
-                // ~5s, so it reads as a slow sway, not something nervous. (3) the angle
-                // itself is half the shake's ampDeg — full amplitude read as too marked
-                // sustained over a whole session (Maxence 16/07, round 3).
+                // no reward shape for going long (Maxence's call). (2) the period is longer
+                // than the shake's (3.5-7s) but not as long as round 3's 12-18s, which read
+                // as unnaturally sluggish once he actually watched it — 8-12s lands between
+                // the two (Maxence 16/07, round 4). (3) the angle itself is half the
+                // shake's ampDeg — full amplitude read as too marked sustained over a
+                // whole session (round 3, kept).
                 const tiltActive = LINE_MODE === "tilt" && (stage === "running" || stage === "done");
                 const tiltSpread = sessionTiltRef.current;
                 const tiltAmpDeg = tiltSpread * 6 * 0.5;
-                const tiltPeriodMs = (18 - tiltSpread * 6) * 1000; // 12s (very imbalanced) to 18s (near-balanced)
+                const tiltPeriodMs = (12 - tiltSpread * 4) * 1000; // 8s (very imbalanced) to 12s (near-balanced)
                 const tiltEnvelope = tiltActive ? Math.max(0, 1 - Math.min(frac, 1)) : 0;
                 const tiltDeg = tiltActive
                   ? tiltAmpDeg * Math.sin((2 * Math.PI * elapsedMs) / tiltPeriodMs) * tiltEnvelope
@@ -2427,11 +2428,12 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                     <button className="link" onClick={togglePause}>{paused ? "reprendre" : "pause"}</button>
                     {/* comment field, open here too so a thought worth catching mid-session has
                         somewhere to go before "done" (same `comment` state either way) — sits
-                        below pause, no placeholder copy: autoFocus puts a blinking caret there
-                        the moment the session starts, which alone says "you can write here"
-                        (Maxence 16/07, round 3). Same size/color as the activity text above —
-                        a different register here read as inconsistent. */}
-                    <input className="in" value={comment} autoFocus
+                        below pause. autoFocus popped the keyboard on every session start, too
+                        aggressive (Maxence 16/07, round 4) — a quiet "« … »" placeholder (dim via
+                        the shared .in::placeholder rule) hints it's writable without forcing
+                        focus. Same size/color as the activity text above once you actually type —
+                        a different register there read as inconsistent. */}
+                    <input className="in" value={comment} placeholder="« … »"
                       onChange={(e) => setComment(e.target.value)}
                       style={{ fontSize: 13, textAlign: "center", maxWidth: 320, margin: "10px auto 0", display: "block", color: C.text }} />
                   </div>
