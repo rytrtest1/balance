@@ -1328,6 +1328,13 @@ Choisis les 3 ou 4 index les plus notables pour un récap de fin de journée —
   const finishFlow = (text) => {
     const clicksToday = log.filter((e) => e.date === todayKey() && isClick(e)).length;
     const rapport = clicksToday >= RAPPORT_MIN_CLICS && !!text && text.trim().toLowerCase().includes("rapport");
+    // showDoneHint was only ever re-checked against storage at app launch — it
+    // stayed true for every activity within one continuous session, so "ton mot
+    // nourrit…" kept reappearing after the first finish instead of leaving for
+    // good (Maxence 16/07). Cleared here, right as the done screen that showed it
+    // is leaving — NOT in start(), which also fires before the very first done
+    // screen and would have wiped it before it ever rendered once (caught testing).
+    setShowDoneHint(false);
     resetFlow(rapport ? "report" : "entry");
   };
 
