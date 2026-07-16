@@ -723,6 +723,12 @@ const NS = (k) => (SIM && k !== "tlx_apiKey" ? k.replace("tlx_", "tlx_sim_") : k
 // swap this constant to compare in sandbox before picking one for real (Maxence 16/07).
 const LINE_MODE = "tilt"; // "fill" | "tilt"
 
+// empty-comment-field hint: "cursor" = a self-drawn blinking caret (dim white
+// bar, no native autofocus — that popped the keyboard, too aggressive). "dots"
+// = the earlier quiet "« ... »" placeholder. Kept both so we can flip back
+// without redoing the work (Maxence 16/07).
+const COMMENT_HINT_MODE = "cursor"; // "cursor" | "dots"
+
 // buildHat = the whole draw pool laid open (for the sandbox "Liste" view). Same
 // rows pickAging() draws from (buildLotteryRows), plus `done` (informational —
 // how many completions logged this period) and `rate` (its actual draw weight)
@@ -858,6 +864,8 @@ const css = `
 .navarr:hover{color:${C.mut}}
 .breathe{animation:breathe 3.6s ease-in-out infinite}
 @keyframes breathe{0%,100%{opacity:.4}50%{opacity:.95}}
+.hintcursor{display:inline-block;width:1px;height:1em;background:#fff;opacity:.22;animation:blink 1.1s steps(1) infinite}
+@keyframes blink{0%,49%{opacity:.22}50%,100%{opacity:0}}
 .link{font-family:var(--mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:${C.faint};background:none;border:none;cursor:pointer;transition:color .2s}
 .link:hover{color:${C.mut}}
 textarea.in{resize:vertical}
@@ -2464,7 +2472,9 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                         style={{ fontFamily: "var(--mono)", fontSize: 13, textAlign: "center", display: "block", color: C.text }} />
                       {!comment && (
                         <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, pointerEvents: "none", fontFamily: "var(--mono)", fontSize: 13, color: C.faint }}>
-                          <span>«</span><span>...</span><span>»</span>
+                          {COMMENT_HINT_MODE === "cursor"
+                            ? <span className="hintcursor" />
+                            : <><span>«</span><span>...</span><span>»</span></>}
                         </div>
                       )}
                     </div>
@@ -2512,7 +2522,9 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                             style={{ fontFamily: "var(--mono)", fontSize: 13, textAlign: "center", display: "block", color: C.text }} />
                           {!comment && (
                             <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, pointerEvents: "none", fontFamily: "var(--mono)", fontSize: 13, color: C.faint }}>
-                              <span>«</span><span>...</span><span>»</span>
+                              {COMMENT_HINT_MODE === "cursor"
+                                ? <span className="hintcursor" />
+                                : <><span>«</span><span>...</span><span>»</span></>}
                             </div>
                           )}
                         </div>
