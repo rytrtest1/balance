@@ -162,7 +162,7 @@ const isOneDayBeforeWorkStretch = (d = realNow()) => {
   const plus = (n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
   return !isWorkDayToday(d) && isWorkDayToday(plus(1));
 };
-const isDone = (e) => e.type !== "skip";
+const isDone = (e) => e.type !== "note";
 // a real completion, as opposed to a free-text "note" entry (submitFreeLog) — used
 // wherever "clics" are counted (rapport gate, sandbox banners) so jotting a note
 // never inflates the count of activities actually done.
