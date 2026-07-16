@@ -721,7 +721,7 @@ const NS = (k) => (SIM && k !== "tlx_apiKey" ? k.replace("tlx_", "tlx_sim_") : k
 // to flat as the session's estimated duration runs out — no time is ever shown,
 // only equilibrium resolving. Both share the same `frac` (elapsed/estimated),
 // swap this constant to compare in sandbox before picking one for real (Maxence 16/07).
-const LINE_MODE = "fill"; // "fill" | "tilt"
+const LINE_MODE = "tilt"; // "fill" | "tilt"
 
 // buildHat = the whole draw pool laid open (for the sandbox "Liste" view). Same
 // rows pickAging() draws from (buildLotteryRows), plus `done` (informational —
@@ -2420,14 +2420,15 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                     )}
                     {/* running: a quiet pause, for when something outside interrupts the session
                         (a call, someone at the door) — not for skipping, just for stopping the
-                        clock. Comment field open here too (Maxence 16/07): a thought worth
-                        catching mid-session used to have nowhere to go until "done" — same
-                        `comment` state either way, so whatever's typed here is already there
-                        once the session ends. */}
+                        clock. Keeps its normal spot right under the line (Maxence 16/07). */}
+                    <button className="link" onClick={togglePause}>{paused ? "reprendre" : "pause"}</button>
+                    {/* comment field, open here too so a thought worth catching mid-session has
+                        somewhere to go before "done" (same `comment` state either way) — sits
+                        below pause, deliberately quiet (no border, small/faint) rather than
+                        reading as a form field (Maxence 16/07, toned down same day). */}
                     <input className="in" value={comment} placeholder="un mot, même en cours ?"
                       onChange={(e) => setComment(e.target.value)}
-                      style={{ fontSize: 14, textAlign: "center", maxWidth: 360, margin: "0 auto 16px", display: "block", borderBottom: `1px solid ${C.line}`, paddingBottom: 8, fontStyle: comment ? "normal" : "italic", color: comment ? C.text : C.faint }} />
-                    <button className="link" onClick={togglePause}>{paused ? "reprendre" : "pause"}</button>
+                      style={{ fontSize: 11, textAlign: "center", maxWidth: 320, margin: "10px auto 0", display: "block", fontStyle: comment ? "normal" : "italic", color: comment ? C.mut : C.faint }} />
                   </div>
                   );
                 })()}
