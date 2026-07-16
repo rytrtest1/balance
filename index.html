@@ -2347,7 +2347,12 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                     style={{ position: "relative", height: 44, width: "82%", margin: "0 auto",
                       display: "flex", justifyContent: "center", alignItems: "center",
                       overflow: "visible", cursor: "pointer", touchAction: "manipulation", userSelect: "none", WebkitUserSelect: "none",
-                      ...(LINE_MODE === "tilt" ? { transform: `rotate(${tiltDeg}deg)`, transition: "transform .1s linear" } : {}) }}>
+                      // done: eases back to flat over .7s instead of snapping — finishing
+                      // early used to leave it crooked one frame then jump straight, which
+                      // read as abrupt (Maxence 16/07, round 6). Running keeps the tight
+                      // .1s linear so it tracks the tick-driven angle without lag.
+                      ...(LINE_MODE === "tilt" ? { transform: `rotate(${tiltDeg}deg)`,
+                        transition: stage === "done" ? "transform .7s cubic-bezier(.2,.7,.2,1)" : "transform .1s linear" } : {}) }}>
                     {/* hollow track — inset, never touches the edges */}
                     <div className={stage === "entry" && !holding ? "breathe" : ""}
                       style={{ position: "absolute", left: 0, right: 0, top: "50%", height: 2, background: stage === "entry" ? C.bone : C.soft,
@@ -2441,17 +2446,18 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                         below pause, same 30px gap as line→pause above it (Maxence 16/07, round
                         5 — was hugging pause at 10px). autoFocus popped the keyboard on every
                         session start, too aggressive (round 4) — a quiet "« … »" hint instead,
-                        rendered as its own overlay (not the native placeholder) so the dots can
-                        be bright while the guillemets stay dim, gone the moment you type. Same
-                        font/size/color as the activity text above once you actually type — a
-                        different register there read as inconsistent. */}
+                        rendered as its own overlay (not the native placeholder) so the dots get
+                        real spacing between them and the guillemets, not a fused "…" glyph
+                        (round 6 — kept grey throughout, the earlier bright-dots idea didn't
+                        stick). Same font/size/color as the activity text above once you
+                        actually type — a different register there read as inconsistent. */}
                     <div style={{ position: "relative", maxWidth: 320, margin: "30px auto 0" }}>
                       <input className="in" value={comment}
                         onChange={(e) => setComment(e.target.value)}
                         style={{ fontFamily: "var(--mono)", fontSize: 13, textAlign: "center", display: "block", color: C.text }} />
                       {!comment && (
-                        <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", pointerEvents: "none", fontFamily: "var(--mono)", fontSize: 13 }}>
-                          <span style={{ color: C.faint }}>« </span><span style={{ color: C.text }}>…</span><span style={{ color: C.faint }}> »</span>
+                        <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", gap: 5, pointerEvents: "none", fontFamily: "var(--mono)", fontSize: 13, color: C.faint }}>
+                          <span>«</span><span>.</span><span>.</span><span>.</span><span>»</span>
                         </div>
                       )}
                     </div>
@@ -2487,17 +2493,19 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                             <span className="mono" style={{ fontSize: 10, color: C.faint }}>min</span>
                           </div>
                         )}
-                        {/* same "« … »" idea as the running field (Maxence 16/07, round 5): a
-                            styled overlay, not the native placeholder, so the dots read bright
-                            and the guillemets stay dim; same font/size as the activity text. */}
-                        <div style={{ position: "relative", maxWidth: 360, margin: "0 auto", borderBottom: `1px solid ${C.line}`, paddingBottom: 8 }}>
+                        {/* same "« … »" idea as the running field (Maxence 16/07, round 6): a
+                            styled overlay, not the native placeholder, dots spaced out and grey
+                            throughout, same font/size as the activity text. No border under it
+                            once done — the borderBottom read as a "big line" that didn't belong
+                            once the session already ended (round 6, was here since round 1). */}
+                        <div style={{ position: "relative", maxWidth: 360, margin: "0 auto" }}>
                           <input className="in" value={comment}
                             onChange={(e) => setComment(e.target.value)}
                             onKeyDown={(e) => { if (e.key === "Enter") submitComment(); }}
                             style={{ fontFamily: "var(--mono)", fontSize: 13, textAlign: "center", display: "block", color: C.text }} />
                           {!comment && (
-                            <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", pointerEvents: "none", fontFamily: "var(--mono)", fontSize: 13 }}>
-                              <span style={{ color: C.faint }}>« </span><span style={{ color: C.text }}>…</span><span style={{ color: C.faint }}> »</span>
+                            <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", gap: 5, pointerEvents: "none", fontFamily: "var(--mono)", fontSize: 13, color: C.faint }}>
+                              <span>«</span><span>.</span><span>.</span><span>.</span><span>»</span>
                             </div>
                           )}
                         </div>
