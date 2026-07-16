@@ -981,26 +981,50 @@ function Throughline() {
   const [showTapHint, setShowTapHint] = useState(false);
   // the domain-balance swing (see domainBalance()) stays completely hidden —
   // no tilt, no class, line looks exactly as if the feature didn't exist —
-  // until a shake reveals it; another shake hides it again. Decided 12/07:
-  // even a silent/near-flat line is still a standing element that's always
-  // "on"; shake-to-reveal keeps it at zero footprint until asked for, the
-  // same instinct that killed the progress tab and the nav arrows.
+  // until a shake reveals it. Changed 16/07: no longer a manual on/off toggle —
+  // a shake sways the line for a bit, then it settles back to flat on its own
+  // (same physical instinct as the app's opening breathe), and the daily click
+  // count rides along with it (visible only for that window, hidden again once
+  // the line is back at rest). A shake mid-reveal is ignored so the settle
+  // always finishes.
   const [balanceVisible, setBalanceVisible] = useState(false);
+  const [swaySettling, setSwaySettling] = useState(false);
+  const revealActiveRef = useRef(false);
+  const settleTimersRef = useRef([]);
+  const SWAY_MS = 4200; // how long it actively sways before starting to calm down
+  const SETTLE_MS = 1100; // the ease back to flat, mirrors a physical settle
+
+  const startBalanceReveal = () => {
+    revealActiveRef.current = true;
+    settleTimersRef.current.forEach(clearTimeout);
+    setSwaySettling(false);
+    setBalanceVisible(true);
+    settleTimersRef.current = [setTimeout(() => {
+      setSwaySettling(true); // swap the infinite sway for a single ease back to rotate(0)
+      settleTimersRef.current.push(setTimeout(() => {
+        setBalanceVisible(false);
+        setSwaySettling(false);
+        revealActiveRef.current = false;
+      }, SETTLE_MS));
+    }, SWAY_MS)];
+  };
+
+  useEffect(() => () => settleTimersRef.current.forEach(clearTimeout), []);
 
   useEffect(() => {
     if (typeof window === "undefined" || !window.DeviceMotionEvent) return;
     let lastMag = null, lastShakeTs = 0;
     const SHAKE_DELTA = 18; // m/s^2 jump between readings
-    const COOLDOWN_MS = 1200; // one toggle per shake gesture, not per spike
+    const COOLDOWN_MS = 1200; // debounce within a single shake gesture
     const onMotion = (e) => {
       const a = e.accelerationIncludingGravity || e.acceleration;
       if (!a || a.x == null) return;
       const mag = Math.sqrt((a.x || 0) ** 2 + (a.y || 0) ** 2 + (a.z || 0) ** 2);
       if (lastMag != null) {
         const now = Date.now();
-        if (Math.abs(mag - lastMag) > SHAKE_DELTA && now - lastShakeTs > COOLDOWN_MS) {
+        if (Math.abs(mag - lastMag) > SHAKE_DELTA && now - lastShakeTs > COOLDOWN_MS && !revealActiveRef.current) {
           lastShakeTs = now;
-          setBalanceVisible((v) => !v);
+          startBalanceReveal();
         }
       }
       lastMag = mag;
@@ -2014,6 +2038,20 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
       <div className="grain" />
       <div className="wrap" onTouchStart={onTouchStart} onTouchEnd={onTouchEnd}>
 
+        {/* clics du jour — rangé avec le shake : n'apparaît que pendant la fenêtre où
+            la ligne est de toute façon sortie de son repos (sway + settle), et
+            disparaît avec elle. Du coup peut se permettre d'être lisible plutôt que
+            planqué, plutôt qu'un repère en permanence à l'écran. Demandé par Maxence 16/07. */}
+        {tab === "now" && balanceVisible && (
+          <div className="mono" style={{ position: "absolute", top: 14, right: 18, textAlign: "right",
+            opacity: swaySettling ? 0 : 1, transition: `opacity ${SETTLE_MS}ms ease`, pointerEvents: "none" }}>
+            <div style={{ fontSize: 16, color: C.bone, letterSpacing: ".02em" }}>
+              {log.filter((e) => e.date === todayKey() && isClick(e)).length}
+            </div>
+            <div style={{ fontSize: 8, color: C.faint, letterSpacing: ".14em", textTransform: "uppercase", marginTop: 1 }}>clics</div>
+          </div>
+        )}
+
         {/* sandbox banner — makes it impossible to confuse the clone with the real app. */}
         {SIM && (
           <div className="mono" style={{ textAlign: "center", fontSize: 9.5, letterSpacing: ".14em", textTransform: "uppercase",
@@ -2113,17 +2151,20 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                 // one domain is neglected relative to the others, settles wide and slow
                 // as it evens out — like something physically unsettled, not a metronome
                 // with a parameter. Motion carries the signal, a static lean read as a glitch.
-                // Hidden by default (zero footprint) — a shake reveals it, another hides it.
+                // Hidden by default (zero footprint) — a shake reveals it, then it settles
+                // back to flat on its own (see startBalanceReveal above).
                 const balanceSpread = balanceVisible ? domainBalance(activities, log) : 0;
                 const tiltAmpDeg = balanceSpread * 6;
                 const swayDurationSec = 7 - balanceSpread * 3.5;
+                const swaying = balanceVisible && !swaySettling;
                 return (
-                  <div className={balanceVisible ? "sway" : ""} onPointerDown={onLineDown} onPointerUp={onLineUp} onPointerLeave={onLineCancel} onPointerCancel={onLineCancel}
+                  <div className={swaying ? "sway" : ""} onPointerDown={onLineDown} onPointerUp={onLineUp} onPointerLeave={onLineCancel} onPointerCancel={onLineCancel}
                     onContextMenu={(e) => e.preventDefault()}
                     style={{ position: "relative", height: 44, width: "82%", margin: "0 auto",
                       display: "flex", justifyContent: "center", alignItems: "center",
                       overflow: "visible", cursor: "pointer", touchAction: "manipulation", userSelect: "none", WebkitUserSelect: "none",
-                      ...(balanceVisible ? { "--tilt-amp": `${tiltAmpDeg}deg`, animationDuration: `${swayDurationSec}s` } : {}) }}>
+                      ...(swaying ? { "--tilt-amp": `${tiltAmpDeg}deg`, animationDuration: `${swayDurationSec}s` }
+                        : swaySettling ? { transform: "rotate(0deg)", transition: `transform ${SETTLE_MS}ms cubic-bezier(.3,.85,.4,1)` } : {}) }}>
                     {/* hollow track — inset, never touches the edges */}
                     <div className={stage === "entry" && !holding ? "breathe" : ""}
                       style={{ position: "absolute", left: 0, right: 0, top: "50%", height: 2, background: stage === "entry" ? C.bone : C.soft,
