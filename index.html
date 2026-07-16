@@ -2302,19 +2302,19 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                 const trackTransition = holding ? `transform ${effHold}ms linear` : "transform .3s cubic-bezier(.2,.7,.2,1)";
                 const fillColor = C.bone; // monochrome — the line is always bone, the one living mark
                 // LINE_MODE "tilt": no clock read at all — same sin sway as the shake
-                // reveal (startBalanceReveal above), same ampDeg formula and spread
-                // reading (frozen at begin(), not recomputed). Two differences from the
-                // shake: (1) the envelope damps over the session's own progress (frac
-                // 0→1) instead of a fixed ~5s timer — full swing near the start, calm as
-                // the estimated duration runs out, flat exactly at frac=1, and overshoot
-                // (frac>1) stays flat too, no reward shape for going long (Maxence's
-                // call). (2) the period is much longer than the shake's — a running
-                // session sits on screen for minutes, not ~5s, so it reads as a slow,
-                // untroubled sway rather than something nervous (Maxence 16/07: the
-                // shake's pace here "felt rushed").
+                // reveal (startBalanceReveal above), same spread reading (frozen at
+                // begin(), not recomputed). Differences from the shake: (1) the envelope
+                // damps over the session's own progress (frac 0→1) instead of a fixed
+                // ~5s timer — full swing near the start, calm as the estimated duration
+                // runs out, flat exactly at frac=1, and overshoot (frac>1) stays flat too,
+                // no reward shape for going long (Maxence's call). (2) the period is much
+                // longer than the shake's — a session sits on screen for minutes, not
+                // ~5s, so it reads as a slow sway, not something nervous. (3) the angle
+                // itself is half the shake's ampDeg — full amplitude read as too marked
+                // sustained over a whole session (Maxence 16/07, round 3).
                 const tiltActive = LINE_MODE === "tilt" && (stage === "running" || stage === "done");
                 const tiltSpread = sessionTiltRef.current;
-                const tiltAmpDeg = tiltSpread * 6;
+                const tiltAmpDeg = tiltSpread * 6 * 0.5;
                 const tiltPeriodMs = (18 - tiltSpread * 6) * 1000; // 12s (very imbalanced) to 18s (near-balanced)
                 const tiltEnvelope = tiltActive ? Math.max(0, 1 - Math.min(frac, 1)) : 0;
                 const tiltDeg = tiltActive
@@ -2427,12 +2427,13 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                     <button className="link" onClick={togglePause}>{paused ? "reprendre" : "pause"}</button>
                     {/* comment field, open here too so a thought worth catching mid-session has
                         somewhere to go before "done" (same `comment` state either way) — sits
-                        below pause, no placeholder copy at all: tap it and the blinking caret
-                        alone says "you can write here", nothing to read until you do
-                        (Maxence 16/07, round 2 — placeholder text felt like too much). */}
-                    <input className="in" value={comment}
+                        below pause, no placeholder copy: autoFocus puts a blinking caret there
+                        the moment the session starts, which alone says "you can write here"
+                        (Maxence 16/07, round 3). Same size/color as the activity text above —
+                        a different register here read as inconsistent. */}
+                    <input className="in" value={comment} autoFocus
                       onChange={(e) => setComment(e.target.value)}
-                      style={{ fontSize: 11, textAlign: "center", maxWidth: 320, margin: "10px auto 0", display: "block", color: C.mut }} />
+                      style={{ fontSize: 13, textAlign: "center", maxWidth: 320, margin: "10px auto 0", display: "block", color: C.text }} />
                   </div>
                   );
                 })()}
