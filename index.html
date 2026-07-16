@@ -715,6 +715,14 @@ const SIM = typeof location !== "undefined" && new URLSearchParams(location.sear
 // The API key is shared (it's just a key), so pipeline advancing works in both.
 const NS = (k) => (SIM && k !== "tlx_apiKey" ? k.replace("tlx_", "tlx_sim_") : k);
 
+// living-line mode: "fill" = original centre-out bar tied to elapsed/estimated
+// time (reads as a chrono). "tilt" = the line starts tipped by the current
+// domain imbalance (same domainBalance() the shake reveal uses) and eases back
+// to flat as the session's estimated duration runs out — no time is ever shown,
+// only equilibrium resolving. Both share the same `frac` (elapsed/estimated),
+// swap this constant to compare in sandbox before picking one for real (Maxence 16/07).
+const LINE_MODE = "fill"; // "fill" | "tilt"
+
 // buildHat = the whole draw pool laid open (for the sandbox "Liste" view). Same
 // rows pickAging() draws from (buildLotteryRows), plus `done` (informational —
 // how many completions logged this period) and `rate` (its actual draw weight)
@@ -1008,6 +1016,11 @@ function Throughline() {
   const revealActiveRef = useRef(false);
   const lineRef = useRef(null); // the swaying div — tilt is driven on it directly, not through React state
   const rafRef = useRef(null);
+  // LINE_MODE "tilt": the session's domain-imbalance reading, frozen once at
+  // begin() (same domainBalance() the shake uses) — not recomputed per frame so
+  // the sway doesn't jitter as the log changes mid-session. ampDeg/periodMs are
+  // derived from it the same way startBalanceReveal derives them for the shake.
+  const sessionTiltRef = useRef(0);
   const SWAY_MS = 4200; // how long it actively sways before starting to calm down
   const SETTLE_MS = 1100; // the ease back to flat, mirrors a physical settle
 
@@ -1059,6 +1072,8 @@ function Throughline() {
   // render keeps it current without re-subscribing the listener.
   const startBalanceRevealRef = useRef(() => {});
   startBalanceRevealRef.current = startBalanceReveal;
+  const stageRef = useRef(stage); // same stale-closure reason — read fresh inside the listener below
+  stageRef.current = stage;
 
   useEffect(() => {
     if (typeof window === "undefined" || !window.DeviceMotionEvent) return;
@@ -1071,7 +1086,11 @@ function Throughline() {
       const mag = Math.sqrt((a.x || 0) ** 2 + (a.y || 0) ** 2 + (a.z || 0) ** 2);
       if (lastMag != null) {
         const now = Date.now();
-        if (Math.abs(mag - lastMag) > SHAKE_DELTA && now - lastShakeTs > COOLDOWN_MS && !revealActiveRef.current) {
+        // tilt mode already shows the line's balance during a running session
+        // (see sessionTiltRef) — a shake mid-session would fight the same
+        // transform, so it's ignored there rather than layered on top.
+        const tiltBusy = LINE_MODE === "tilt" && stageRef.current === "running";
+        if (Math.abs(mag - lastMag) > SHAKE_DELTA && now - lastShakeTs > COOLDOWN_MS && !revealActiveRef.current && !tiltBusy) {
           lastShakeTs = now;
           startBalanceRevealRef.current();
         }
@@ -1511,6 +1530,7 @@ Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui 
     setElapsedMs(preMs);
     setManualMin("");
     setPaused(false);
+    if (LINE_MODE === "tilt") sessionTiltRef.current = domainBalance(activities, log);
     // Album de la semaine: seed the one always-present empty slot (see albumTitles doc).
     setAlbumTitles(isAlbumActivity ? [{ id: uid(), text: "", rating: 50 }] : []);
     setAlbumIdx(0);
@@ -2281,6 +2301,22 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                 // overshoot it — that overshoot is the felt dépassement.
                 const trackTransition = holding ? `transform ${effHold}ms linear` : "transform .3s cubic-bezier(.2,.7,.2,1)";
                 const fillColor = C.bone; // monochrome — the line is always bone, the one living mark
+                // LINE_MODE "tilt": no clock read at all — same sin sway as the shake
+                // reveal (startBalanceReveal above), same ampDeg/periodMs formulas from
+                // the same domainBalance() spread (frozen at begin(), not recomputed).
+                // The difference is only which envelope damps it: the shake settles over
+                // its own fixed ~5s timer, this settles over the session's own progress
+                // (frac 0→1) — so it swings at full amplitude near the start and calms
+                // as the estimated duration runs out, flat exactly at frac=1. Overshoot
+                // (frac>1) stays flat too, no reward shape for going long (Maxence's call).
+                const tiltActive = LINE_MODE === "tilt" && (stage === "running" || stage === "done");
+                const tiltSpread = sessionTiltRef.current;
+                const tiltAmpDeg = tiltSpread * 6;
+                const tiltPeriodMs = (7 - tiltSpread * 3.5) * 1000;
+                const tiltEnvelope = tiltActive ? Math.max(0, 1 - Math.min(frac, 1)) : 0;
+                const tiltDeg = tiltActive
+                  ? tiltAmpDeg * Math.sin((2 * Math.PI * elapsedMs) / tiltPeriodMs) * tiltEnvelope
+                  : 0;
                 // domain balance, felt not read: the line sways wider AND faster when
                 // one domain is neglected relative to the others, settles wide and slow
                 // as it evens out — like something physically unsettled, not a metronome
@@ -2296,13 +2332,15 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                     onContextMenu={(e) => e.preventDefault()}
                     style={{ position: "relative", height: 44, width: "82%", margin: "0 auto",
                       display: "flex", justifyContent: "center", alignItems: "center",
-                      overflow: "visible", cursor: "pointer", touchAction: "manipulation", userSelect: "none", WebkitUserSelect: "none" }}>
+                      overflow: "visible", cursor: "pointer", touchAction: "manipulation", userSelect: "none", WebkitUserSelect: "none",
+                      ...(LINE_MODE === "tilt" ? { transform: `rotate(${tiltDeg}deg)`, transition: "transform .1s linear" } : {}) }}>
                     {/* hollow track — inset, never touches the edges */}
                     <div className={stage === "entry" && !holding ? "breathe" : ""}
                       style={{ position: "absolute", left: 0, right: 0, top: "50%", height: 2, background: stage === "entry" ? C.bone : C.soft,
                         transform: `translateY(-50%) scaleX(${holding ? 0 : 1})`, transformOrigin: "center", transition: trackTransition }} />
-                    {/* centre fill — grows symmetrically from the middle, overshoots the track when you go beyond */}
-                    {frac > 0 && (
+                    {/* centre fill — grows symmetrically from the middle, overshoots the track when you go beyond.
+                        LINE_MODE "tilt" skips this entirely: the tilt on the wrapper above is the only signal. */}
+                    {LINE_MODE === "fill" && frac > 0 && (
                       <div style={{ position: "relative", flexShrink: 0, height: over ? 8 : 6, width: `${widthPct}%`,
                         background: fillColor, opacity: over ? 1 : 0.9,
                         boxShadow: over ? `0 0 14px ${fillColor}` : "none",
