@@ -920,6 +920,7 @@ function Throughline() {
   const [holdDate, setHoldDate] = useState(todayKey());
   const holdTimer = useRef(null);
   const holdStart = useRef(0);
+  const holdStartX = useRef(0);
   const didHold = useRef(false);
 
   // debug time override
@@ -1043,8 +1044,6 @@ function Throughline() {
   // the sway doesn't jitter as the log changes mid-session. ampDeg/periodMs are
   // derived from it the same way startBalanceReveal derives them for the shake.
   const sessionTiltRef = useRef(0);
-  const SWAY_MS = 4200; // how long it actively sways before starting to calm down
-  const SETTLE_MS = 1100; // the ease back to flat, mirrors a physical settle
 
   // 16/07: rewritten after the CSS-animation→CSS-transition handoff (removing the
   // "sway" class mid-swing while starting a transition to rotate(0)) kept producing a
@@ -1054,16 +1053,19 @@ function Throughline() {
   // oscillation (sin) never stops or resets, only its envelope eases from 1 to 0 with
   // a smoothstep (zero velocity at both ends), so there is no instant in the whole
   // reveal where the angle's rate of change jumps.
-  // clicks-remaining bascules (16/07-c, M.'s idea right after shipping the "actions"
-  // digit below — see [[throughline-feature-ideas]]): a felt/counted gesture instead
-  // of a read number. Replaces that digit with a short discrete prefix on the SAME
-  // shake reveal — N alternating tilts (N = clicks left before RAPPORT_MIN_CLICS),
-  // then the existing continuous domain-balance sway plays exactly as before,
-  // unchanged. Goal already met (N=0) → the prefix is zero-length, straight to the
-  // sway, the line never bascules. My call on "replace vs coexist" (the idea note
-  // flagged both as open) — told to M., easy to revert to a digit if he prefers.
-  const BASCULE_MS = 550; // one discrete tilt-and-return
-  const BASCULE_AMP = 5; // degrees — a clearly separate, countable motion from the sway
+  // clicks-remaining bascules (16/07-c, then reworked 16/07-d after M. flagged two
+  // problems with the first cut: (1) it always fell through into the old continuous
+  // domain-balance sway afterward — proof it was wrong: the sway still played even
+  // with clicksLeft=0, i.e. goal already met; (2) the counting motion itself (fixed
+  // 550ms/5deg discrete tilts) read as too fast/mechanical, unlike the natural
+  // decaying pendulum the sway used to be. Fix: one motion, not two phases. The
+  // pendulum's starting amplitude IS the current domain-balance reading (today's
+  // data — same spread this sway always used), and it decays smoothly to exactly
+  // flat over precisely `clicksLeft` bascules (half-periods) — no separate sway
+  // phase tacked on after. clicksLeft=0 → zero bascules → the line never moves at
+  // all, closing the "activates even at goal met" gap. Pace reuses the old sway's
+  // period formula (natural, spread-dependent, the one M. liked before) instead of
+  // the artificial fixed 550ms.
   const startBalanceReveal = () => {
     cancelAnimationFrame(rafRef.current);
     revealActiveRef.current = true;
@@ -1078,33 +1080,23 @@ function Throughline() {
     if (lineRef.current) lineRef.current.style.transition = "none";
     const startedAt = performance.now();
     const spread = domainBalance(activities, log); // frozen for this reveal, not recomputed per frame
-    const ampDeg = spread * 6;
-    const periodMs = (7 - spread * 3.5) * 1000;
-    const swayTotalMs = SWAY_MS + SETTLE_MS;
-    const smoothstep = (x) => x * x * (3 - 2 * x);
+    const ampDeg = spread * 6; // the pendulum's max — today's actual imbalance, not an arbitrary constant
+    const halfPeriodMs = (7 - spread * 3.5) * 500; // one bascule's duration — same natural pace as the old sway
     const clicksLeft = Math.max(0, RAPPORT_MIN_CLICS - log.filter((e) => e.date === todayKey() && isClick(e)).length);
-    const bascMs = clicksLeft * BASCULE_MS;
-    const totalMs = bascMs + swayTotalMs;
+    const totalMs = clicksLeft * halfPeriodMs;
     const tick = (now) => {
       const elapsed = now - startedAt;
-      if (elapsed >= totalMs) {
+      if (clicksLeft === 0 || elapsed >= totalMs) {
         if (lineRef.current) lineRef.current.style.transform = "";
         revealActiveRef.current = false;
         return;
       }
-      if (elapsed < bascMs) {
-        const idx = Math.floor(elapsed / BASCULE_MS);
-        const localT = (elapsed - idx * BASCULE_MS) / BASCULE_MS;
-        const sign = idx % 2 === 0 ? 1 : -1;
-        const shape = Math.sin(Math.PI * localT); // 0 → 1 → 0, one bascule
-        if (lineRef.current) lineRef.current.style.transform = `rotate(${BASCULE_AMP * sign * shape}deg)`;
-        rafRef.current = requestAnimationFrame(tick);
-        return;
-      }
-      const swayElapsed = elapsed - bascMs;
-      const envelope = swayElapsed <= SWAY_MS ? 1 : 1 - smoothstep(Math.min(1, (swayElapsed - SWAY_MS) / SETTLE_MS));
-      const angle = ampDeg * Math.sin((2 * Math.PI * swayElapsed) / periodMs) * envelope;
-      if (lineRef.current) lineRef.current.style.transform = `rotate(${angle}deg)`;
+      const idx = Math.floor(elapsed / halfPeriodMs);
+      const localT = (elapsed - idx * halfPeriodMs) / halfPeriodMs;
+      const sign = idx % 2 === 0 ? 1 : -1;
+      const shape = Math.sin(Math.PI * localT); // 0 → 1 → 0, one bascule
+      const envelope = 1 - elapsed / totalMs; // continuous decay to 0 exactly as the count finishes
+      if (lineRef.current) lineRef.current.style.transform = `rotate(${ampDeg * sign * shape * envelope}deg)`;
       rafRef.current = requestAnimationFrame(tick);
     };
     rafRef.current = requestAnimationFrame(tick);
@@ -1823,7 +1815,23 @@ Commentaire laissé après la session :
   };
   const onLineDown = (e) => {
     didHold.current = false;
-    if (ratingActive) { setRatingFromPointer(e && e.clientX); return; }
+    if (ratingActive) {
+      // the rating drag and hold-to-skip share the same pointer-down (17/07: skip
+      // used to be entirely unreachable here, canHold was true but this early
+      // return skipped past it) — set the rating immediately as before, but also
+      // arm the same skip timer; onLineMove cancels it the moment the pointer
+      // actually travels, so a real drag never fires it, only a stationary hold.
+      setRatingFromPointer(e && e.clientX);
+      holdStartX.current = e && e.clientX != null ? e.clientX : 0;
+      holdStart.current = Date.now();
+      setHolding(true);
+      holdTimer.current = setTimeout(() => {
+        didHold.current = true; holdTimer.current = null;
+        setHolding(false);
+        finishFlow(""); // same discard as any other "done" skip — comment/rating dropped
+      }, effHold);
+      return;
+    }
     if (!canHold) return;
     holdStart.current = Date.now();
     setHolding(true); // the line begins retracting toward the centre over the full hold time
@@ -1838,10 +1846,21 @@ Commentaire laissé après la session :
       if (stage === "done") finishFlow(""); else swap();
     }, effHold);
   };
-  const onLineMove = (e) => { if (ratingActive) setRatingFromPointer(e.clientX); };
+  const onLineMove = (e) => {
+    if (!ratingActive) return;
+    setRatingFromPointer(e.clientX);
+    // more than a few px of travel means a rating drag, not a stationary hold —
+    // drop the pending skip so dragging the rating never also triggers it.
+    if (holdTimer.current && e && e.clientX != null && Math.abs(e.clientX - holdStartX.current) > 8) cancelHold();
+  };
   const cancelHold = () => { if (holdTimer.current) { clearTimeout(holdTimer.current); holdTimer.current = null; } setHolding(false); };
   const onLineUp = () => {
-    if (ratingActive) return; // value is already set live by drag; no tap-to-submit here
+    if (ratingActive) {
+      const held = didHold.current;
+      cancelHold(); // clear a still-pending skip timer (a drag/short press that never held long enough)
+      if (held) didHold.current = false; // skip already fired via the timeout above
+      return; // otherwise: value already set live by drag; no tap-to-submit here
+    }
     const heldFor = holdStart.current ? Date.now() - holdStart.current : 0;
     cancelHold();
     if (didHold.current) { didHold.current = false; return; } // swap already fired
@@ -2420,7 +2439,11 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                 to advance the clock or jump a day. */}
             <div style={{ width: "100%", display: "flex", justifyContent: "center", alignItems: "center", gap: 4, flexWrap: "wrap" }}>
               {[["+5m", () => simAdvanceMinutes(5)], ["+10m", () => simAdvanceMinutes(10)], ["+1h", () => simAdvanceMinutes(60)],
-                ["+1j", () => jumpDays(1)], ["+1sem", () => jumpDays(7)], ["temps réel", clockReal]].map(([label, fn]) => (
+                ["+1j", () => jumpDays(1)], ["+1sem", () => jumpDays(7)], ["temps réel", clockReal],
+                // manual shake trigger — devicemotion ne se déclenche jamais en testant à
+                // la main depuis un navigateur (Maxence 17/07), donc pas d'autre façon de
+                // voir le shake reveal sans un vrai téléphone secoué.
+                ["secouer", () => startBalanceReveal()]].map(([label, fn]) => (
                 <button key={label} onClick={fn}
                   style={{ font: "inherit", letterSpacing: "inherit", textTransform: "inherit", cursor: "pointer",
                     border: `1px solid ${C.bg}`, borderRadius: 20, padding: "1px 7px", background: "transparent", color: C.bg }}>
@@ -2569,10 +2592,14 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                     )}
                     {/* recommandeur "done": the same centre-out fill, driven by `rating`
                         (drag) instead of session-time frac — reuses the exact visual
-                        language of the mini album slider, just on the hero line itself. */}
+                        language of the mini album slider, just on the hero line itself.
+                        Also retracts on `holding` (17/07) so a stationary hold-to-skip
+                        reads the same here as everywhere else on the line. */}
                     {ratingActive && (
                       <div style={{ position: "relative", flexShrink: 0, height: 6, width: `${rating}%`,
-                        background: fillColor, opacity: 0.9, transition: "width .08s linear" }} />
+                        background: fillColor, opacity: 0.9,
+                        transform: `scaleX(${holding ? 0 : 1})`, transformOrigin: "center",
+                        transition: holding ? `transform ${effHold}ms linear` : "width .08s linear" }} />
                     )}
                   </div>
                 );
