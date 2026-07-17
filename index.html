@@ -1067,6 +1067,15 @@ function Throughline() {
   const startBalanceReveal = () => {
     cancelAnimationFrame(rafRef.current);
     revealActiveRef.current = true;
+    // hand the line's transform fully to this rAF loop for the reveal's duration — the
+    // JSX below also sets transform/transition on this same node every render (tilt
+    // mode), and a re-render mid-reveal (session auto-start at 2.2s, or the 100ms
+    // running-clock tick once it's started) would otherwise stomp this loop's writes,
+    // fighting a lingering CSS transition it just applied. Clearing it here and gating
+    // the JSX on revealActiveRef (below) keeps the reveal's own pace intact regardless
+    // of what else re-renders while it's playing (Maxence 16/07: "ça va vite et les
+    // deux derniers tout doucement" — traced to exactly this).
+    if (lineRef.current) lineRef.current.style.transition = "none";
     const startedAt = performance.now();
     const spread = domainBalance(activities, log); // frozen for this reveal, not recomputed per frame
     const ampDeg = spread * 6;
@@ -2520,7 +2529,13 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                       // early used to leave it crooked one frame then jump straight, which
                       // read as abrupt (Maxence 16/07, round 6). Running keeps the tight
                       // .1s linear so it tracks the tick-driven angle without lag.
-                      ...(LINE_MODE === "tilt" && !ratingActive ? { transform: `rotate(${tiltDeg}deg)`,
+                      // Excluded entirely while a shake-reveal is active (revealActiveRef):
+                      // that rAF loop owns transform/transition on this node for its whole
+                      // duration — any re-render here (session auto-start, the 100ms running
+                      // tick…) would otherwise reapply this branch mid-reveal and stomp the
+                      // loop's own writes, which read as the reveal randomly decelerating
+                      // partway through (Maxence 16/07, round 4).
+                      ...(LINE_MODE === "tilt" && !ratingActive && !revealActiveRef.current ? { transform: `rotate(${tiltDeg}deg)`,
                         transition: stage === "done" ? "transform .7s cubic-bezier(.2,.7,.2,1)" : "transform .1s linear" } : {}) }}>
                     {/* hollow track — inset, never touches the edges */}
                     <div className={stage === "entry" && !holding ? "breathe" : ""}
