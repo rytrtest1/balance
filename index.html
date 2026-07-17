@@ -1362,12 +1362,18 @@ Choisis les 3 ou 4 index les plus notables pour un récap de fin de journée —
   // swap the instruction for another — no judgement, no log. There is no "refuse"
   // anymore: if a suggestion doesn't fit you ask for another, or you engage for a
   // few seconds. The minimum viable move is a sliver of the line, not a clean exit.
+  // Also reachable from "running" now (17/07) — abandoning mid-session this way is
+  // a full discard, same as declining a proposal: propose() zeroes running/elapsedMs,
+  // and whatever was typed/noted mid-session (comment, album titles, a paused clock)
+  // gets wiped here too so it can't bleed into the next pick.
   const swap = () => {
     const today = todayKey();
     const cur = holdDate === today ? holdMs : BASE_HOLD_MS; // fresh day → start from 10s
     const next = cur * 2; // every skip doubles the next hold
     setHoldMs(next); setHoldDate(today);
     saveJSON(NS("tlx_hold"), { date: today, ms: next });
+    setPaused(false); setComment(""); setManualMin(""); setDoneEntryId(null);
+    setAlbumTitles([]); setAlbumIdx(0); setDescOpen(false); setRating(50);
     propose(log, activities, false, current ? current.activity.id : null);
   };
   const resetFlow = (nextStage = "entry") => { setStage(nextStage); setCurrent(null); setRunning(false); setElapsedMs(0); setPaused(false); setComment(""); setDescOpen(false); setSyncMsg(""); setSyncing(false); setAlbumTitles([]); setAlbumIdx(0); setRating(50); };
@@ -1793,7 +1799,12 @@ Commentaire laissé après la session :
     else if (stage === "proposal") begin();
     else if (stage === "running" && !paused) finish(); // resume before finishing — paused time shouldn't count
   };
-  const canHold = stage === "proposal"; // skip is only useful before you've started — once running, finish or pause
+  // hold-to-skip is the one control surface for "not this" — it has to stay available
+  // for the whole life of a session, not just before it starts (Maxence 17/07: was
+  // gated to "proposal" only, so holding mid-session or on the trailing comment screen
+  // silently fell through to the plain tap action — finish()/submitComment() firing
+  // instead of the retract-and-skip gesture the user expects everywhere else).
+  const canHold = stage === "proposal" || stage === "running" || stage === "done";
   const effHold = holdDate === todayKey() ? holdMs : BASE_HOLD_MS; // ignore a stale day if left open past midnight
   // hero-line-as-rating-slider (16/07-d): on "done", for ANY recommandeur action
   // (single item or the album's own final verdict — see `rating` state above), the
@@ -1818,7 +1829,13 @@ Commentaire laissé après la session :
     setHolding(true); // the line begins retracting toward the centre over the full hold time
     holdTimer.current = setTimeout(() => {
       didHold.current = true; holdTimer.current = null;
-      setHolding(false); swap(); // fully retracted → a different thing
+      setHolding(false);
+      // "done" has already logged the completion (finish() pushed it the moment the
+      // session ended) — there's nothing left to abandon, so a hold here just skips
+      // the trailing comment/duration edit, same as tapping with an empty comment
+      // would. "proposal"/"running" haven't logged anything yet, so those still
+      // fully abandon via swap() (re-pick, hold cost doubles).
+      if (stage === "done") finishFlow(""); else swap();
     }, effHold);
   };
   const onLineMove = (e) => { if (ratingActive) setRatingFromPointer(e.clientX); };
@@ -2580,7 +2597,9 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                 )}
 
                 {/* running: a quiet pause, for when something outside interrupts the session
-                    (a call, someone at the door) — not for skipping, just for stopping the clock.
+                    (a call, someone at the door) — for stopping the clock without abandoning
+                    the activity. Abandoning it entirely is still the hold-the-line gesture
+                    (17/07: now reachable from here too, not just "proposal").
                     Comment field open here too (Maxence 16/07): a thought worth catching mid-session
                     used to have nowhere to go until "done" — same `comment` state either way, so
                     whatever's typed here is just already there once the session ends. */}
