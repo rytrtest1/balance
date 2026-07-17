@@ -975,6 +975,10 @@ function Throughline() {
 
   // after-session comment + the Claude bridge that advances pipeline pieces
   const [comment, setComment] = useState("");
+  // mid-session comment confirmation (Maxence 17/07): submitRunningComment used to
+  // clear the field with zero feedback — same class of gap as "done"'s syncMsg, just
+  // missing here since a running note never touches the API. Brief local flash only.
+  const [runNoteMsg, setRunNoteMsg] = useState("");
   // recommandeur (musique, film…): the line shows ONLY the title Claude picked — what
   // describes it (artist/director/note) sits in a dropdown, collapsed by default
   // (Maxence 12/07: "je veux qu'apparaisse seulement le titre... et ce qui décrit la
@@ -1668,6 +1672,8 @@ Commentaire laissé après la session :
       note: text,
     }]);
     setComment("");
+    setRunNoteMsg("noté");
+    setTimeout(() => setRunNoteMsg(""), 1600);
   };
 
   // section navigation — no tab bar; swipe left/right or tap the faint edge arrows.
@@ -2664,6 +2670,9 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                             <div style={{ position: "relative", height: 2, width: `${curFrac * 100}%`, background: C.bone, opacity: 0.9 }} />
                           )}
                         </div>
+                        {/* the number itself — the bar alone never confirmed what got set
+                            (Maxence 17/07). Same faint mono register as everywhere else. */}
+                        <div className="mono" style={{ fontSize: 10, color: C.faint, marginTop: 6, letterSpacing: ".04em" }}>{curTitle.rating}</div>
                         {albumTitles.length > 1 && (
                           <div style={{ display: "flex", justifyContent: "center", gap: 6, marginTop: 10 }}>
                             {albumTitles.map((t, i) => (
@@ -2701,6 +2710,12 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                         </div>
                       )}
                     </div>
+                    {/* same brief acknowledgment language as "done"'s syncMsg, just local —
+                        a running note never round-trips the API, but still deserves proof it
+                        landed (Maxence 17/07). */}
+                    {runNoteMsg && (
+                      <div className="mono fade" style={{ fontSize: 10, color: C.faint, letterSpacing: ".08em", marginTop: 10 }}>{runNoteMsg}</div>
+                    )}
                   </div>
                   );
                 })()}
@@ -2713,6 +2728,14 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
 
                 {stage === "done" && (
                   <div className="fade">
+                    {/* the hero-line slider's number — same reasoning as the album mini-slider
+                        below: the fill alone never showed what value actually landed
+                        (Maxence 17/07). Shown regardless of sync state, since the rating itself
+                        is applied synchronously in submitComment, independent of the Claude
+                        round-trip. */}
+                    {ratingActive && (
+                      <div className="mono" style={{ fontSize: 11, color: C.faint, letterSpacing: ".08em", marginBottom: 14 }}>{rating}/100</div>
+                    )}
                     {(syncing || syncMsg) ? (
                       <div className="mono" style={{ fontSize: 11, color: C.bone, letterSpacing: ".06em", lineHeight: 1.6 }}>{syncMsg || "…"}</div>
                     ) : (
