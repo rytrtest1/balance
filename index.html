@@ -1025,6 +1025,13 @@ function Throughline() {
   // time. Leaving the rapport is a shake now, not a hold (Maxence 17/07: "le
   // hold c'est pas beau") — see the devicemotion listener below.
   const [reportFillPct, setReportFillPct] = useState(0);
+  // trace layout (post-playback, default — Maxence 17/07): the day settles into ONE
+  // full line, divided into its true proportional segments, dim/silent at rest — you
+  // drag a finger across it to explore, same "the line is the whole control surface"
+  // language as the rest of the app, no separate tap targets per activity.
+  const [traceIdx, setTraceIdx] = useState(null);
+  const traceRef = useRef(null);
+  const traceDraggingRef = useRef(false);
   const [logOpen, setLogOpen] = useState(false);
   const [logText, setLogText] = useState("");
   const [logBusy, setLogBusy] = useState(false);
@@ -1214,6 +1221,7 @@ function Throughline() {
     setReportIdx(0);
     setReportPhase("playing");
     setReportExpanded(new Set());
+    setTraceIdx(null);
     const todayAll = log.filter((e) => e.date === todayKey() && isDone(e));
     const withNotes = todayAll.filter((e) => e.note && e.note.trim());
     if (withNotes.length <= 3) { setBestOf(withNotes.map((e) => e.id)); return; }
@@ -2288,6 +2296,7 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
       rating, setRating, setRatingFromPointer,
       reportIdx, reportPhase, setReportIdx, setReportPhase,
       reportExpanded, setReportExpanded, reportFillPct,
+      traceIdx, setTraceIdx,
       debugNow: () => (_debugDate || new Date()).toString(),
     };
   });
@@ -2296,13 +2305,16 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
     <div className="tl"><style dangerouslySetInnerHTML={{ __html: css }} /><div className="grain" /><div className="wrap"><span className="lab">loading…</span></div></div>
   );
 
-  // interactive layout once playback has run through: "grid" (default) is the
-  // decuple design Maxence asked for on 17/07 — the single line splits into one row
-  // per activity, stacked vertically, title above each, tap a row to reveal/hide its
-  // comment. "spotlight" is the earlier swipe/dots single-focus design (14/07, see
-  // memory throughline-rapport-screen 1c/1e) — kept in the code rather than deleted,
-  // flip this constant back to "spotlight" to restore it, nothing else to undo.
-  const REPORT_END_LAYOUT = "grid"; // "grid" | "spotlight"
+  // interactive layout once playback has run through: "trace" (default, Maxence
+  // 17/07 — "réfléchis mieux, creuse toi la tête") settles the day into ONE full
+  // line, divided into its true proportional segments, dim/silent at rest — you
+  // drag a finger across it to explore (name above, comment below), same
+  // "the line is the whole control surface" language as the rest of the app,
+  // rather than N separate tap targets. "grid" (same day, earlier design — one row
+  // per activity stacked vertically) and "spotlight" (14/07 — swipe/dots single
+  // focus) are both kept in the code as explicit rollbacks, nothing deleted; flip
+  // this constant to bring either back.
+  const REPORT_END_LAYOUT = "trace"; // "trace" | "grid" | "spotlight"
 
   // rapport screen: full takeover of "the line", same spirit as "empty" — no tab, no
   // chrome. Plays back the day's activities one at a time (name in the same spot the
@@ -2354,6 +2366,26 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
       return next;
     });
 
+    // trace layout: which segment sits under a dragged finger, resolved by mapping
+    // clientX onto the line's own width (same idiom as setRatingFromPointer above).
+    const traceSeg = REPORT_END_LAYOUT === "trace" && traceIdx != null ? segs[traceIdx] : null;
+    const traceIndexFromX = (clientX) => {
+      const el = traceRef.current;
+      if (!el || clientX == null || !segs.length) return null;
+      const rect = el.getBoundingClientRect();
+      if (!rect.width) return null;
+      const pct = Math.max(0, Math.min(100, ((clientX - rect.left) / rect.width) * 100));
+      const found = segs.findIndex((s) => pct >= s.leftPct && pct < s.leftPct + s.wPct);
+      return found === -1 ? segs.length - 1 : found;
+    };
+    const onTraceDown = (e) => { traceDraggingRef.current = true; setTraceIdx(traceIndexFromX(e.clientX)); };
+    const onTraceMove = (e) => { if (traceDraggingRef.current) setTraceIdx(traceIndexFromX(e.clientX)); };
+    const onTraceEnd = () => { traceDraggingRef.current = false; setTraceIdx(null); };
+    // unified "what's shown above/below the line right now" — during playback or
+    // spotlight nav it's the idx-driven segment; in trace it's whatever's touched
+    // (or nothing, at rest).
+    const heroSeg = REPORT_END_LAYOUT === "trace" ? (playing ? cur : traceSeg) : cur;
+
     return (
       <div className="tl">
         <style dangerouslySetInnerHTML={{ __html: css }} />
@@ -2371,14 +2403,15 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
 
           <div style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "center" }}>
 
-            {/* activity name — same spot/style as the "now" tab's hero label, one at a
-                time. Once handed over to the grid layout, each row carries its own
-                title instead, so this hero slot is playback-only (or spotlight nav). */}
-            {(playing || REPORT_END_LAYOUT === "spotlight") && (
+            {/* activity name — same spot/style as the "now" tab's hero label. During
+                playback or spotlight nav it's idx-driven; in trace it's whatever's
+                under the finger right now (nothing at rest — silent by design). Grid
+                rows carry their own title instead, so this slot stays empty there. */}
+            {(playing || REPORT_END_LAYOUT === "spotlight" || REPORT_END_LAYOUT === "trace") && (
               <div style={{ minHeight: 24, textAlign: "center", marginBottom: 24 }}>
-                {cur && (
-                  <div key={`n${idx}`} className="fade mono" style={{ fontSize: 10, letterSpacing: ".22em", textTransform: "uppercase", color: C.faint }}>
-                    {cur.e.actionText}
+                {heroSeg && (
+                  <div key={`n-${heroSeg.e.id}`} className="fade mono" style={{ fontSize: 10, letterSpacing: ".22em", textTransform: "uppercase", color: C.faint }}>
+                    {heroSeg.e.actionText}
                   </div>
                 )}
               </div>
@@ -2400,6 +2433,36 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
               </div>
             )}
 
+            {/* trace layout (default, Maxence 17/07 — "creuse toi la tête") — the day
+                settles into ONE full line, divided into its true proportional
+                segments, contiguous, dim/silent at rest: the whole day's shape is
+                visible at a glance without reading a word. Drag a finger across it
+                to explore — the touched segment brightens (name above, comment
+                below), release and it fades back to silent. Same "the line is the
+                whole control surface" language as the rest of the app, no separate
+                tap targets per activity — you trace the day instead of reading a
+                list of it. x→segment mapping mirrors setRatingFromPointer above. */}
+            {!playing && REPORT_END_LAYOUT === "trace" && (
+              <div ref={traceRef} onPointerDown={onTraceDown} onPointerMove={onTraceMove}
+                onPointerUp={onTraceEnd} onPointerLeave={onTraceEnd} onPointerCancel={onTraceEnd}
+                onContextMenu={(e) => e.preventDefault()}
+                style={{ position: "relative", height: 44, width: "82%", margin: "0 auto",
+                  display: "flex", alignItems: "center", cursor: "pointer",
+                  touchAction: "none", userSelect: "none", WebkitUserSelect: "none" }}>
+                {segs.map((s, i) => {
+                  const active = traceIdx === i;
+                  return (
+                    <div key={s.e.id} style={{
+                      position: "relative", flex: `0 0 ${s.wPct}%`, height: active ? 8 : 4,
+                      background: C.bone, opacity: active ? 1 : 0.32,
+                      boxShadow: i < segs.length - 1 ? `1px 0 0 ${C.bg} inset` : "none",
+                      transition: "height .2s ease, opacity .2s ease",
+                    }} />
+                  );
+                })}
+              </div>
+            )}
+
             {/* dots under the bar — spotlight layout only, showing where you are and
                 that swiping (or tapping the line/a dot) moves between activities. */}
             {REPORT_END_LAYOUT === "spotlight" && (
@@ -2412,9 +2475,10 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
             )}
 
             {/* comment below the line — a short summary while playing (only when curated
-                as worth surfacing); once handed over, the spotlight layout shows the
-                focused activity's full comment here, the grid layout shows it per-row. */}
-            <div style={{ minHeight: playing ? 60 : 0, textAlign: "center", marginTop: playing ? 20 : 0, padding: "0 10px" }}>
+                as worth surfacing); once handed over, spotlight shows the focused
+                activity's full comment here, trace shows whatever's under the finger,
+                grid shows it per-row instead. */}
+            <div style={{ minHeight: (playing || REPORT_END_LAYOUT === "trace") ? 60 : 0, textAlign: "center", marginTop: (playing || REPORT_END_LAYOUT === "trace") ? 20 : 0, padding: "0 10px" }}>
               {playing && summary && (
                 <div key={`s${idx}`} className="fade" style={{ fontFamily: "var(--serif)", fontStyle: "italic", fontWeight: 300, fontSize: 13, color: C.mut, lineHeight: 1.5 }}>
                   « {summary} »
@@ -2423,6 +2487,11 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
               {!playing && REPORT_END_LAYOUT === "spotlight" && cur && cur.e.note && cur.e.note.trim() && (
                 <div key={`f${idx}`} className="fade" style={{ fontFamily: "var(--serif)", fontStyle: "italic", fontWeight: 300, fontSize: 14, color: C.text, lineHeight: 1.55 }}>
                   « {cur.e.note.trim()} »
+                </div>
+              )}
+              {!playing && REPORT_END_LAYOUT === "trace" && traceSeg && traceSeg.e.note && traceSeg.e.note.trim() && (
+                <div key={`t-${traceSeg.e.id}`} className="fade" style={{ fontFamily: "var(--serif)", fontStyle: "italic", fontWeight: 300, fontSize: 14, color: C.text, lineHeight: 1.55 }}>
+                  « {traceSeg.e.note.trim()} »
                 </div>
               )}
             </div>
