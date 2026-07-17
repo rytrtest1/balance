@@ -1019,11 +1019,12 @@ function Throughline() {
   // grid layout (post-playback): which activities' comments are toggled open —
   // closed by default, tap a row to reveal/hide (Maxence 17/07).
   const [reportExpanded, setReportExpanded] = useState(() => new Set());
-  // hold-the-line to leave the rapport — same control-surface language as the "now"
-  // line (short tap acts, long hold retracts) rather than a separate button.
-  const [reportHolding, setReportHolding] = useState(false);
-  const reportHoldTimer = useRef(null);
-  const reportDidHold = useRef(false);
+  // the line's fill %, reusing the exact same centre-out bar as the "now" screen
+  // (see reportFillPct usage below) — animated 0 → the current segment's share
+  // each time the displayed activity changes, instead of tracking real elapsed
+  // time. Leaving the rapport is a shake now, not a hold (Maxence 17/07: "le
+  // hold c'est pas beau") — see the devicemotion listener below.
+  const [reportFillPct, setReportFillPct] = useState(0);
   const [logOpen, setLogOpen] = useState(false);
   const [logText, setLogText] = useState("");
   const [logBusy, setLogBusy] = useState(false);
@@ -1133,13 +1134,23 @@ function Throughline() {
       const mag = Math.sqrt((a.x || 0) ** 2 + (a.y || 0) ** 2 + (a.z || 0) ** 2);
       if (lastMag != null) {
         const now = Date.now();
-        // tilt mode already shows the line's balance during a running session
-        // (see sessionTiltRef) — a shake mid-session would fight the same
-        // transform, so it's ignored there rather than layered on top.
-        const tiltBusy = LINE_MODE === "tilt" && stageRef.current === "running";
-        if (Math.abs(mag - lastMag) > SHAKE_DELTA && now - lastShakeTs > COOLDOWN_MS && !revealActiveRef.current && !tiltBusy) {
-          lastShakeTs = now;
-          startBalanceRevealRef.current();
+        if (Math.abs(mag - lastMag) > SHAKE_DELTA && now - lastShakeTs > COOLDOWN_MS) {
+          // on the rapport screen, a shake closes it (Maxence 17/07: replaces the
+          // hold-to-retract gesture — "le hold c'est pas beau") rather than
+          // triggering the balance reveal, which doesn't apply there.
+          if (stageRef.current === "report") {
+            lastShakeTs = now;
+            resetFlow();
+          } else {
+            // tilt mode already shows the line's balance during a running session
+            // (see sessionTiltRef) — a shake mid-session would fight the same
+            // transform, so it's ignored there rather than layered on top.
+            const tiltBusy = LINE_MODE === "tilt" && stageRef.current === "running";
+            if (!revealActiveRef.current && !tiltBusy) {
+              lastShakeTs = now;
+              startBalanceRevealRef.current();
+            }
+          }
         }
       }
       lastMag = mag;
@@ -1245,6 +1256,28 @@ Choisis les 3 ou 4 index les plus notables pour un récap de fin de journée —
     const t = setTimeout(() => setReportIdx((i) => i + 1), 750);
     return () => clearTimeout(t);
   }, [stage, reportPhase, reportIdx, reportSegCount]);
+
+  // rapport line fill: the exact same centre-out bar as the "now" screen (see
+  // `frac`/`widthPct` in the live-line render below) — a plain `width` on a
+  // flex child that flexbox keeps centred as it grows, no scaleX/offset maths.
+  // Driven by the CURRENTLY DISPLAYED activity's own % share of the day
+  // instead of real elapsed time (Maxence 17/07: "il faut le même remplissage
+  // qu'on avait avant sur l'écran principal, juste déclenché par le % de
+  // l'activité affichée" — the earlier stacked-segments/group-offset version
+  // didn't read as centred to him, correctly: it wasn't the same mechanism).
+  // Reset to 0 then grown to the target two frames later so the width
+  // transition actually plays, mirroring a session starting fresh each time.
+  useEffect(() => {
+    if (stage !== "report") { setReportFillPct(0); return; }
+    const todayLog = log.filter((e) => e.date === todayKey() && isClick(e)).sort((a, b) => a.ts - b.ts);
+    const totalMin = todayLog.reduce((s, e) => s + (e.min || 0), 0);
+    const idx = Math.min(reportIdx, Math.max(0, todayLog.length - 1));
+    const cur = todayLog[idx];
+    const targetPct = cur && totalMin ? (cur.min / totalMin) * 100 : 0;
+    setReportFillPct(0);
+    const raf = requestAnimationFrame(() => requestAnimationFrame(() => setReportFillPct(targetPct)));
+    return () => cancelAnimationFrame(raf);
+  }, [stage, reportPhase, reportIdx, log]);
 
   useEffect(() => {
     // Ask the browser to keep our data — without this, phones may evict
@@ -2254,7 +2287,7 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
       albumTitles, albumIdx, setAlbumTitles, setAlbumIdx, advanceAlbumTitle,
       rating, setRating, setRatingFromPointer,
       reportIdx, reportPhase, setReportIdx, setReportPhase,
-      reportExpanded, setReportExpanded,
+      reportExpanded, setReportExpanded, reportFillPct,
       debugNow: () => (_debugDate || new Date()).toString(),
     };
   });
@@ -2299,14 +2332,6 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
     const playing = reportPhase === "playing";
     const idx = Math.min(reportIdx, Math.max(0, n - 1));
     const cur = segs[idx];
-    // grow-from-centre, like the "now" line's fill: the revealed-so-far group is
-    // centred as a whole (not pinned to the left) and widens each step, so it
-    // spreads out toward both extremities (first activity ↔ last) as it fills —
-    // rather than each piece independently fading in at its final fixed spot.
-    // Segment widths never change (always their true final % of the day) — only
-    // this group offset shifts, converging to 0 once everything is revealed.
-    const revealFrac = playing && cur ? (cur.leftPct + cur.wPct) / 100 : 1;
-    const groupOffsetPct = playing ? (100 - revealFrac * 100) / 2 : 0;
     // "si pertinent": only the comments the curation pass (see useEffect above) picked
     // as worth surfacing get a summary during playback — everything else stays silent.
     const curated = cur && bestOf && bestOf.includes(cur.e.id) && cur.e.note && cur.e.note.trim();
@@ -2329,25 +2354,6 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
       return next;
     });
 
-    // hold anywhere on the report body ~2s to leave — same "the line is the whole
-    // control surface" language as the "now" tab, no separate "fermer" button needed.
-    // Lives on the outer content wrapper (not just the line) so it still works once
-    // the line has decupled into the grid.
-    const REPORT_HOLD_MS = 2000;
-    const onReportLineDown = () => {
-      reportDidHold.current = false;
-      setReportHolding(true);
-      reportHoldTimer.current = setTimeout(() => {
-        reportDidHold.current = true; reportHoldTimer.current = null;
-        setReportHolding(false);
-        resetFlow();
-      }, REPORT_HOLD_MS);
-    };
-    const cancelReportHold = () => {
-      if (reportHoldTimer.current) { clearTimeout(reportHoldTimer.current); reportHoldTimer.current = null; }
-      setReportHolding(false);
-    };
-
     return (
       <div className="tl">
         <style dangerouslySetInnerHTML={{ __html: css }} />
@@ -2363,12 +2369,7 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
             </div>
           </div>
 
-          <div onPointerDown={onReportLineDown} onPointerUp={cancelReportHold} onPointerLeave={cancelReportHold} onPointerCancel={cancelReportHold}
-            onContextMenu={(e) => e.preventDefault()}
-            style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "center",
-              cursor: "pointer", touchAction: "manipulation", userSelect: "none", WebkitUserSelect: "none",
-              transform: `scaleX(${reportHolding ? 0 : 1})`, transformOrigin: "center",
-              transition: reportHolding ? `transform ${REPORT_HOLD_MS}ms linear` : "transform .3s cubic-bezier(.2,.7,.2,1)" }}>
+          <div style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "center" }}>
 
             {/* activity name — same spot/style as the "now" tab's hero label, one at a
                 time. Once handed over to the grid layout, each row carries its own
@@ -2383,37 +2384,19 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
               </div>
             )}
 
-            {/* the line: same track, but stacked into the day's segments — each fades
-                in as playback reaches it, so the bar visibly fills as % of the day's
-                total time instead of appearing all at once. Grown from the group's
-                own centre outward (groupOffsetPct) while playing; once handed over,
-                either stays as the spotlight nav or gives way to the grid below. */}
+            {/* the line — the exact same centre-out fill as the "now" screen (a flex
+                child whose `width` is animated; justifyContent:"center" on the parent
+                is what keeps it centred, no scaleX/offset trickery needed). Driven by
+                `reportFillPct`, which the effect above resets to 0 and regrows to the
+                displayed activity's own % share each time it changes (Maxence 17/07). */}
             {(playing || REPORT_END_LAYOUT === "spotlight") && (
-              <div style={{ position: "relative", height: 44, width: "82%", margin: "0 auto", display: "flex", alignItems: "center" }}>
+              <div style={{ position: "relative", height: 44, width: "82%", margin: "0 auto",
+                display: "flex", justifyContent: "center", alignItems: "center" }}>
                 <div style={{ position: "absolute", left: 0, right: 0, top: "50%", height: 2, background: C.soft, transform: "translateY(-50%)" }} />
-                <div style={{ position: "absolute", left: 0, right: 0, top: 0, height: 3,
-                  transform: `translateX(${groupOffsetPct}%)`, transition: "transform .5s cubic-bezier(.2,.7,.2,1)" }}>
-                  {segs.map((s, i) => {
-                    // once handed over, the whole day stays filled — only which segment is
-                    // focused moves; only during playback does reveal itself track idx.
-                    // during playback each segment also grows in turn, from its own centre
-                    // out to full size, layered on top of the group's own centre-outward
-                    // spread. Handing over to navigation replicates the same motion: only
-                    // the focused segment is grown, everything else collapses to its centre.
-                    const active = playing ? i <= idx : i === idx;
-                    return (
-                      <div key={s.e.id} onClick={() => !playing && setReportIdx(i)}
-                        style={{
-                          position: "absolute", left: `${s.leftPct}%`, width: `${s.wPct}%`, top: 0, height: 3, borderRadius: 1,
-                          background: C.bone, cursor: playing ? "default" : "pointer",
-                          opacity: active ? 0.9 : 0,
-                          transform: `scaleX(${active ? 1 : 0})`, transformOrigin: "center",
-                          boxShadow: i < segs.length - 1 ? `1px 0 0 ${C.bg} inset` : "none",
-                          transition: "opacity .45s ease, transform .5s cubic-bezier(.2,.7,.2,1)",
-                        }} />
-                    );
-                  })}
-                </div>
+                {reportFillPct > 0 && (
+                  <div style={{ position: "relative", flexShrink: 0, height: 6, width: `${reportFillPct}%`,
+                    background: C.bone, opacity: 0.9, transition: "width .5s cubic-bezier(.2,.7,.2,1)" }} />
+                )}
               </div>
             )}
 
