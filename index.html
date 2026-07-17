@@ -1007,10 +1007,6 @@ function Throughline() {
   const [syncMsg, setSyncMsg] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [keyOpen, setKeyOpen] = useState(false);
-  // rapport "moments": ids of the comments Claude picked as most worth surfacing —
-  // null while not yet computed (or between visits). Curated, not a dump of every
-  // comment (Maxence 14/07: "un best of... comme dans ta maquette").
-  const [bestOf, setBestOf] = useState(null);
   // rapport playback: auto-reveals each of the day's activities in order, then hands
   // control to the user (swipe/dots) once the sequence has run through once.
   const [reportIdx, setReportIdx] = useState(0);
@@ -1212,42 +1208,18 @@ function Throughline() {
     return () => document.removeEventListener("visibilitychange", onVis);
   }, []);
 
-  // rapport "moments": curate rather than dump every comment of the day. ≤3 comments
-  // total → just show them, no call needed. Otherwise ask Claude to pick the 3-4 most
-  // worth surfacing (surprising, an emotion, a real insight — not a flat description).
-  // No key → fall back to the 3 most recent rather than everything.
+  // entering the rapport resets its own local state — playback starts fresh from
+  // the first activity every time. Comments no longer surface during playback
+  // (Maxence 17/07: "ne montre les commentaires qu'à la seconde étape, quand on
+  // peut naviguer" — the earlier Claude-curated "moments" summary this used to
+  // gate is gone with it, full comments now only ever show in the trace/spotlight
+  // navigation step, on demand).
   useEffect(() => {
-    if (stage !== "report") { setBestOf(null); return; }
+    if (stage !== "report") return;
     setReportIdx(0);
     setReportPhase("playing");
     setReportExpanded(new Set());
     setTraceIdx(null);
-    const todayAll = log.filter((e) => e.date === todayKey() && isDone(e));
-    const withNotes = todayAll.filter((e) => e.note && e.note.trim());
-    if (withNotes.length <= 3) { setBestOf(withNotes.map((e) => e.id)); return; }
-    let alive = true;
-    (async () => {
-      const key = (await store.get("tlx_apiKey")) || "";
-      if (!key) { if (alive) setBestOf(withNotes.slice(-3).map((e) => e.id)); return; }
-      try {
-        const list = withNotes.map((e, i) => `${i}: [${e.actionText || "note libre"}] ${e.note.trim()}`).join("\n");
-        const prompt = `Voici tous les commentaires que Maxence a laissés aujourd'hui dans BALANCE, en repère numéroté :
-${list}
-
-Choisis les 3 ou 4 index les plus notables pour un récap de fin de journée — privilégie ce qui est inattendu, une émotion forte, une vraie découverte ou un insight sur lui-même, pas une simple description factuelle. Réponds avec indices = la liste de ces index, dans l'ordre où ils apparaissent.`;
-        const out = await claudeJSON(key, prompt, {
-          type: "object",
-          properties: { indices: { type: "array", items: { type: "integer" } } },
-          required: ["indices"],
-          additionalProperties: false,
-        }, 200);
-        const chosen = (out.indices || []).map((i) => withNotes[i]).filter(Boolean).map((e) => e.id);
-        if (alive) setBestOf(chosen.length ? chosen : withNotes.slice(-3).map((e) => e.id));
-      } catch {
-        if (alive) setBestOf(withNotes.slice(-3).map((e) => e.id));
-      }
-    })();
-    return () => { alive = false; };
   }, [stage]);
 
   // rapport playback: step through the day's clicks one by one, then hand off to
@@ -1268,23 +1240,29 @@ Choisis les 3 ou 4 index les plus notables pour un récap de fin de journée —
   // rapport line fill: the exact same centre-out bar as the "now" screen (see
   // `frac`/`widthPct` in the live-line render below) — a plain `width` on a
   // flex child that flexbox keeps centred as it grows, no scaleX/offset maths.
-  // Driven by the CURRENTLY DISPLAYED activity's own % share of the day
-  // instead of real elapsed time (Maxence 17/07: "il faut le même remplissage
-  // qu'on avait avant sur l'écran principal, juste déclenché par le % de
-  // l'activité affichée" — the earlier stacked-segments/group-offset version
-  // didn't read as centred to him, correctly: it wasn't the same mechanism).
-  // Reset to 0 then grown to the target two frames later so the width
-  // transition actually plays, mirroring a session starting fresh each time.
+  // While playing, it fills CUMULATIVELY as activities scroll by — reaching
+  // fully filled once the whole day has been shown (Maxence 17/07: "il faut
+  // qu'elle se remplisse en entier au fur et à mesure que les activités
+  // défilent"), not resetting to 0 per activity as an earlier pass did. Once
+  // handed over, the spotlight rollback instead shows just the FOCUSED
+  // activity's own share (jumping between activities isn't a progression, a
+  // cumulative width would shrink when navigating backwards).
   useEffect(() => {
     if (stage !== "report") { setReportFillPct(0); return; }
     const todayLog = log.filter((e) => e.date === todayKey() && isClick(e)).sort((a, b) => a.ts - b.ts);
     const totalMin = todayLog.reduce((s, e) => s + (e.min || 0), 0);
     const idx = Math.min(reportIdx, Math.max(0, todayLog.length - 1));
-    const cur = todayLog[idx];
-    const targetPct = cur && totalMin ? (cur.min / totalMin) * 100 : 0;
-    setReportFillPct(0);
-    const raf = requestAnimationFrame(() => requestAnimationFrame(() => setReportFillPct(targetPct)));
-    return () => cancelAnimationFrame(raf);
+    let targetPct = 0;
+    if (totalMin) {
+      if (reportPhase === "playing") {
+        const cumMin = todayLog.slice(0, idx + 1).reduce((s, e) => s + (e.min || 0), 0);
+        targetPct = (cumMin / totalMin) * 100;
+      } else {
+        const cur = todayLog[idx];
+        targetPct = cur ? (cur.min / totalMin) * 100 : 0;
+      }
+    }
+    setReportFillPct(targetPct);
   }, [stage, reportPhase, reportIdx, log]);
 
   useEffect(() => {
@@ -2318,8 +2296,8 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
 
   // rapport screen: full takeover of "the line", same spirit as "empty" — no tab, no
   // chrome. Plays back the day's activities one at a time (name in the same spot the
-  // "now" tab uses, line filling as % of the day's total time, a short summary of the
-  // linked comment when there is one worth surfacing), then hands over to the
+  // "now" tab uses, line filling cumulatively as % of the day's total time — no
+  // comments shown yet, silent until you can navigate), then hands over to the
   // REPORT_END_LAYOUT so any activity — and its full comment — can be revisited.
   // Closing goes back to the live line via resetFlow(), same door as everywhere else.
   if (stage === "report") {
@@ -2344,10 +2322,6 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
     const playing = reportPhase === "playing";
     const idx = Math.min(reportIdx, Math.max(0, n - 1));
     const cur = segs[idx];
-    // "si pertinent": only the comments the curation pass (see useEffect above) picked
-    // as worth surfacing get a summary during playback — everything else stays silent.
-    const curated = cur && bestOf && bestOf.includes(cur.e.id) && cur.e.note && cur.e.note.trim();
-    const summary = curated && cur.e.note.trim().length > 90 ? cur.e.note.trim().slice(0, 87).trim() + "…" : (curated ? cur.e.note.trim() : null);
 
     const onReportTouchStart = (e) => { const t = e.touches[0]; reportTouchRef.current = { x: t.clientX, y: t.clientY }; };
     const onReportTouchEnd = (e) => {
@@ -2366,8 +2340,14 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
       return next;
     });
 
-    // trace layout: which segment sits under a dragged finger, resolved by mapping
-    // clientX onto the line's own width (same idiom as setRatingFromPointer above).
+    // fixed-length comment text so the fixed-height box below the line (see render)
+    // never has to grow — a long comment gets cut, never the line above it moved.
+    const truncateNote = (s, max = 100) => (s.length > max ? s.slice(0, max - 1).trim() + "…" : s);
+
+    // trace layout: which EQUAL slice sits under a dragged finger, resolved by
+    // mapping clientX onto the line's own width (same idiom as setRatingFromPointer
+    // above) then dividing evenly by activity count — not a proportional search,
+    // since the trace line itself renders equal-width slices (see below).
     const traceSeg = REPORT_END_LAYOUT === "trace" && traceIdx != null ? segs[traceIdx] : null;
     const traceIndexFromX = (clientX) => {
       const el = traceRef.current;
@@ -2375,8 +2355,7 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
       const rect = el.getBoundingClientRect();
       if (!rect.width) return null;
       const pct = Math.max(0, Math.min(100, ((clientX - rect.left) / rect.width) * 100));
-      const found = segs.findIndex((s) => pct >= s.leftPct && pct < s.leftPct + s.wPct);
-      return found === -1 ? segs.length - 1 : found;
+      return Math.max(0, Math.min(segs.length - 1, Math.floor(pct / (100 / segs.length))));
     };
     const onTraceDown = (e) => { traceDraggingRef.current = true; setTraceIdx(traceIndexFromX(e.clientX)); };
     const onTraceMove = (e) => { if (traceDraggingRef.current) setTraceIdx(traceIndexFromX(e.clientX)); };
@@ -2408,7 +2387,7 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                 under the finger right now (nothing at rest — silent by design). Grid
                 rows carry their own title instead, so this slot stays empty there. */}
             {(playing || REPORT_END_LAYOUT === "spotlight" || REPORT_END_LAYOUT === "trace") && (
-              <div style={{ minHeight: 24, textAlign: "center", marginBottom: 24 }}>
+              <div style={{ height: 24, overflow: "hidden", textAlign: "center", marginBottom: 24 }}>
                 {heroSeg && (
                   <div key={`n-${heroSeg.e.id}`} className="fade mono" style={{ fontSize: 10, letterSpacing: ".22em", textTransform: "uppercase", color: C.faint }}>
                     {heroSeg.e.actionText}
@@ -2419,9 +2398,9 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
 
             {/* the line — the exact same centre-out fill as the "now" screen (a flex
                 child whose `width` is animated; justifyContent:"center" on the parent
-                is what keeps it centred, no scaleX/offset trickery needed). Driven by
-                `reportFillPct`, which the effect above resets to 0 and regrows to the
-                displayed activity's own % share each time it changes (Maxence 17/07). */}
+                is what keeps it centred, no scaleX/offset trickery needed). While
+                playing, `reportFillPct` (set in the effect above) climbs cumulatively
+                as each activity plays — full only once the whole day has shown. */}
             {(playing || REPORT_END_LAYOUT === "spotlight") && (
               <div style={{ position: "relative", height: 44, width: "82%", margin: "0 auto",
                 display: "flex", justifyContent: "center", alignItems: "center" }}>
@@ -2434,14 +2413,19 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
             )}
 
             {/* trace layout (default, Maxence 17/07 — "creuse toi la tête") — the day
-                settles into ONE full line, divided into its true proportional
-                segments, contiguous, dim/silent at rest: the whole day's shape is
-                visible at a glance without reading a word. Drag a finger across it
-                to explore — the touched segment brightens (name above, comment
-                below), release and it fades back to silent. Same "the line is the
-                whole control surface" language as the rest of the app, no separate
-                tap targets per activity — you trace the day instead of reading a
-                list of it. x→segment mapping mirrors setRatingFromPointer above. */}
+                settles into ONE full line, dim/silent and perfectly uniform at rest:
+                same height and brightness end to end, no divider lines, no gaps —
+                a single unbroken stroke, not a row of visibly separate pieces
+                (Maxence: "rend la ligne uniforme... la séparation se voit juste avec
+                la luminosité"). Each activity gets an EQUAL share of the line here
+                (not its real % of the day, which the fill above already carries) —
+                a deliberate simplification that also reads truer to "they're equal,
+                none ranked above another" (see throughline-cant-prioritize-parallel-
+                progress). Drag a finger across it to explore — the touched slice
+                brightens (name above, comment below), release and it fades back to
+                silent; the only separation you ever see is that brightness delta,
+                never a structural line. x→slice mapping mirrors setRatingFromPointer
+                above, just with equal division instead of a proportional search. */}
             {!playing && REPORT_END_LAYOUT === "trace" && (
               <div ref={traceRef} onPointerDown={onTraceDown} onPointerMove={onTraceMove}
                 onPointerUp={onTraceEnd} onPointerLeave={onTraceEnd} onPointerCancel={onTraceEnd}
@@ -2453,10 +2437,9 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                   const active = traceIdx === i;
                   return (
                     <div key={s.e.id} style={{
-                      position: "relative", flex: `0 0 ${s.wPct}%`, height: active ? 8 : 4,
+                      position: "relative", flex: `0 0 ${100 / n}%`, height: 5,
                       background: C.bone, opacity: active ? 1 : 0.32,
-                      boxShadow: i < segs.length - 1 ? `1px 0 0 ${C.bg} inset` : "none",
-                      transition: "height .2s ease, opacity .2s ease",
+                      transition: "opacity .2s ease",
                     }} />
                   );
                 })}
@@ -2474,27 +2457,29 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
               </div>
             )}
 
-            {/* comment below the line — a short summary while playing (only when curated
-                as worth surfacing); once handed over, spotlight shows the focused
-                activity's full comment here, trace shows whatever's under the finger,
-                grid shows it per-row instead. */}
-            <div style={{ minHeight: (playing || REPORT_END_LAYOUT === "trace") ? 60 : 0, textAlign: "center", marginTop: (playing || REPORT_END_LAYOUT === "trace") ? 20 : 0, padding: "0 10px" }}>
-              {playing && summary && (
-                <div key={`s${idx}`} className="fade" style={{ fontFamily: "var(--serif)", fontStyle: "italic", fontWeight: 300, fontSize: 13, color: C.mut, lineHeight: 1.5 }}>
-                  « {summary} »
-                </div>
-              )}
-              {!playing && REPORT_END_LAYOUT === "spotlight" && cur && cur.e.note && cur.e.note.trim() && (
-                <div key={`f${idx}`} className="fade" style={{ fontFamily: "var(--serif)", fontStyle: "italic", fontWeight: 300, fontSize: 14, color: C.text, lineHeight: 1.55 }}>
-                  « {cur.e.note.trim()} »
-                </div>
-              )}
-              {!playing && REPORT_END_LAYOUT === "trace" && traceSeg && traceSeg.e.note && traceSeg.e.note.trim() && (
-                <div key={`t-${traceSeg.e.id}`} className="fade" style={{ fontFamily: "var(--serif)", fontStyle: "italic", fontWeight: 300, fontSize: 14, color: C.text, lineHeight: 1.55 }}>
-                  « {traceSeg.e.note.trim()} »
-                </div>
-              )}
-            </div>
+            {/* comment below the line — never during playback (Maxence 17/07: "ne montre
+                les commentaires qu'à la seconde étape, quand on peut naviguer"), only
+                once handed over: trace shows whatever's under the finger, spotlight
+                shows the focused activity. FIXED height + truncated text (not
+                minHeight) so a long comment can never grow this box and shift the
+                line above it — the line stays at the same spot no matter what's
+                showing below it (Maxence: "la ligne change de place selon la taille
+                des commentaires"). Not rendered at all in grid, which shows comments
+                per-row instead. */}
+            {REPORT_END_LAYOUT !== "grid" && (
+              <div style={{ height: 66, textAlign: "center", marginTop: 20, padding: "0 10px", overflow: "hidden" }}>
+                {!playing && REPORT_END_LAYOUT === "spotlight" && cur && cur.e.note && cur.e.note.trim() && (
+                  <div key={`f${idx}`} className="fade" style={{ fontFamily: "var(--serif)", fontStyle: "italic", fontWeight: 300, fontSize: 14, color: C.text, lineHeight: 1.55 }}>
+                    « {truncateNote(cur.e.note.trim())} »
+                  </div>
+                )}
+                {!playing && REPORT_END_LAYOUT === "trace" && traceSeg && traceSeg.e.note && traceSeg.e.note.trim() && (
+                  <div key={`t-${traceSeg.e.id}`} className="fade" style={{ fontFamily: "var(--serif)", fontStyle: "italic", fontWeight: 300, fontSize: 14, color: C.text, lineHeight: 1.55 }}>
+                    « {truncateNote(traceSeg.e.note.trim())} »
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* grid layout — the line "decuples": one row per activity done today,
                 stacked vertically, spread across the screen (Maxence 17/07). Each
