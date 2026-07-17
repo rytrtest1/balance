@@ -1299,7 +1299,10 @@ function Throughline() {
       // (common on phones) resumes exactly where it left off, instead of silently
       // re-picking — that silent re-pick was an unintended free skip. Only same-day:
       // a proposal from a previous day is stale, start fresh instead.
-      if (fl && fl.date === todayKey() && fl.stage && fl.stage !== "entry" && fl.stage !== "empty") {
+      // "report" excluded on purpose: it's a read-only takeover (shake to leave),
+      // not an interrupted session worth resuming — reopening the app should land
+      // on the normal screen, not dump you back into the rapport view (17/07).
+      if (fl && fl.date === todayKey() && fl.stage && fl.stage !== "entry" && fl.stage !== "empty" && fl.stage !== "report") {
         setStage(fl.stage); setCurrent(fl.current || null);
         setStartedAt(fl.startedAt || 0); setElapsedMs(fl.startedAt ? Date.now() - fl.startedAt : 0);
         setRunning(!!fl.running); setPaused(!!fl.paused);
@@ -1529,6 +1532,59 @@ Détermine où en est la pièce APRÈS cette session. new_stage = index (0 à ${
     } finally {
       setSyncing(false);
       setTimeout(() => { setSyncMsg(""); finishFlow(text); }, 2400);
+    }
+  };
+
+  // ----- same stage-advance as advanceViaClaude, but reachable from the free-log
+  // box (submitFreeLog) instead of a live session. There's no `current.action` to
+  // read pieceId/pieceStage/fresh from, so the piece is resolved the same way
+  // simComplete does it (sandbox quick-complete): the most-live piece (highest
+  // stage still <= last), or a fresh one if none exists.
+  const advancePipelineFromLog = async (key, act, text, entryId) => {
+    const stages = act.stages || [];
+    const last = stages.length - 1;
+    const pieces = (act.items || []).filter((it) => typeof it.stage === "number");
+    const live = pieces.filter((p) => p.stage <= last).sort((u, v) => v.stage - u.stage)[0] || null;
+    const ctx = live
+      ? `Pièce existante : « ${live.text} », à l'étape ${live.stage} (${(stages[live.stage] || {}).text || "?"}).`
+      : `Aucune pièce en cours — ce texte démarre potentiellement une pièce FRAÎCHE (pas encore de nom).`;
+    const prompt = `Tu suis l'avancement d'une pièce dans un funnel « ${act.name} » (domaine : ${act.domain}), à partir d'un log libre (pas de session minutée en cours, juste un texte tapé après coup).
+Étapes du funnel (index: nom) :
+${stages.map((s, i) => `${i}: ${s.text}`).join("\n")}
+
+${ctx}
+
+Ce qu'il a tapé :
+« ${text} »
+
+Détermine où en est la pièce APRÈS ce qui est décrit. new_stage = index (0 à ${last}) de l'étape courante : si une étape vient d'être finie, avance à la suivante, sinon garde l'étape (${live ? live.stage : 0} si le texte ne décrit pas d'avancée claire). Cas particulier : si le texte décrit une session sur la DERNIÈRE étape (${last} : ${(stages[last] || {}).text || "?"}) et qu'elle est terminée/réussie, new_stage = ${last + 1} — la pièce sort du funnel, terminée. Ne mets ${last + 1} QUE dans ce cas précis. piece_name = nom court (existant, ou tiré du texte si fraîche). progressed = true si le texte décrit un vrai pas en avant, false sinon. note = une ligne qui distille ce qui a été fait.`;
+    try {
+      const out = await claudeJSON(key, prompt, {
+        type: "object",
+        properties: { piece_name: { type: "string" }, new_stage: { type: "integer" }, progressed: { type: "boolean" }, note: { type: "string" } },
+        required: ["piece_name", "new_stage", "progressed", "note"],
+        additionalProperties: false,
+      });
+      const ns = Math.max(0, Math.min(last + 1, parseInt(out.new_stage)));
+      const pieceName = out.piece_name || (live ? live.text : "(sans nom)");
+      const prevStage = live ? live.stage : 0;
+      const justFinished = ns > last && prevStage <= last;
+      const justGraduated = act.graduatesTo && justFinished;
+      setActivities((arr) => arr.map((a2) => {
+        if (a2.id === act.id) {
+          let items = a2.items || [];
+          items = live ? items.map((it) => (it.id === live.id ? { ...it, stage: ns } : it)) : [...items, { id: uid(), text: pieceName, stage: ns }];
+          return { ...a2, items };
+        }
+        if (justGraduated && a2.id === act.graduatesTo) {
+          return { ...a2, items: [...(a2.items || []), { id: uid(), text: pieceName, status: "doing" }] };
+        }
+        return a2;
+      }));
+      if (entryId) setLog((L) => L.map((en) => (en.id === entryId ? { ...en, claudeNote: out.note, finished: justFinished, progressed: !!out.progressed } : en)));
+    } catch (err) {
+      // the "done" entry is already logged (min/note) regardless — only the funnel
+      // position fails to update this time, same fail-safe spirit as advanceViaClaude.
     }
   };
 
@@ -2034,6 +2090,12 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
         };
         if (a.kind === "task") setActivities((arr) => arr.map((x) => (x.id === a.id ? { ...x, done: true } : x)));
         setLog((L) => [...L, e]);
+        // pipelines (Erasure/Piano/Cover/Parfum) aren't just logged — the funnel
+        // piece itself needs to move, same Claude-driven read as a normal session's
+        // after-finish comment (advanceViaClaude), just resolving the piece from the
+        // catalogue instead of a live `current.action` (17/07, was a known gap: the
+        // free-log box only ever wrote a plain "done" entry for these, funnel never moved).
+        if (a.kind === "pipeline") advancePipelineFromLog(key, a, out.note || text, e.id);
         setMsg(`logged: ${e.actionText}`);
       } else {
         setLog((L) => [...L, { id: uid(), date: todayKey(), ts: realNow().getTime(), type: "note", note: out.note || text }]);
