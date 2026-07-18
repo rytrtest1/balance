@@ -147,6 +147,18 @@ const computePlace = (d = realNow()) => (isWorkShift(d) ? "work" : "home");
 // is a work shift starting tonight? (used to drop work-day-only activities like
 // tapis, which belongs to a free day, not the 1h home window before a shift)
 const isWorkDayToday = (d = realNow()) => isWorkShift(new Date(d.getFullYear(), d.getMonth(), d.getDate(), 21, 0, 0));
+// hours elapsed since the CURRENT shift started (20:00 on whichever calendar day
+// isWorkShift's own start-branch lands on — see isWorkShift above). null outside
+// any shift window. Used to gate écoute/film/podcast past the point they become
+// deconcentrating at work (Maxence 16/07: "reste aux aguets si quelqu'un arrive").
+function hoursSinceShiftStart(d = realNow()) {
+  const h = d.getHours();
+  let start;
+  if (h >= 20) start = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 20, 0, 0);
+  else if (h < 8) { const p = new Date(d); p.setDate(p.getDate() - 1); start = new Date(p.getFullYear(), p.getMonth(), p.getDate(), 20, 0, 0); }
+  else return null;
+  return (d.getTime() - start.getTime()) / 3600000;
+}
 // exactly 2 days before a work stretch STARTS (not every day within 2 days of one —
 // e.g. Wed sits 2 days from Fri too, but Fri is mid-stretch since Thu already started
 // it, so Wed must stay excluded). Used to gate meal-prep focaccia: found proposed on
@@ -364,6 +376,13 @@ function pendingGarnitureFrom(log) {
 // Both ramp up in pickAging's weight() as this hour approaches, forced outright
 // at/after it on their respective deadline day(s).
 const FOCACCIA_GARNITURE_DEADLINE_HOUR = 20;
+// écoute/film/podcast at work: deconcentrating past a few hours in (Maxence
+// 16/07 — "reste aux aguets si quelqu'un arrive"). Dropped from the pool
+// entirely once past the threshold, same as any other placeOkW mismatch —
+// not damped/ramped like the focaccia/garniture deadlines above, since this
+// isn't a debt that needs to fire eventually, just a window that closes.
+const WORK_LISTEN_GATE_HOURS = 5;
+const WORK_LISTEN_GATE_IDS = new Set(["a_film", "a_podcast", "a_ecoute_titre", "a_ecoute_album"]);
 // which cook created the OLDEST still-open dish debt (Maxence 11/07: "l'app
 // propose peu de temps après l'action qui ramène à 0" — eligible ≠ prioritized;
 // pickAging's weight() ages a row off when THAT ROW was last done, so a vaisselle
@@ -403,6 +422,7 @@ function buildLotteryRows(activities, log, place, skipQuota = false) {
     if (a.kind === "task" && a.done) continue;
     if (a.kind === "pipeline" && !(a.stages || []).length) continue;
     if (a.skipWorkDays && isWorkDayToday()) continue; // e.g. tapis: a free-day thing, never a work day
+    if (WORK_LISTEN_GATE_IDS.has(a.id) && place === "work" && (hoursSinceShiftStart() || 0) >= WORK_LISTEN_GATE_HOURS) continue;
     if (a.id === "a_vaisselle") {
       if (!placeOk(a, place)) continue;
       // physical constraint, not pacing — never relaxed (fixed 10/07-j alongside
@@ -1039,6 +1059,11 @@ function Throughline() {
   // done-stage comment field (Maxence 16/07) — an instruction, not a standing
   // affordance, so it teaches once then gets out of the way like the tap hint.
   const [showDoneHint, setShowDoneHint] = useState(false);
+  // med reminder (Maxence 14/07): "au premier clic de la journée, rappel de
+  // prendre son traitement, au cas où non fait." Second deliberate exception
+  // to the chrome-free entry screen, same one-line/self-dismissing treatment
+  // as showTapHint above — once per calendar day, not a standing affordance.
+  const [showMedReminder, setShowMedReminder] = useState(false);
   // the domain-balance swing (see domainBalance()) stays completely hidden —
   // no tilt, no class, line looks exactly as if the feature didn't exist —
   // until a shake reveals it. Changed 16/07: no longer a manual on/off toggle —
@@ -1055,6 +1080,14 @@ function Throughline() {
   // the sway doesn't jitter as the log changes mid-session. ampDeg/periodMs are
   // derived from it the same way startBalanceReveal derives them for the shake.
   const sessionTiltRef = useRef(0);
+  // start-delay tracking (Maxence 14/07: "mesurer le temps entre le clic pour
+  // découvrir une activité et celui pour la commencer, pour éviter que ça
+  // devienne une fuite"). Background-only, no UI — proposedAtRef is stamped
+  // when a proposal appears (propose()), read once begin() actually fires
+  // (auto-start included, see AUTO_START_MS above) and stashed on
+  // lastStartDelayRef for finish() to attach to the completed log entry.
+  const proposedAtRef = useRef(null);
+  const lastStartDelayRef = useRef(null);
 
   // 16/07: rewritten after the CSS-animation→CSS-transition handoff (removing the
   // "sway" class mid-swing while starting a transition to rotate(0)) kept producing a
@@ -1289,6 +1322,8 @@ function Throughline() {
       if (!hintSeen) { setShowTapHint(true); store.set(NS("tlx_hintSeen"), "1"); }
       const doneHintSeen = await store.get(NS("tlx_doneHintSeen"));
       if (!doneHintSeen) { setShowDoneHint(true); store.set(NS("tlx_doneHintSeen"), "1"); }
+      const medReminderDate = await store.get(NS("tlx_medReminderDate"));
+      if (medReminderDate !== todayKey()) { setShowMedReminder(true); store.set(NS("tlx_medReminderDate"), todayKey()); }
       if (!alive) return;
       setActivities(a ?? SEED);
       setLog(l ?? []);
@@ -1352,6 +1387,7 @@ function Throughline() {
     setRunning(false); setElapsedMs(0);
     if (!p) { setCurrent(null); setStage("empty"); }
     else {
+      proposedAtRef.current = Date.now();
       setCurrent(p); setStage("proposal");
       if (p.activity.kind === "recommandeur" && p.activity.note) {
         (async () => {
@@ -1373,6 +1409,7 @@ function Throughline() {
   };
   const start = () => {
     setShowTapHint(false);
+    setShowMedReminder(false);
     // iOS requires an explicit user-gesture permission grant before
     // devicemotion fires at all — piggyback on the very first tap rather
     // than adding a dedicated prompt/button (Android needs no such call).
@@ -1780,6 +1817,7 @@ Commentaire laissé après la session :
 
   // tap to begin — for timed activities the line pre-fills with already-done minutes this period
   const begin = () => {
+    lastStartDelayRef.current = proposedAtRef.current ? Date.now() - proposedAtRef.current : null;
     let preMs = 0;
     if (current?.activity?.timed) {
       const done = minutesInPeriod(log, current.activity.id, null, current.activity.period || "day");
@@ -1831,6 +1869,7 @@ Commentaire laissé après la session :
       activityId: aid, actionId: current.action.id, actionText: current.action.text,
       min: minLogged, sec: minLogged * 60, domain: current.activity.domain, note: "",
       ...(current.action.itemId ? { itemId: current.action.itemId } : {}),
+      ...(lastStartDelayRef.current != null ? { startDelayMs: lastStartDelayRef.current } : {}),
     };
     if (current.activity.kind === "task") {
       setActivities((arr) => arr.map((a) => (a.id === aid ? { ...a, done: true } : a)));
@@ -2785,10 +2824,18 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
               {/* ---------- below the line: controls ---------- */}
               <div style={{ minHeight: 130, marginTop: 30, textAlign: "center" }}>
 
-                {/* entry: nothing, except the one-time first-launch hint. */}
+                {/* entry: nothing, except the one-time first-launch hint and the
+                    once-a-day med reminder (both deliberate, self-dismissing exceptions
+                    to the otherwise chrome-free entry screen). */}
                 {stage === "entry" && showTapHint && (
                   <div className="fade mono" style={{ fontSize: 10, letterSpacing: ".14em", textTransform: "uppercase", color: C.faint }}>
                     tape pour commencer
+                  </div>
+                )}
+                {stage === "entry" && showMedReminder && (
+                  <div className="fade mono" onClick={() => setShowMedReminder(false)}
+                    style={{ fontSize: 10, letterSpacing: ".14em", textTransform: "uppercase", color: C.faint, marginTop: showTapHint ? 8 : 0, cursor: "pointer" }}>
+                    traitement pris ?
                   </div>
                 )}
 
