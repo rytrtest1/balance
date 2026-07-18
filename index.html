@@ -593,6 +593,19 @@ function pickAging(activities, log, place, options = {}) {
     const va = activities.find((x) => x.id === "a_vaisselle");
     if (va && placeOk(va, place)) return resolveDraw({ activity: va, action: va.actions[0] }, log);
   }
+  // espagnol: conversation forces anki right after, same shape as vaisselle above
+  // (Maxence 18/07 — corrected from an earlier weight-nudge version: "comment ça pas
+  // un forçage dur ? c'est le cas" — he wants the app to actually ask, not just tilt
+  // the odds; feels prouder completing an explicit ask than an unnoticed nudge).
+  // Doesn't touch x_es_anki's own target/period — its normal quota-driven draws at
+  // other times are untouched; this is one extra guaranteed channel, exactly like
+  // vaisselle's debt-driven force is on top of its own normal row. One rejected
+  // forced proposal (avoidId) and it falls straight through to the normal draw.
+  if (lastLogged && avoidId !== "a_espagnol" && lastLogged.actionId === "x_es_conv") {
+    const es = activities.find((x) => x.id === "a_espagnol");
+    const anki = es && (es.actions || []).find((x) => x.id === "x_es_anki");
+    if (es && anki && placeOkW(anki.where || es.where, place)) return resolveDraw({ activity: es, action: anki }, log);
+  }
   let rows = buildLotteryRows(activities, log, place, relax).filter((r) => r.activity.id !== avoidId);
   if (!rows.length) return null;
   // focaccia/garniture: hour-of-day deadline guarantee (see
@@ -1066,6 +1079,13 @@ function Throughline() {
   // but begin()/swap() special-case it below to move straight to a real
   // propose() instead of running a session, so nothing ever touches `log`.
   const medReminderShownRef = useRef(null);
+  // load-once-per-day (18/07, Maxence: "sinon je peux tricher pour skip") — load
+  // restores a whole activities/log snapshot, so an unlimited load is a way to
+  // undo today's state (dodge a debt, re-roll a draw he didn't like) by reaching
+  // for an older backup. One load per calendar day closes that without touching
+  // the legitimate use (recovering a lost session) — same "date ref persisted
+  // to store" shape as medReminderShownRef just above.
+  const lastLoadDateRef = useRef(null);
   // the domain-balance swing (see domainBalance()) stays completely hidden —
   // no tilt, no class, line looks exactly as if the feature didn't exist —
   // until a shake reveals it. Changed 16/07: no longer a manual on/off toggle —
@@ -1325,6 +1345,7 @@ function Throughline() {
       const doneHintSeen = await store.get(NS("tlx_doneHintSeen"));
       if (!doneHintSeen) { setShowDoneHint(true); store.set(NS("tlx_doneHintSeen"), "1"); }
       medReminderShownRef.current = await store.get(NS("tlx_medReminderDate"));
+      lastLoadDateRef.current = await store.get(NS("tlx_lastLoadDate"));
       if (!alive) return;
       setActivities(a ?? SEED);
       setLog(l ?? []);
@@ -2359,11 +2380,20 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
       // can never actually restore history (Maxence 13/07).
       setActivities(o.activities);
       if (log.length === 0 && Array.isArray(o.log) && o.log.length > 0) setLog(o.log);
+      lastLoadDateRef.current = todayKey();
+      store.set(NS("tlx_lastLoadDate"), todayKey());
       setMsg("loaded ✓"); setTab("now"); setStage("entry");
     } catch { setMsg("couldn't read that — check the file/text"); }
     setTimeout(() => setMsg(""), 2200);
   };
-  const onFile = (ev) => { const f = ev.target.files?.[0]; if (!f) return; const r = new FileReader(); r.onload = () => applyImport(String(r.result)); r.readAsText(f); ev.target.value = ""; };
+  const onFile = (ev) => {
+    const f = ev.target.files?.[0]; if (!f) return;
+    if (lastLoadDateRef.current === todayKey()) {
+      setMsg("déjà chargé aujourd'hui"); setTimeout(() => setMsg(""), 2200);
+      ev.target.value = ""; return;
+    }
+    const r = new FileReader(); r.onload = () => applyImport(String(r.result)); r.readAsText(f); ev.target.value = "";
+  };
   const resetAll = () => {
     if (typeof window !== "undefined" && !window.confirm("Wipe all activities and history?")) return;
     // a real reset means real zero — a debug date left jumped ahead used to survive
@@ -3247,7 +3277,12 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
             </div>
           )}
           <div style={{ marginTop: 22, textAlign: "center" }}>
-            <button className="link" style={{ color: C.line }} onClick={resetAll}>reset</button>
+            {/* sandbox only (18/07, Maxence: "enlever reset de l'app normale") — a
+                one-tap wipe in the real app is a way to dodge the engine's own caps/
+                debt (log something, don't like the fallout, reset, try again), same
+                risk class as the fake-clock override just below it. Sandbox keeps it
+                because hand-testing the engine genuinely needs a clean slate. */}
+            {SIM && <button className="link" style={{ color: C.line }} onClick={resetAll}>reset</button>}
             {/* fake-clock override — sandbox only. Shipping this in prod meant the real
                 app could have its date/time silently forced away from realNow(), which
                 the live engine (pickAging, caps, place) reads directly — a real user has
