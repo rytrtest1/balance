@@ -1059,11 +1059,13 @@ function Throughline() {
   // done-stage comment field (Maxence 16/07) — an instruction, not a standing
   // affordance, so it teaches once then gets out of the way like the tap hint.
   const [showDoneHint, setShowDoneHint] = useState(false);
-  // med reminder (Maxence 14/07): "au premier clic de la journée, rappel de
-  // prendre son traitement, au cas où non fait." Second deliberate exception
-  // to the chrome-free entry screen, same one-line/self-dismissing treatment
-  // as showTapHint above — once per calendar day, not a standing affordance.
-  const [showMedReminder, setShowMedReminder] = useState(false);
+  // med reminder (Maxence 14/07, revised 18/07 — "juste premier titre qui
+  // apparaît sur la ligne, pas compté comme action ou clic"): the first
+  // start() of each calendar day shows a synthetic proposal card ("traitement
+  // pris ?") on the line itself, same visual treatment as any real proposal —
+  // but begin()/swap() special-case it below to move straight to a real
+  // propose() instead of running a session, so nothing ever touches `log`.
+  const medReminderShownRef = useRef(null);
   // the domain-balance swing (see domainBalance()) stays completely hidden —
   // no tilt, no class, line looks exactly as if the feature didn't exist —
   // until a shake reveals it. Changed 16/07: no longer a manual on/off toggle —
@@ -1322,8 +1324,7 @@ function Throughline() {
       if (!hintSeen) { setShowTapHint(true); store.set(NS("tlx_hintSeen"), "1"); }
       const doneHintSeen = await store.get(NS("tlx_doneHintSeen"));
       if (!doneHintSeen) { setShowDoneHint(true); store.set(NS("tlx_doneHintSeen"), "1"); }
-      const medReminderDate = await store.get(NS("tlx_medReminderDate"));
-      if (medReminderDate !== todayKey()) { setShowMedReminder(true); store.set(NS("tlx_medReminderDate"), todayKey()); }
+      medReminderShownRef.current = await store.get(NS("tlx_medReminderDate"));
       if (!alive) return;
       setActivities(a ?? SEED);
       setLog(l ?? []);
@@ -1409,12 +1410,20 @@ function Throughline() {
   };
   const start = () => {
     setShowTapHint(false);
-    setShowMedReminder(false);
     // iOS requires an explicit user-gesture permission grant before
     // devicemotion fires at all — piggyback on the very first tap rather
     // than adding a dedicated prompt/button (Android needs no such call).
     if (typeof DeviceMotionEvent !== "undefined" && typeof DeviceMotionEvent.requestPermission === "function") {
       DeviceMotionEvent.requestPermission().catch(() => {});
+    }
+    if (medReminderShownRef.current !== todayKey()) {
+      medReminderShownRef.current = todayKey();
+      store.set(NS("tlx_medReminderDate"), todayKey());
+      proposedAtRef.current = Date.now();
+      setCurrent({ activity: { id: "__med_reminder", name: "" }, action: { id: "med", text: "traitement pris ?" }, medReminder: true });
+      setRunning(false); setElapsedMs(0);
+      setStage("proposal");
+      return;
     }
     propose();
   };
@@ -1426,6 +1435,9 @@ function Throughline() {
   // and whatever was typed/noted mid-session (comment, album titles, a paused clock)
   // gets wiped here too so it can't bleed into the next pick.
   const swap = () => {
+    // med reminder card: holding to reject it shouldn't cost the escalating
+    // hold-time penalty below — that's meant for declining real activities.
+    if (current?.medReminder) { propose(log, activities, false, null); return; }
     const today = todayKey();
     const cur = holdDate === today ? holdMs : BASE_HOLD_MS; // fresh day → start from 10s
     const next = cur * 2; // every skip doubles the next hold
@@ -1817,6 +1829,9 @@ Commentaire laissé après la session :
 
   // tap to begin — for timed activities the line pre-fills with already-done minutes this period
   const begin = () => {
+    // med reminder card (see start()): never a real session — move straight to
+    // an actual proposal instead, nothing logged, no click counted.
+    if (current?.medReminder) { propose(); return; }
     lastStartDelayRef.current = proposedAtRef.current ? Date.now() - proposedAtRef.current : null;
     let preMs = 0;
     if (current?.activity?.timed) {
@@ -2824,18 +2839,10 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
               {/* ---------- below the line: controls ---------- */}
               <div style={{ minHeight: 130, marginTop: 30, textAlign: "center" }}>
 
-                {/* entry: nothing, except the one-time first-launch hint and the
-                    once-a-day med reminder (both deliberate, self-dismissing exceptions
-                    to the otherwise chrome-free entry screen). */}
+                {/* entry: nothing, except the one-time first-launch hint. */}
                 {stage === "entry" && showTapHint && (
                   <div className="fade mono" style={{ fontSize: 10, letterSpacing: ".14em", textTransform: "uppercase", color: C.faint }}>
                     tape pour commencer
-                  </div>
-                )}
-                {stage === "entry" && showMedReminder && (
-                  <div className="fade mono" onClick={() => setShowMedReminder(false)}
-                    style={{ fontSize: 10, letterSpacing: ".14em", textTransform: "uppercase", color: C.faint, marginTop: showTapHint ? 8 : 0, cursor: "pointer" }}>
-                    traitement pris ?
                   </div>
                 )}
 
