@@ -4,7 +4,7 @@
   "description": "Got time but no drive? It tells you one thing to do.",
   "start_url": "./index.html",
   "scope": "./",
-  "display": "standalone",
+  "display": "fullscreen",
   "orientation": "any",
   "background_color": "#0a0a0b",
   "theme_color": "#0a0a0b",

@@ -577,7 +577,39 @@ function resolveDraw(drawn, log) {
   if (drawn.action && action && /\(LRU\)/.test(action.text || "") && hasDoingItems(a)) {
     action = pickItemLRU(a, log, action);
   }
+  // picker: pure coin flip between text variants of the SAME action — doesn't
+  // touch target/period/weight at all, just which mode gets shown (Maxence
+  // 19/07: Minuscules/Free poetry "de zéro" vs "continuer" — a single weighted
+  // lottery slot, not two competing sub-actions).
+  if (action && action.picker && action.picker.length) {
+    const choice = action.picker[Math.floor(Math.random() * action.picker.length)];
+    action = { ...action, text: choice };
+  }
   return action ? { activity: a, action } : null;
+}
+// one-time structural migration, run on every load (idempotent — only touches
+// rows still in the old shape): Free poetry's 2 separately-weighted actions
+// (x_fp_zero/x_fp_frag, each its own target/aging clock) merge into 1 action
+// with a `picker` (Maxence 19/07 — "on touche pas à la fréquence, juste 50/50
+// de chances"). Same picker idea added to Minuscules' single action. Note:
+// Free poetry's aging clock restarts from here (new action id, old log entries
+// under x_fp_zero/x_fp_frag no longer match) — same graceful "never done yet"
+// seeding every new/renamed row already gets in pickAging's weight(), not a bug.
+function migratePickerActions(acts) {
+  return acts.map((a) => {
+    if (a.id === "a_freepo" && (a.actions || []).some((x) => x.id === "x_fp_zero" || x.id === "x_fp_frag")) {
+      return { ...a, actions: [{ id: "x_fp", text: "écrire de zéro", target: 4, period: "week", dur: 20,
+        picker: ["écrire de zéro", "continuer un fragment"] }],
+        note: "1 action, 2 modes tirés à 50/50 au moment de la proposition (picker) — ne pèse plus sur le tirage global comme 2 sous-actions séparées (Maxence 19/07). Pas de contrainte temps (le commentaire dicte la complétion). target=4/sem total, inchangé. Fragments vivent dans les notes externes." };
+    }
+    if (a.id === "a_minuscules" && (a.actions || []).some((x) => x.id === "x_min" && !x.picker)) {
+      return { ...a, actions: a.actions.map((x) => x.id === "x_min"
+        ? { ...x, picker: ["écrire une minuscule de zéro", "continuer une minuscule existante"] }
+        : x),
+        note: "Attention → observation → description poétique d'un seul détail. Friction nulle. 1/sem. 2 modes tirés à 50/50 (picker), comme Free poetry — continuer une minuscule existante ou repartir de zéro." };
+    }
+    return a;
+  });
 }
 function pickAging(activities, log, place, options = {}) {
   const { avoidId = null, relax = false } = options;
@@ -943,6 +975,72 @@ function Throughline() {
     else { pauseStartRef.current = Date.now(); setPaused(true); }
   };
 
+  // "ligne présence" scoped down to what a PWA can actually do (Maxence 19/07):
+  // a real, near-silent, looping audio keeps a genuine OS Media Session alive, so
+  // the lock screen/notification shade gets real play/pause controls while a
+  // session runs — mapped straight onto the existing togglePause above, no new
+  // concept. Bonus (not the point, just true on his phone): on Samsung/One UI a
+  // live media session surfaces a small widget on the always-on display too,
+  // covering part of the original "visible screen-off" ask with zero native code.
+  // gain is near-zero, not exact 0 — some browsers filter genuinely-silent
+  // streams out of the rules that keep background audio/media-session alive.
+  const silentAudioRef = useRef(null);
+  const silentCtxRef = useRef(null);
+  useEffect(() => {
+    if (typeof window === "undefined" || !(window.AudioContext || window.webkitAudioContext)) return;
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const dest = ctx.createMediaStreamDestination();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      gain.gain.value = 0.0001;
+      osc.connect(gain).connect(dest);
+      osc.start();
+      const el = document.createElement("audio");
+      el.srcObject = dest.stream;
+      el.loop = true;
+      silentAudioRef.current = el;
+      silentCtxRef.current = ctx;
+    } catch (e) {}
+  }, []);
+  useEffect(() => {
+    if (!("mediaSession" in navigator)) return;
+    const active = stage === "running";
+    const el = silentAudioRef.current;
+    if (active && !paused) {
+      silentCtxRef.current?.resume?.()?.catch(() => {});
+      el?.play()?.catch(() => {});
+      try { navigator.mediaSession.playbackState = "playing"; } catch (e) {}
+    } else if (active && paused) {
+      el?.pause?.();
+      try { navigator.mediaSession.playbackState = "paused"; } catch (e) {}
+    } else {
+      el?.pause?.();
+      try { navigator.mediaSession.playbackState = "none"; navigator.mediaSession.metadata = null; } catch (e) {}
+    }
+    if (active && current && typeof MediaMetadata !== "undefined") {
+      try {
+        navigator.mediaSession.metadata = new MediaMetadata({
+          title: (current.action && current.action.text) || "BALANCE",
+          artist: (current.activity && current.activity.name) || "BALANCE",
+        });
+      } catch (e) {}
+    }
+  }, [stage, paused, current]);
+  useEffect(() => {
+    if (!("mediaSession" in navigator)) return;
+    try {
+      navigator.mediaSession.setActionHandler("play", () => { if (paused) togglePause(); });
+      navigator.mediaSession.setActionHandler("pause", () => { if (!paused) togglePause(); });
+    } catch (e) {}
+    return () => {
+      try {
+        navigator.mediaSession.setActionHandler("play", null);
+        navigator.mediaSession.setActionHandler("pause", null);
+      } catch (e) {}
+    };
+  }, [paused]);
+
   // long-press to swap: hold the line and it retracts to nothing, then re-picks.
   // there is no visible "something else" button — this is the only way to change.
   // the hold starts at 10s and DOUBLES with every skip (20s, 40s…), so skipping
@@ -1045,6 +1143,102 @@ function Throughline() {
   const [reportIdx, setReportIdx] = useState(0);
   const [reportPhase, setReportPhase] = useState("playing"); // "playing" | "interactive"
   const reportTouchRef = useRef(null);
+  // easter egg (Maxence 19/07): a long-press on the rapport header opens a hidden
+  // breakout — one of today's real completions at a time, centre screen, broken
+  // with a ball off the same line-as-paddle idiom used everywhere else. One target
+  // visible at a time (never a grid — "un doigt, une ligne, jamais de liste" applies
+  // here too), frozen at trigger time so it can't shift under him mid-game. No
+  // score, no timer, no lose state — a missed ball just relaunches; clearing the
+  // last target quietly fades back to the rapport, same "no verdict" ethos as the
+  // rest of the app.
+  const [gameQueue, setGameQueue] = useState([]);
+  const [gameIdx, setGameIdx] = useState(0);
+  const startGame = () => {
+    const todayClicks = log.filter((e) => e.date === todayKey() && isDone(e) && isClick(e)).sort((a, b) => a.ts - b.ts);
+    if (!todayClicks.length) return; // nothing logged today — silently no-op
+    setGameQueue(todayClicks.map((e) => ({ id: e.id, text: e.actionText || "" })));
+    setGameIdx(0);
+    setStage("game");
+  };
+  // devicemotion's listener is registered once (empty deps, see below) — same
+  // stale-closure problem startBalanceRevealRef already solves, same fix.
+  const startGameRef = useRef(() => {});
+  startGameRef.current = startGame;
+  // physics run imperatively on refs (no per-frame React re-render), same style as
+  // the LINE_MODE "tilt" sway elsewhere — only gameIdx (via setGameIdx) touches
+  // React state, and only once per target actually cleared.
+  const gameAreaRef = useRef(null);
+  const gamePaddleRef = useRef(null);
+  const gameBallRef = useRef(null);
+  const gamePaddleXRef = useRef(0.5); // 0..1 fraction of play-area width
+  const gameBallRef2 = useRef({ x: 0.5, y: 0.6, vx: 0, vy: 0 }); // ball physics state
+  const gameIdxRef = useRef(0);
+  gameIdxRef.current = gameIdx;
+  const gameQueueRef = useRef([]);
+  gameQueueRef.current = gameQueue;
+  const onGamePaddleMove = (clientX) => {
+    const el = gameAreaRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    if (!rect.width) return;
+    gamePaddleXRef.current = Math.max(0.08, Math.min(0.92, (clientX - rect.left) / rect.width));
+  };
+  useEffect(() => {
+    if (stage !== "game") return;
+    const PADDLE_W = 0.26, PADDLE_Y = 0.86, BALL_R_FRAC = 0.018, TARGET_Y = 0.24, TARGET_HALF_W = 0.3;
+    const launch = () => {
+      const ang = Math.PI * (0.28 + Math.random() * 0.44); // upward cone, never dead-flat
+      gameBallRef2.current = { x: 0.5, y: 0.62, vx: Math.cos(ang) * 0.00055, vy: -Math.abs(Math.sin(ang)) * 0.00055 };
+    };
+    launch();
+    let alive = true, hitArmed = true, raf = null, lastTs = 0;
+    const tick = (ts) => {
+      if (!alive) return;
+      const dt = lastTs ? Math.min(48, ts - lastTs) : 16;
+      lastTs = ts;
+      const st = gameBallRef2.current;
+      st.x += st.vx * dt;
+      st.y += st.vy * dt;
+      if (st.x < BALL_R_FRAC) { st.x = BALL_R_FRAC; st.vx = Math.abs(st.vx); }
+      if (st.x > 1 - BALL_R_FRAC) { st.x = 1 - BALL_R_FRAC; st.vx = -Math.abs(st.vx); }
+      if (st.y < BALL_R_FRAC) { st.y = BALL_R_FRAC; st.vy = Math.abs(st.vy); }
+      // paddle bounce — only while descending, so it can't re-trigger mid-bounce
+      if (st.vy > 0 && st.y > PADDLE_Y - 0.02 && st.y < PADDLE_Y + 0.03) {
+        if (Math.abs(st.x - gamePaddleXRef.current) < PADDLE_W / 2 + BALL_R_FRAC) {
+          st.vy = -Math.abs(st.vy);
+          st.vx += (st.x - gamePaddleXRef.current) * 0.0009;
+        }
+      }
+      // missed the paddle entirely — no penalty, just relaunch from centre
+      if (st.y > 1.05) launch();
+      // target band, armed/disarmed so a single pass through can only count once
+      const inTargetBand = Math.abs(st.y - TARGET_Y) < 0.055 && Math.abs(st.x - 0.5) < TARGET_HALF_W;
+      if (inTargetBand && hitArmed && st.vy < 0) {
+        hitArmed = false;
+        st.vy = Math.abs(st.vy);
+        const next = gameIdxRef.current + 1;
+        setGameIdx(next);
+        if (next >= gameQueueRef.current.length) {
+          alive = false;
+          setTimeout(() => resetFlow("report"), 550);
+          return;
+        }
+      } else if (!inTargetBand && st.y > TARGET_Y + 0.1) {
+        hitArmed = true;
+      }
+      const el = gameAreaRef.current;
+      const rect = el ? el.getBoundingClientRect() : null;
+      if (rect && rect.width && rect.height) {
+        if (gameBallRef.current) gameBallRef.current.style.transform =
+          `translate(${st.x * rect.width - BALL_R_FRAC * rect.width}px, ${st.y * rect.height - BALL_R_FRAC * rect.width}px)`;
+        if (gamePaddleRef.current) gamePaddleRef.current.style.left =
+          `${gamePaddleXRef.current * rect.width - (PADDLE_W * rect.width) / 2}px`;
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => { alive = false; if (raf) cancelAnimationFrame(raf); };
+  }, [stage]);
   // grid layout (post-playback): which activities' comments are toggled open —
   // closed by default, tap a row to reveal/hide (Maxence 17/07).
   const [reportExpanded, setReportExpanded] = useState(() => new Set());
@@ -1061,6 +1255,14 @@ function Throughline() {
   const [traceIdx, setTraceIdx] = useState(null);
   const traceRef = useRef(null);
   const traceDraggingRef = useRef(false);
+  // closing the rapport: hold the trace line and it retracts, same idiom as the
+  // hold-to-skip line elsewhere (Maxence 19/07 — shake now opens the hidden game
+  // instead, see devicemotion listener). A real drag (exploring segments) cancels
+  // the pending close, same movement-cancels-hold pattern as onLineDown/onLineMove.
+  const REPORT_HOLD_MS = 700;
+  const [reportHolding, setReportHolding] = useState(false);
+  const reportHoldTimer = useRef(null);
+  const reportHoldStartX = useRef(0);
   const [logOpen, setLogOpen] = useState(false);
   const [logText, setLogText] = useState("");
   const [logBusy, setLogBusy] = useState(false);
@@ -1193,12 +1395,14 @@ function Throughline() {
       if (lastMag != null) {
         const now = Date.now();
         if (Math.abs(mag - lastMag) > SHAKE_DELTA && now - lastShakeTs > COOLDOWN_MS) {
-          // on the rapport screen, a shake closes it (Maxence 17/07: replaces the
-          // hold-to-retract gesture — "le hold c'est pas beau") rather than
-          // triggering the balance reveal, which doesn't apply there.
+          // on the rapport screen, a shake launches the hidden game instead of the
+          // balance reveal, which doesn't apply there (Maxence 19/07 — closing the
+          // rapport moved to a hold-and-retract on the trace line itself, same
+          // idiom as the hold-to-skip elsewhere, "le hold c'est pas beau" 17/07
+          // objection was about a DIFFERENT retract shape, not the gesture itself).
           if (stageRef.current === "report") {
             lastShakeTs = now;
-            resetFlow();
+            startGameRef.current();
           } else {
             // tilt mode already shows the line's balance during a running session
             // (see sessionTiltRef) — a shake mid-session would fight the same
@@ -1347,7 +1551,7 @@ function Throughline() {
       medReminderShownRef.current = await store.get(NS("tlx_medReminderDate"));
       lastLoadDateRef.current = await store.get(NS("tlx_lastLoadDate"));
       if (!alive) return;
-      setActivities(a ?? SEED);
+      setActivities(migratePickerActions(a ?? SEED));
       setLog(l ?? []);
       setApiKey(k || "");
       if (hs && hs.date === todayKey()) { setHoldMs(hs.ms); setHoldDate(hs.date); } // same day → keep the accumulated penalty
@@ -1436,6 +1640,18 @@ function Throughline() {
     // than adding a dedicated prompt/button (Android needs no such call).
     if (typeof DeviceMotionEvent !== "undefined" && typeof DeviceMotionEvent.requestPermission === "function") {
       DeviceMotionEvent.requestPermission().catch(() => {});
+    }
+    // same piggyback for fullscreen: only a real user gesture can grant it, and this
+    // is the one that already exists — no dedicated button/UI added for it. Installed
+    // PWA already gets this via manifest display:"fullscreen"; this covers the plain
+    // browser-tab case. Guarded so re-tapping later in the day (stage stays "entry"
+    // until a pick starts) doesn't re-request pointlessly.
+    if (!document.fullscreenElement) {
+      try {
+        const el = document.documentElement;
+        const req = el.requestFullscreen || el.webkitRequestFullscreen;
+        if (req) req.call(el)?.catch?.(() => {});
+      } catch (e) {}
     }
     if (medReminderShownRef.current !== todayKey()) {
       medReminderShownRef.current = todayKey();
@@ -2421,6 +2637,7 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
       reportIdx, reportPhase, setReportIdx, setReportPhase,
       reportExpanded, setReportExpanded, reportFillPct,
       traceIdx, setTraceIdx,
+      gameQueue, gameIdx, startGame,
       debugNow: () => (_debugDate || new Date()).toString(),
     };
   });
@@ -2446,6 +2663,39 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
   // comments shown yet, silent until you can navigate), then hands over to the
   // REPORT_END_LAYOUT so any activity — and its full comment — can be revisited.
   // Closing goes back to the live line via resetFlow(), same door as everywhere else.
+  if (stage === "game") {
+    const cur = gameQueue[gameIdx];
+    const onGameDown = (e) => onGamePaddleMove(e.clientX ?? (e.touches && e.touches[0].clientX));
+    const onGameMove = (e) => onGamePaddleMove(e.clientX ?? (e.touches && e.touches[0].clientX));
+    return (
+      <div className="tl">
+        <style dangerouslySetInnerHTML={{ __html: css }} />
+        <div className="grain" />
+        <div ref={gameAreaRef}
+          onPointerDown={onGameDown} onPointerMove={onGameMove} onTouchStart={onGameDown} onTouchMove={onGameMove}
+          onContextMenu={(e) => e.preventDefault()}
+          style={{ position: "relative", width: "100%", height: "100vh", overflow: "hidden", touchAction: "none", userSelect: "none", WebkitUserSelect: "none" }}>
+          {/* one target at a time, centre screen — never a grid (un doigt, une
+              ligne, jamais de liste applies here too, Maxence 19/07) */}
+          {cur && (
+            <div key={cur.id} className="fade mono" style={{
+              position: "absolute", top: "24%", left: 0, right: 0, textAlign: "center",
+              fontSize: 11, letterSpacing: ".08em", color: C.bone, padding: "0 12%" }}>
+              {cur.text}
+            </div>
+          )}
+          {/* ball */}
+          <div ref={gameBallRef} style={{
+            position: "absolute", top: 0, left: 0, width: 14, height: 14, borderRadius: "50%",
+            background: C.bone, boxShadow: `0 0 10px ${C.bone}` }} />
+          {/* paddle — same visual language as the hero line elsewhere */}
+          <div ref={gamePaddleRef} style={{
+            position: "absolute", top: "86%", width: "26%", height: 4, background: C.bone, opacity: 0.9 }} />
+        </div>
+      </div>
+    );
+  }
+
   if (stage === "report") {
     // real completions only (isClick) — a free-log "note" entry (submitFreeLog) isn't
     // an activity done, it shouldn't take a share of the line.
@@ -2503,9 +2753,18 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
       const pct = Math.max(0, Math.min(100, ((clientX - rect.left) / rect.width) * 100));
       return Math.max(0, Math.min(segs.length - 1, Math.floor(pct / (100 / segs.length))));
     };
-    const onTraceDown = (e) => { traceDraggingRef.current = true; setTraceIdx(traceIndexFromX(e.clientX)); };
-    const onTraceMove = (e) => { if (traceDraggingRef.current) setTraceIdx(traceIndexFromX(e.clientX)); };
-    const onTraceEnd = () => { traceDraggingRef.current = false; setTraceIdx(null); };
+    const cancelReportHold = () => { if (reportHoldTimer.current) { clearTimeout(reportHoldTimer.current); reportHoldTimer.current = null; } setReportHolding(false); };
+    const onTraceDown = (e) => {
+      traceDraggingRef.current = true; setTraceIdx(traceIndexFromX(e.clientX));
+      reportHoldStartX.current = e.clientX;
+      setReportHolding(true);
+      reportHoldTimer.current = setTimeout(() => { reportHoldTimer.current = null; setReportHolding(false); resetFlow(); }, REPORT_HOLD_MS);
+    };
+    const onTraceMove = (e) => {
+      if (traceDraggingRef.current) setTraceIdx(traceIndexFromX(e.clientX));
+      if (reportHoldTimer.current && e.clientX != null && Math.abs(e.clientX - reportHoldStartX.current) > 8) cancelReportHold();
+    };
+    const onTraceEnd = () => { traceDraggingRef.current = false; setTraceIdx(null); cancelReportHold(); };
     // unified "what's shown above/below the line right now" — during playback or
     // spotlight nav it's the idx-driven segment; in trace it's whatever's touched
     // (or nothing, at rest).
@@ -2578,7 +2837,9 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                 onContextMenu={(e) => e.preventDefault()}
                 style={{ position: "relative", height: 44, width: "82%", margin: "0 auto",
                   display: "flex", alignItems: "center", cursor: "pointer",
-                  touchAction: "none", userSelect: "none", WebkitUserSelect: "none" }}>
+                  touchAction: "none", userSelect: "none", WebkitUserSelect: "none",
+                  transform: `scaleX(${reportHolding ? 0 : 1})`, transformOrigin: "center",
+                  transition: reportHolding ? `transform ${REPORT_HOLD_MS}ms linear` : "transform .3s cubic-bezier(.2,.7,.2,1)" }}>
                 {segs.map((s, i) => {
                   const active = traceIdx === i;
                   return (
