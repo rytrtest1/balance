@@ -3579,7 +3579,10 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
 
         {/* =================== FOOTER — save / load centered, reset tucked further below. no rule: the only line is the one in the centre. Stays on every tab including "now" (Maxence 12/07: not moved off it) — pushed below the fold instead via the "now" tab's full-viewport minHeight below, so opening the app shows only the line; scrolling down reveals this. =================== */}
         <div className="fade" style={{ marginTop: 72, textAlign: "center" }}>
-          <div style={{ display: "flex", justifyContent: "center", alignItems: "center", gap: 26 }}>
+          <div>
+            <button className="link" onClick={toggleOut}>{computePlace().toUpperCase()}</button>
+          </div>
+          <div style={{ marginTop: 14, display: "flex", justifyContent: "center", alignItems: "center", gap: 26 }}>
             <button className="link" onClick={shareBackup}>save</button>
             <label className="link" style={{ cursor: "pointer" }}>load
               <input type="file" accept="application/json,.json,text/plain,.txt" onChange={onFile} style={{ display: "none" }} />
@@ -3598,9 +3601,8 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
               {logBusy && <div className="mono" style={{ fontSize: 10, color: C.faint, marginTop: 10 }}>…</div>}
             </div>
           )}
-          <div style={{ marginTop: 14, display: "flex", justifyContent: "center", gap: 20 }}>
+          <div style={{ marginTop: 14 }}>
             <button className="link" onClick={() => setKeyOpen((o) => !o)}>key{apiKey ? " ·" : ""}</button>
-            <button className="link" onClick={toggleOut}>dehors{placeOverride() === "out" ? " ·" : ""}</button>
           </div>
           {keyOpen && (
             <div style={{ marginTop: 18, maxWidth: 320, marginLeft: "auto", marginRight: "auto" }}>
