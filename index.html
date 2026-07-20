@@ -2614,21 +2614,20 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
     setMsg("file downloaded"); setTimeout(() => setMsg(""), 1800);
   };
   const copy = async () => { try { await navigator.clipboard.writeText(exportText()); setMsg("copied to clipboard"); } catch { setMsg("copy failed — use the file"); } setTimeout(() => setMsg(""), 1800); };
-  // Best on phones: hand the backup file to the OS share sheet (Drive, email,
-  // Keep…). Falls back to a plain download where sharing files isn't supported.
   // manual "out" override for today — the clock can't know you're at the
   // airport on what would otherwise be a home day (Maxence 20/07). Toggling
   // re-reads computePlace() into state immediately so anything already showing
   // `place` (not re-calling computePlace() itself) updates without waiting for
-  // the next draw.
+  // the next draw. No toast (Maxence: "ça distrait, ça sert à rien") — the
+  // button's own label already reflects the new state instantly.
   const toggleOut = () => {
     const isOut = placeOverride() === "out";
     if (isOut) localStorage.removeItem("placeOverride");
     else localStorage.setItem("placeOverride", JSON.stringify({ place: "out", day: todayKey() }));
     setPlace(computePlace());
-    setMsg(isOut ? "retour à l'horloge" : "dehors pour aujourd'hui");
-    setTimeout(() => setMsg(""), 1800);
   };
+  // Best on phones: hand the backup file to the OS share sheet (Drive, email,
+  // Keep…). Falls back to a plain download where sharing files isn't supported.
   const shareBackup = async () => {
     // Share as .txt / text/plain: .json is NOT on Chrome's Web Share allowlist,
     // so canShare({files}) returns false for it and we'd silently fall to download
