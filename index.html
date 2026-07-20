@@ -2243,7 +2243,19 @@ Commentaire laissé après la session :
     // no separate button needed.
     else if (stage === "done") submitComment();
     else if (stage === "proposal") begin();
-    else if (stage === "running" && !paused) finish(); // resume before finishing — paused time shouldn't count
+    else if (stage === "running" && !paused) {
+      // album de la semaine: a plain tap on the hero line commits the current
+      // title and opens the next slot — the same action Enter already did on
+      // the title field (Maxence 20/07: tap-the-line is the one surface used
+      // for every other "move on" gesture in the app, Enter-only was easy to
+      // miss and broke that idiom). Falls through to a normal finish() the
+      // moment there's nothing left to advance — the trailing slot is empty,
+      // meaning "I'm done listening", not "one more title" — same guard
+      // advanceAlbumTitle already uses for a no-op swipe.
+      const albumHasNext = isAlbumActivity && (albumIdx < albumTitles.length - 1 || (albumTitles[albumIdx] && albumTitles[albumIdx].text.trim()));
+      if (albumHasNext) advanceAlbumTitle(1);
+      else finish(); // resume before finishing — paused time shouldn't count
+    }
   };
   // hold-to-skip is the one control surface for "not this" — it has to stay available
   // for the whole life of a session, not just before it starts (Maxence 17/07: was
