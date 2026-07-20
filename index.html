@@ -65,6 +65,21 @@ const daysBetween = (a, b) => Math.round((fromKey(b) - fromKey(a)) / 86400000);
 const fmtLong = (s) => fromKey(s).toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long" });
 const fmtHM = (d) => `${pad(d.getHours())}h${pad(d.getMinutes())}`;
 const uid = () => Math.random().toString(36).slice(2, 9);
+
+// manual place override — the "dehors" footer link toggles this for today
+// (Maxence 20/07: any user should be able to flip it, but it can't clutter the
+// épuré main screen — so it lives below the fold, same weight as save/load/key).
+// Persisted keyed to the logical day so it self-expires at the next 9h pivot
+// instead of needing an explicit clear — same "no verdict moment" shape as the
+// rest of the engine.
+function placeOverride() {
+  try {
+    const raw = localStorage.getItem("placeOverride");
+    if (!raw) return null;
+    const o = JSON.parse(raw);
+    return o.day === todayKey() ? o.place : null;
+  } catch { return null; }
+}
 const fmtMin = (m) => { if (!m) return "0m"; if (m < 60) return m + "m"; const h = Math.floor(m / 60), r = m % 60; return r ? `${h}h ${r}m` : `${h}h`; };
 
 // ---------- domains ----------
@@ -143,7 +158,14 @@ function isWorkShift(d = new Date()) {
   }
   return false;
 }
-const computePlace = (d = realNow()) => (isWorkShift(d) ? "work" : "home");
+const computePlace = (d) => {
+  if (d === undefined) {
+    const ov = placeOverride();
+    if (ov) return ov;
+    d = realNow();
+  }
+  return isWorkShift(d) ? "work" : "home";
+};
 // is a work shift starting tonight? (used to drop work-day-only activities like
 // tapis, which belongs to a free day, not the 1h home window before a shift)
 const isWorkDayToday = (d = realNow()) => isWorkShift(new Date(d.getFullYear(), d.getMonth(), d.getDate(), 21, 0, 0));
@@ -2594,6 +2616,19 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
   const copy = async () => { try { await navigator.clipboard.writeText(exportText()); setMsg("copied to clipboard"); } catch { setMsg("copy failed — use the file"); } setTimeout(() => setMsg(""), 1800); };
   // Best on phones: hand the backup file to the OS share sheet (Drive, email,
   // Keep…). Falls back to a plain download where sharing files isn't supported.
+  // manual "out" override for today — the clock can't know you're at the
+  // airport on what would otherwise be a home day (Maxence 20/07). Toggling
+  // re-reads computePlace() into state immediately so anything already showing
+  // `place` (not re-calling computePlace() itself) updates without waiting for
+  // the next draw.
+  const toggleOut = () => {
+    const isOut = placeOverride() === "out";
+    if (isOut) localStorage.removeItem("placeOverride");
+    else localStorage.setItem("placeOverride", JSON.stringify({ place: "out", day: todayKey() }));
+    setPlace(computePlace());
+    setMsg(isOut ? "retour à l'horloge" : "dehors pour aujourd'hui");
+    setTimeout(() => setMsg(""), 1800);
+  };
   const shareBackup = async () => {
     // Share as .txt / text/plain: .json is NOT on Chrome's Web Share allowlist,
     // so canShare({files}) returns false for it and we'd silently fall to download
@@ -3563,8 +3598,9 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
               {logBusy && <div className="mono" style={{ fontSize: 10, color: C.faint, marginTop: 10 }}>…</div>}
             </div>
           )}
-          <div style={{ marginTop: 14 }}>
+          <div style={{ marginTop: 14, display: "flex", justifyContent: "center", gap: 20 }}>
             <button className="link" onClick={() => setKeyOpen((o) => !o)}>key{apiKey ? " ·" : ""}</button>
+            <button className="link" onClick={toggleOut}>dehors{placeOverride() === "out" ? " ·" : ""}</button>
           </div>
           {keyOpen && (
             <div style={{ marginTop: 18, maxWidth: 320, marginLeft: "auto", marginRight: "auto" }}>
