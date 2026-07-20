@@ -1075,6 +1075,7 @@ function Throughline() {
   const holdStart = useRef(0);
   const holdStartX = useRef(0);
   const didHold = useRef(false);
+  const draggedRating = useRef(false); // ratingActive: did this press actually move, or was it a plain tap?
 
   // debug time override
   const [manualMin, setManualMin] = useState("");
@@ -2235,12 +2236,16 @@ Commentaire laissé après la session :
   // instead of the retract-and-skip gesture the user expects everywhere else).
   const canHold = stage === "proposal" || stage === "running" || stage === "done";
   const effHold = holdDate === todayKey() ? holdMs : BASE_HOLD_MS; // ignore a stale day if left open past midnight
-  // hero-line-as-rating-slider (16/07-d): on "done", for ANY recommandeur action
-  // (single item or the album's own final verdict — see `rating` state above), the
-  // main line stops being a tap-to-submit control and becomes a drag control instead,
-  // same centre-out magnitude read as setAlbumRatingFromPointer. Submitting is still
-  // Enter in the comment field just below (already wired, untouched) — no separate
-  // button needed, the line is purely the slider while in this state.
+  // hero-line-as-rating-slider (16/07-d, revised 20/07): on "done", for ANY
+  // recommandeur action (single item or the album's own final verdict — see
+  // `rating` state above), the main line reads drag vs tap: a real drag adjusts
+  // the rating live (same centre-out magnitude read as setAlbumRatingFromPointer),
+  // a plain tap (down/up with no meaningful travel) submits — same gesture the
+  // line uses everywhere else, just re-purposed here instead of being dead while
+  // ratingActive. Tapping again to "confirm" used to jump the rating to wherever
+  // that second tap landed instead (Maxence 20/07) since the old code set the
+  // rating unconditionally on pointer-down, before it could know the gesture
+  // would turn out to be a tap and not a drag.
   const ratingActive = stage === "done" && current && current.activity.kind === "recommandeur";
   const setRatingFromPointer = (clientX) => {
     const el = lineRef.current;
@@ -2253,12 +2258,11 @@ Commentaire laissé après la session :
   const onLineDown = (e) => {
     didHold.current = false;
     if (ratingActive) {
-      // the rating drag and hold-to-skip share the same pointer-down (17/07: skip
-      // used to be entirely unreachable here, canHold was true but this early
-      // return skipped past it) — set the rating immediately as before, but also
-      // arm the same skip timer; onLineMove cancels it the moment the pointer
+      // no setRatingFromPointer here anymore (see comment above) — the rating
+      // only moves once onLineMove sees real travel. Hold-to-skip is armed the
+      // same as before; onLineMove still cancels it the moment the pointer
       // actually travels, so a real drag never fires it, only a stationary hold.
-      setRatingFromPointer(e && e.clientX);
+      draggedRating.current = false;
       holdStartX.current = e && e.clientX != null ? e.clientX : 0;
       holdStart.current = Date.now();
       setHolding(true);
@@ -2285,18 +2289,22 @@ Commentaire laissé après la session :
   };
   const onLineMove = (e) => {
     if (!ratingActive) return;
-    setRatingFromPointer(e.clientX);
-    // more than a few px of travel means a rating drag, not a stationary hold —
-    // drop the pending skip so dragging the rating never also triggers it.
-    if (holdTimer.current && e && e.clientX != null && Math.abs(e.clientX - holdStartX.current) > 8) cancelHold();
+    // 8px is the same travel threshold used below to drop the pending hold-to-skip —
+    // below it, this still reads as a stationary press (a tap in progress), so the
+    // rating stays untouched; once crossed, it's a drag and every further move updates live.
+    if (!draggedRating.current && e && e.clientX != null && Math.abs(e.clientX - holdStartX.current) > 8) draggedRating.current = true;
+    if (draggedRating.current) setRatingFromPointer(e.clientX);
+    if (holdTimer.current && draggedRating.current) cancelHold();
   };
   const cancelHold = () => { if (holdTimer.current) { clearTimeout(holdTimer.current); holdTimer.current = null; } setHolding(false); };
   const onLineUp = () => {
     if (ratingActive) {
       const held = didHold.current;
       cancelHold(); // clear a still-pending skip timer (a drag/short press that never held long enough)
-      if (held) didHold.current = false; // skip already fired via the timeout above
-      return; // otherwise: value already set live by drag; no tap-to-submit here
+      if (held) { didHold.current = false; draggedRating.current = false; return; } // skip already fired via the timeout above
+      if (draggedRating.current) { draggedRating.current = false; return; } // value already set live by the drag — no submit yet, that's the next plain tap
+      submitComment(); // no travel at all: a plain tap confirms whatever rating is currently set
+      return;
     }
     const heldFor = holdStart.current ? Date.now() - holdStart.current : 0;
     cancelHold();
@@ -2305,7 +2313,7 @@ Commentaire laissé après la session :
     holdStart.current = 0;
     tapAction();
   };
-  const onLineCancel = () => { cancelHold(); didHold.current = false; holdStart.current = 0; };
+  const onLineCancel = () => { cancelHold(); didHold.current = false; draggedRating.current = false; holdStart.current = 0; };
 
   // ----- activity mutations -----
   const upd = (id, patch) => setActivities((arr) => arr.map((a) => (a.id === id ? { ...a, ...patch } : a)));
@@ -3373,7 +3381,7 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                         {showDoneHint && current && (() => {
                           const k = current.activity.kind;
                           const hint = k === "pipeline" ? "ton mot fait avancer la pièce dans le funnel"
-                            : k === "recommandeur" ? "glisse la ligne pour noter, ton mot nuance"
+                            : k === "recommandeur" ? "glisse la ligne pour noter, tape pour valider"
                             : k === "practice" ? "ton mot nourrit la mémoire de l'activité"
                             : null;
                           return hint ? <div className="mono" style={{ fontSize: 9, color: C.faint, marginTop: 14, letterSpacing: ".06em" }}>{hint}</div> : null;
