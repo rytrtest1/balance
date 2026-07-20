@@ -3329,14 +3329,9 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
 
                 {stage === "done" && (
                   <div className="fade">
-                    {/* the hero-line slider's number — same reasoning as the album mini-slider
-                        below: the fill alone never showed what value actually landed
-                        (Maxence 17/07). Shown regardless of sync state, since the rating itself
-                        is applied synchronously in submitComment, independent of the Claude
-                        round-trip. */}
-                    {ratingActive && (
-                      <div className="mono" style={{ fontSize: 11, color: C.faint, letterSpacing: ".08em", marginBottom: 14 }}>{rating}/100</div>
-                    )}
+                    {/* hero-line slider's number dropped (Maxence 20/07) — now that a plain
+                        tap confirms distinctly from a drag, the fill position on the line is
+                        legible enough on its own. */}
                     {(syncing || syncMsg) ? (
                       <div className="mono" style={{ fontSize: 11, color: C.bone, letterSpacing: ".06em", lineHeight: 1.6 }}>{syncMsg || "…"}</div>
                     ) : (
