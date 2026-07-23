@@ -882,7 +882,7 @@ async function generateReco(key, activity, action, log) {
   const recent = log
     .filter((e) => e.activityId === activity.id && isDone(e))
     .slice(-20)
-    .map((e) => e.claudeNote || e.note || e.actionText || "")
+    .map((e) => e.note || e.actionText || "")
     .filter(Boolean);
   const library = (activity.items || []).filter((it) => it.status === "doing").map((it) => it.text);
   const usesLibrary = !!action.itemId && library.length > 0;
@@ -1846,13 +1846,13 @@ ${ctx}
 Commentaire laissé après la session :
 « ${text} »
 
-Détermine où en est la pièce APRÈS cette session. new_stage = index (0 à ${last}) de l'étape courante : si une étape vient d'être finie, avance à la suivante, sinon garde l'étape. Cas particulier : si la session avait lieu SUR la dernière étape (${last} : ${(stages[last] || {}).text || "?"}) et que le commentaire indique qu'elle est terminée/réussie, new_stage = ${last + 1} — la pièce sort du funnel, terminée. Ne mets ${last + 1} QUE dans ce cas précis (jamais pour sauter directement d'une étape antérieure à la fin sans passer par la dernière étape elle-même). piece_name = nom court (existant, ou tiré du commentaire si fraîche). progressed = true si cette session a fait avancer concrètement la pièce (même sans changer d'étape — un chunk appris, une itération réelle), false si elle n'a rien fait gagner (rejoué sans progrès, session avortée, bloqué). note = une ligne qui distille ce qui a été fait.`;
+Détermine où en est la pièce APRÈS cette session. new_stage = index (0 à ${last}) de l'étape courante : si une étape vient d'être finie, avance à la suivante, sinon garde l'étape. Cas particulier : si la session avait lieu SUR la dernière étape (${last} : ${(stages[last] || {}).text || "?"}) et que le commentaire indique qu'elle est terminée/réussie, new_stage = ${last + 1} — la pièce sort du funnel, terminée. Ne mets ${last + 1} QUE dans ce cas précis (jamais pour sauter directement d'une étape antérieure à la fin sans passer par la dernière étape elle-même). piece_name = nom court (existant, ou tiré du commentaire si fraîche). progressed = true si cette session a fait avancer concrètement la pièce (même sans changer d'étape — un chunk appris, une itération réelle), false si elle n'a rien fait gagner (rejoué sans progrès, session avortée, bloqué).`;
     setSyncing(true); setSyncMsg("lecture du commentaire…");
     try {
       const out = await claudeJSON(key, prompt, {
         type: "object",
-        properties: { piece_name: { type: "string" }, new_stage: { type: "integer" }, progressed: { type: "boolean" }, note: { type: "string" } },
-        required: ["piece_name", "new_stage", "progressed", "note"],
+        properties: { piece_name: { type: "string" }, new_stage: { type: "integer" }, progressed: { type: "boolean" } },
+        required: ["piece_name", "new_stage", "progressed"],
         additionalProperties: false,
       });
       // ns can reach last+1 — that's the sentinel for "graduated out of the funnel",
@@ -1889,7 +1889,7 @@ Détermine où en est la pièce APRÈS cette session. new_stage = index (0 à ${
       // transition (e.g. a_piano.requireProgress gates its weekly target on this —
       // touching the piece isn't enough, but finishing the whole piece is too rare
       // a bar for a weekly cadence).
-      if (doneEntryId) setLog((L) => L.map((en) => (en.id === doneEntryId ? { ...en, note: text, claudeNote: out.note, finished: justFinished, progressed: !!out.progressed } : en)));
+      if (doneEntryId) setLog((L) => L.map((en) => (en.id === doneEntryId ? { ...en, finished: justFinished, progressed: !!out.progressed } : en)));
       setSyncMsg(`« ${out.piece_name} » → ${ns > last ? "terminé" : (stages[ns] || {}).text || "?"}`);
     } catch (err) {
       setSyncMsg("lecture impossible (" + (err.message || "erreur") + ") — commentaire gardé");
@@ -1921,12 +1921,12 @@ ${ctx}
 Ce qu'il a tapé :
 « ${text} »
 
-Détermine où en est la pièce APRÈS ce qui est décrit. new_stage = index (0 à ${last}) de l'étape courante : si une étape vient d'être finie, avance à la suivante, sinon garde l'étape (${live ? live.stage : 0} si le texte ne décrit pas d'avancée claire). Cas particulier : si le texte décrit une session sur la DERNIÈRE étape (${last} : ${(stages[last] || {}).text || "?"}) et qu'elle est terminée/réussie, new_stage = ${last + 1} — la pièce sort du funnel, terminée. Ne mets ${last + 1} QUE dans ce cas précis. piece_name = nom court (existant, ou tiré du texte si fraîche). progressed = true si le texte décrit un vrai pas en avant, false sinon. note = une ligne qui distille ce qui a été fait.`;
+Détermine où en est la pièce APRÈS ce qui est décrit. new_stage = index (0 à ${last}) de l'étape courante : si une étape vient d'être finie, avance à la suivante, sinon garde l'étape (${live ? live.stage : 0} si le texte ne décrit pas d'avancée claire). Cas particulier : si le texte décrit une session sur la DERNIÈRE étape (${last} : ${(stages[last] || {}).text || "?"}) et qu'elle est terminée/réussie, new_stage = ${last + 1} — la pièce sort du funnel, terminée. Ne mets ${last + 1} QUE dans ce cas précis. piece_name = nom court (existant, ou tiré du texte si fraîche). progressed = true si le texte décrit un vrai pas en avant, false sinon.`;
     try {
       const out = await claudeJSON(key, prompt, {
         type: "object",
-        properties: { piece_name: { type: "string" }, new_stage: { type: "integer" }, progressed: { type: "boolean" }, note: { type: "string" } },
-        required: ["piece_name", "new_stage", "progressed", "note"],
+        properties: { piece_name: { type: "string" }, new_stage: { type: "integer" }, progressed: { type: "boolean" } },
+        required: ["piece_name", "new_stage", "progressed"],
         additionalProperties: false,
       });
       const ns = Math.max(0, Math.min(last + 1, parseInt(out.new_stage)));
@@ -1945,94 +1945,59 @@ Détermine où en est la pièce APRÈS ce qui est décrit. new_stage = index (0 
         }
         return a2;
       }));
-      if (entryId) setLog((L) => L.map((en) => (en.id === entryId ? { ...en, claudeNote: out.note, finished: justFinished, progressed: !!out.progressed } : en)));
+      if (entryId) setLog((L) => L.map((en) => (en.id === entryId ? { ...en, finished: justFinished, progressed: !!out.progressed } : en)));
     } catch (err) {
       // the "done" entry is already logged (min/note) regardless — only the funnel
       // position fails to update this time, same fail-safe spirit as advanceViaClaude.
     }
   };
 
-  // ----- practice: the comment feeds the activity's living `note` (coaching memory:
-  // patterns, adjustments, observations). Claude rewrites the whole note integrating
-  // this session, and distils a one-line log note.
-  // NOT used for recommandeur (Film/Écoute/Cuisiner) — 13/07: this used to also
-  // rewrite `note` as a "taste profile" for recos, but for Cuisiner `note` holds engine
-  // rules (NO-GO list, meal-time windows, garniture logic), and a passing comment ("trop
-  // sucré") triggering a full LLM rewrite of that text risked silently corrupting it. The
-  // comment is still captured (submitComment always writes log.note regardless of kind) —
-  // recommandeur taste signal lives in items[] status instead, set explicitly by
-  // recoStatusViaClaude below (16/07 — was manual/conversational until now, see
-  // [[throughline-reco-library-vs-llm]] point 5), never by rewriting this free text.
+  // ----- practice: `note` and `observations` are two different kinds of field, never
+  // conflated (24/07 split — before this, coachViaClaude rewrote `note` itself, which
+  // for activities like Cuisiner meant a passing comment risked corrupting the engine
+  // rules living in that same field, see the old warning this replaced). `note` is
+  // mechanics — rules, constraints, structure — written only by Maxence/me in the
+  // editor, this function NEVER touches it, only reads it as fixed context.
+  // `observations` is the living memory this function grows: patterns, what works,
+  // tendencies noticed across sessions. NOT used for recommandeur (Film/Écoute/
+  // Cuisiner) — their taste signal lives in items[] status/rating instead, set
+  // synchronously in submitComment(), never by an LLM rewrite of free text.
   const coachViaClaude = async (key, text) => {
     const act = current.activity;
     const prompt = `Activité : « ${act.name} » (type: ${act.kind}, domaine: ${act.domain}).
 Action faite : « ${current.action.text} ».
-Le champ « note » de cette activité est une MÉMOIRE DE COACHING : patterns, ajustements, observations utiles pour les prochaines sessions.
 
-Note actuelle :
+Mécanique de l'activité (fixe — règles, contraintes, structure ; sert de contexte, ne la modifie jamais) :
 """
 ${act.note || "(vide)"}
+"""
+
+Le champ « observations » est une MÉMOIRE qui s'accumule : patterns, ce qui marche, tendances repérées au fil des sessions — distincte de la mécanique ci-dessus.
+
+Observations actuelles :
+"""
+${act.observations || "(vide)"}
 """
 
 Commentaire laissé après cette session :
 « ${text} »
 
-Réécris la note en y intégrant ce qu'apporte ce commentaire — garde ce qui reste pertinent, condense, n'efface pas l'historique utile. Garde une mémoire de coaching actionnable. updated_note = la note complète réécrite (concise). log_note = une ligne qui distille cette session.`;
+Réécris les observations en y intégrant ce qu'apporte ce commentaire — garde tout ce qui reste pertinent, ne raccourcis pas artificiellement pour économiser de la place. Ne retire que ce qui est vraiment obsolète ou remplacé par une observation plus récente. updated_observations = les observations complètes réécrites.`;
     setSyncing(true); setSyncMsg("lecture du commentaire…");
     try {
-      // maxTokens explicit here: the default (400) truncates mid-JSON once an
-      // activity's note has grown past a paragraph or two — Claude's completion
-      // gets cut off, JSON.parse then throws ("lecture impossible... erreur json"),
-      // while short-note activities pass fine. Found 10/07: the whole-note rewrite
-      // needs real headroom.
+      // maxTokens generous here (found 10/07: the default 400 truncates mid-JSON
+      // once observations grow past a paragraph, JSON.parse then throws). Set well
+      // above any size seen in practice — the API cost of the extra headroom is
+      // negligible, so there's no reason to keep this tight.
       const out = await claudeJSON(key, prompt, {
         type: "object",
-        properties: { updated_note: { type: "string" }, log_note: { type: "string" } },
-        required: ["updated_note", "log_note"],
+        properties: { updated_observations: { type: "string" } },
+        required: ["updated_observations"],
         additionalProperties: false,
-      }, 1600);
+      }, 4000);
       const aid = act.id;
-      setActivities((arr) => arr.map((a) => (a.id === aid ? { ...a, note: out.updated_note } : a)));
-      if (doneEntryId) setLog((L) => L.map((en) => (en.id === doneEntryId ? { ...en, note: text, claudeNote: out.log_note } : en)));
-      setSyncMsg("note coach mise à jour ✓");
-    } catch (err) {
-      setSyncMsg("lecture impossible (" + (err.message || "erreur") + ") — commentaire gardé");
-    } finally {
-      setSyncing(false);
-      setTimeout(() => { setSyncMsg(""); finishFlow(text); }, 2400);
-    }
-  };
-
-  // ----- recommandeur (Film/Musique/Cuisiner…): the drawn item keeps the PRECISE
-  // rating (0-100, from the hero-line slider) — no liked/neutral/disliked bucketing
-  // (Maxence 16/07, round 3: tried a 3-way status derived from the number first, he
-  // asked to remove it — the number itself IS the note, interpreting it later reads
-  // it together with the text comment rather than the app collapsing it into a label
-  // now). `item.rating` is set synchronously in submitComment() below, never gated on
-  // an API key or a Claude call succeeding. This function's only job is the
-  // qualitative nuance: turn the free-text comment into a distilled one-line note,
-  // same pattern as coachViaClaude — it never touches the rating or the item.
-  const recoNoteViaClaude = async (key, text) => {
-    const act = current.activity, action = current.action;
-    const item = (act.items || []).find((it) => it.id === action.itemId);
-    const prompt = `Un commentaire est laissé après une session de « ${act.name} » (domaine : ${act.domain}).
-
-Item : « ${item ? item.text : action.text} ». Note donnée sur le curseur : ${rating}/100 (déjà appliquée, ne la change pas).
-
-Commentaire laissé après la session :
-« ${text} »
-
-Écris une seule ligne qui nuance cet avis — le ressenti réel derrière le commentaire, pas juste répéter ou traduire la note chiffrée en mots. Condense, garde le ton d'origine.`;
-    setSyncing(true); setSyncMsg("lecture du commentaire…");
-    try {
-      const out = await claudeJSON(key, prompt, {
-        type: "object",
-        properties: { log_note: { type: "string" } },
-        required: ["log_note"],
-        additionalProperties: false,
-      }, 300);
-      if (doneEntryId) setLog((L) => L.map((en) => (en.id === doneEntryId ? { ...en, note: text, claudeNote: out.log_note } : en)));
-      setSyncMsg("commentaire affiné ✓");
+      setActivities((arr) => arr.map((a) => (a.id === aid ? { ...a, observations: out.updated_observations } : a)));
+      setSyncMsg("observations mises à jour ✓");
     } catch (err) {
       setSyncMsg("lecture impossible (" + (err.message || "erreur") + ") — commentaire gardé");
     } finally {
@@ -2078,21 +2043,22 @@ Commentaire laissé après la session :
         ? { ...a, items: (a.items || []).map((it) => (it.id === itemId ? { ...it, status: "done", rating } : it)) }
         : a)));
     }
-    // pipeline advances the piece, practice grows the coaching note, recommandeur (with
-    // a drawn item) already had its status set above — this Claude pass only refines
-    // the comment into a distilled note. Plain task, or a recommandeur draw with no
-    // item, just keeps the comment locally (log.note, patched above).
-    const wantsClaude = !!text && (kind === "pipeline" || kind === "practice" || isRecoWithItem);
+    // pipeline advances the piece, practice grows observations — recommandeur (with a
+    // drawn item, or without) already has everything it needs synchronously above
+    // (rating+status, or just log.note): no Claude round-trip for it (24/07 — removed
+    // recoNoteViaClaude, which only ever distilled a comment that was already fully
+    // captured in log.note verbatim, and was never read back anywhere in the app).
+    const wantsClaude = !!text && (kind === "pipeline" || kind === "practice");
     if (wantsClaude) {
       const key = (await store.get("tlx_apiKey")) || "";
-      if (key) { (kind === "pipeline" ? advanceViaClaude : isRecoWithItem ? recoNoteViaClaude : coachViaClaude)(key, text); return; }
-      setSyncMsg(kind === "pipeline" ? "pas de clé API — commentaire gardé, pièce non avancée" : isRecoWithItem ? "pas de clé API — note gardée telle quelle" : "pas de clé API — commentaire gardé, note non mise à jour");
+      if (key) { (kind === "pipeline" ? advanceViaClaude : coachViaClaude)(key, text); return; }
+      setSyncMsg(kind === "pipeline" ? "pas de clé API — commentaire gardé, pièce non avancée" : "pas de clé API — commentaire gardé, observations non mises à jour");
       setTimeout(() => { setSyncMsg(""); finishFlow(text); }, 2200);
       return;
     }
-    // task, or a recommandeur draw with no item: no Claude round-trip, but still show
-    // the same brief loading chip as pipeline/practice/reco so submitting a comment
-    // reads identically everywhere (Maxence 16/07 — écoute felt broken without it).
+    // task, or any recommandeur draw: no Claude round-trip, but still show the same
+    // brief loading chip as pipeline/practice so submitting a comment reads
+    // identically everywhere (Maxence 16/07 — écoute felt broken without it).
     if (text) {
       setSyncing(true); setSyncMsg("commentaire enregistré…");
       setTimeout(() => { setSyncing(false); setSyncMsg(""); finishFlow(text); }, 700);
@@ -3845,11 +3811,19 @@ function ActivityCard({ a, upd, del, addAction, editAction, delAction, addStage,
             <button className="link" onClick={() => { addItem(a.id, itemDraft); setItemDraft(""); }}>add</button>
           </div>
 
-          {/* note */}
-          <div className="lab" style={{ margin: "22px 0 8px" }}>note</div>
+          {/* note: mechanics only (rules, constraints, structure) — human-authored,
+              Claude never rewrites this field (24/07 split, see coachViaClaude). */}
+          <div className="lab" style={{ margin: "22px 0 8px" }}>note — mécanique (fixe)</div>
           <textarea className="in" rows={2} value={a.note} onChange={(e) => upd(a.id, { note: e.target.value })}
-            placeholder="anything the coach should know"
+            placeholder="règles, contraintes, structure — édité ici, jamais par Claude"
             style={{ fontSize: 14, fontWeight: 300, lineHeight: 1.5, fontStyle: a.note ? "normal" : "italic", color: a.note ? C.text : C.faint }} />
+
+          {/* observations: living memory, grown by coachViaClaude after each session
+              with a text comment — editable here only to prune, not the source. */}
+          <div className="lab" style={{ margin: "22px 0 8px" }}>observations — mémoire (écrite par Claude)</div>
+          <textarea className="in" rows={3} value={a.observations || ""} onChange={(e) => upd(a.id, { observations: e.target.value })}
+            placeholder="s'accumule après chaque session commentée — rien pour l'instant"
+            style={{ fontSize: 14, fontWeight: 300, lineHeight: 1.5, fontStyle: a.observations ? "normal" : "italic", color: a.observations ? C.text : C.faint }} />
         </div>
       )}
     </div>
