@@ -3059,7 +3059,11 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
   return (
     <div className="tl" key="main">
       <style dangerouslySetInnerHTML={{ __html: css }} />
-      <div className="grain" />
+      {/* grain texture is a deliberate filmic touch everywhere else, but its noise
+          pixels are never truly rgb(0,0,0) — exactly what ambient is trying to
+          avoid for OLED (Maxence 24/07: "je veux du noir pur pour oled"). Dropped
+          only while ambient is active; every other screen keeps it unchanged. */}
+      {!ambient && <div className="grain" />}
       <div className="wrap" onTouchStart={onTouchStart} onTouchEnd={onTouchEnd}>
 
 
