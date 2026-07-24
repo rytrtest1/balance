@@ -3213,6 +3213,12 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                     style={{ position: "relative", height: 44, width: "82%", margin: "0 auto",
                       display: "flex", justifyContent: "center", alignItems: "center",
                       overflow: "visible", cursor: "pointer", touchAction: ratingActive ? "none" : "manipulation", userSelect: "none", WebkitUserSelect: "none",
+                      // GPU-composited layer for the rotation (Maxence 24/07: a "staircase"
+                      // artifact instead of a clean diagonal on the swaying line) — without
+                      // this hint some renderers rasterize a rotated 2px-tall line on the CPU
+                      // at low quality (visibly stepped edges); promoting it to its own
+                      // compositor layer gets it anti-aliased properly.
+                      willChange: "transform", backfaceVisibility: "hidden",
                       // done: eases back to flat over .7s instead of snapping — finishing
                       // early used to leave it crooked one frame then jump straight, which
                       // read as abrupt (Maxence 16/07, round 6). Running keeps the tight
