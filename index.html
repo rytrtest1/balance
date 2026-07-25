@@ -66,47 +66,6 @@ const fmtLong = (s) => fromKey(s).toLocaleDateString(undefined, { weekday: "long
 const fmtHM = (d) => `${pad(d.getHours())}h${pad(d.getMinutes())}`;
 const uid = () => Math.random().toString(36).slice(2, 9);
 
-// real (tiny, quiet, non-zero) WAV loop for the MediaSession trick below —
-// a synthesized Web Audio stream piped via srcObject wasn't reliably treated
-// as real playback; a decoded static file is, same as an mp3 would be.
-function encodeWavPCM16(buffer) {
-  const numCh = buffer.numberOfChannels, len = buffer.length, sr = buffer.sampleRate;
-  const bytesPerSample = 2, blockAlign = numCh * bytesPerSample;
-  const dataSize = len * blockAlign;
-  const ab = new ArrayBuffer(44 + dataSize);
-  const v = new DataView(ab);
-  const writeStr = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
-  writeStr(0, "RIFF"); v.setUint32(4, 36 + dataSize, true); writeStr(8, "WAVE");
-  writeStr(12, "fmt "); v.setUint32(16, 16, true); v.setUint16(20, 1, true);
-  v.setUint16(22, numCh, true); v.setUint32(24, sr, true);
-  v.setUint32(28, sr * blockAlign, true); v.setUint16(32, blockAlign, true); v.setUint16(34, 16, true);
-  writeStr(36, "data"); v.setUint32(40, dataSize, true);
-  const chans = []; for (let c = 0; c < numCh; c++) chans.push(buffer.getChannelData(c));
-  let off = 44;
-  for (let i = 0; i < len; i++) {
-    for (let c = 0; c < numCh; c++) {
-      const s = Math.max(-1, Math.min(1, chans[c][i]));
-      v.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7fff, true);
-      off += 2;
-    }
-  }
-  return new Blob([ab], { type: "audio/wav" });
-}
-async function buildSilentLoopUrl() {
-  const OfflineCtx = window.OfflineAudioContext || window.webkitOfflineAudioContext;
-  if (!OfflineCtx) return null;
-  const sr = 8000, dur = 5;
-  const ctx = new OfflineCtx(1, sr * dur, sr);
-  const osc = ctx.createOscillator();
-  osc.frequency.value = 40;
-  const gain = ctx.createGain();
-  gain.gain.value = 0.02; // above Chromium's silent-stream detection threshold, still practically inaudible
-  osc.connect(gain).connect(ctx.destination);
-  osc.start();
-  const rendered = await ctx.startRendering();
-  return URL.createObjectURL(encodeWavPCM16(rendered));
-}
-
 // manual place override — the "dehors" footer link toggles this for today
 // (Maxence 20/07: any user should be able to flip it, but it can't clutter the
 // épuré main screen — so it lives below the fold, same weight as save/load/key).
@@ -1054,37 +1013,35 @@ function Throughline() {
   const stageRef = useRef(stage); // read fresh inside listeners below (media session, devicemotion, idle timer) — avoids stale closures
   stageRef.current = stage;
 
-  // 25/07 (table rase, 3e tentative) : retour au vrai MediaSession — l'objectif
-  // reste "comme un podcast Chrome" (titre/épisode + play/pause sur volet ET
-  // écran verrouillé), et la notification actionnable (tentative précédente)
-  // ne donnait que des boutons texte à dérouler, jamais accessibles verrouillé.
-  // Seul ingrédient jamais essayé jusqu'ici : `artwork` dans MediaMetadata —
-  // sans lui, Android peut refuser d'afficher le widget "now playing" riche
-  // même avec metadata+playbackState corrects. On réutilise les icônes déjà
-  // présentes pour le manifest.
+  // 25/07 (table rase, 4e tentative) : MediaSession marche bien sur son tel en
+  // général (confirmé avec un vrai podcast Captivate.fm) et il teste déjà en
+  // onglet Chrome normal (pas PWA installée) — donc ni le device/OS ni le mode
+  // d'ouverture ne sont en cause, forcément quelque chose dans notre setup
+  // précis. Dernier écart identifié avec un lecteur qui marche : eux servent un
+  // vrai fichier statique (URL http normale), nous générions le WAV à la volée
+  // en `blob:` via OfflineAudioContext. M. a confirmé par ailleurs qu'un silence
+  // numérique pur fonctionne très bien ailleurs (silence.wav ci-dessous en est
+  // un, littéralement — mêmes octets qu'un lasonotheque.org). Retour à un vrai
+  // fichier statique du dépôt, chargé par une URL normale comme n'importe quel
+  // asset (mis en cache par le service worker), plus aucune génération JS.
   const silentAudioRef = useRef(null);
   useEffect(() => {
     if (typeof window === "undefined") return;
-    let url = null, cancelled = false;
-    (async () => {
-      try {
-        url = await buildSilentLoopUrl();
-        if (!url || cancelled) return;
-        const el = document.createElement("audio");
-        el.src = url;
-        el.loop = true;
-        // le `loop` natif ne s'était pas honoré sur une source blob dans le
-        // WebView de M. (vu via chrome://media-internals: "Ended") — filet.
-        el.addEventListener("ended", () => {
-          try { el.currentTime = 0; el.play().catch(() => {}); } catch (e) {}
-        });
-        el.setAttribute("playsinline", "");
-        el.style.display = "none";
-        document.body.appendChild(el);
-        silentAudioRef.current = el;
-      } catch (e) {}
-    })();
-    return () => { cancelled = true; if (url) URL.revokeObjectURL(url); };
+    try {
+      const el = document.createElement("audio");
+      el.src = "./silence.wav";
+      el.loop = true;
+      // le `loop` natif ne s'était pas honoré sur une source blob dans le
+      // WebView de M. (vu via chrome://media-internals: "Ended") — filet
+      // gardé même sur fichier statique, coûte rien.
+      el.addEventListener("ended", () => {
+        try { el.currentTime = 0; el.play().catch(() => {}); } catch (e) {}
+      });
+      el.setAttribute("playsinline", "");
+      el.style.display = "none";
+      document.body.appendChild(el);
+      silentAudioRef.current = el;
+    } catch (e) {}
   }, []);
   useEffect(() => {
     if (!("mediaSession" in navigator)) return;
