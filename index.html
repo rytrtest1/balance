@@ -3233,6 +3233,18 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                 return (
                   <div ref={lineRef} onPointerDown={onLineDown} onPointerMove={onLineMove} onPointerUp={onLineUp} onPointerLeave={onLineCancel} onPointerCancel={onLineCancel}
                     onContextMenu={(e) => e.preventDefault()}
+                    // breathe (opacity pulse) lives on THIS wrapper, not on the inner track
+                    // (moved 24/07, bug #2 — "crénelage quand la ligne sway+breathe en même
+                    // temps"). The wrapper is the rotated element and already gets its own
+                    // 44px-tall GPU layer (willChange:transform below); keeping the pulse here
+                    // means the rotation is applied to that tall, anti-aliased layer. Putting
+                    // the opacity animation on the 2px-tall child instead pulled the child onto
+                    // its OWN ~2px layer, and rotating a 2px texture re-introduced the exact
+                    // staircase the willChange fix removes — so the two effects fought whenever
+                    // they ran together (ambient/entry + a shake-reveal sway). One layer, both
+                    // effects, no conflict. Only the track is visible at entry/ambient, so
+                    // pulsing the wrapper looks identical to pulsing the track.
+                    className={(stage === "entry" || ambient) && !holding ? "breathe" : ""}
                     style={{ position: "relative", height: 44, width: "82%", margin: "0 auto",
                       display: "flex", justifyContent: "center", alignItems: "center",
                       overflow: "visible", cursor: "pointer", touchAction: ratingActive ? "none" : "manipulation", userSelect: "none", WebkitUserSelect: "none",
@@ -3259,15 +3271,14 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                       // showing clicks-remaining, see startBalanceReveal).
                       ...(LINE_MODE === "tilt" && !ratingActive && !revealActiveRef.current ? { transform: `rotate(${tiltDeg}deg)`,
                         transition: stage === "done" ? "transform .7s cubic-bezier(.2,.7,.2,1)" : "transform .1s linear" } : {}) }}>
-                    {/* hollow track — inset, never touches the edges. Breathes on entry
-                        (always was) AND whenever ambient is active (Maxence 24/07: "le
-                        breathe veut dire 'touche-moi'" — the invitation should show up
-                        whichever stage ambient caught the app in, not just entry), bone-
-                        colored in both cases so the pulse is actually visible instead of
-                        the dim C.soft an ambient running/done/proposal line would
-                        otherwise keep. */}
-                    <div className={(stage === "entry" || ambient) && !holding ? "breathe" : ""}
-                      style={{ position: "absolute", left: 0, right: 0, top: "50%", height: 2, background: (stage === "entry" || ambient) ? C.bone : C.soft,
+                    {/* hollow track — inset, never touches the edges. The breathe pulse
+                        (entry + ambient, Maxence 24/07: "le breathe veut dire 'touche-moi'")
+                        now lives on the wrapper above, NOT here — a CSS opacity animation on
+                        this 2px child promoted it to its own thin layer, and rotating that
+                        2px texture re-crénelait the line whenever sway+breathe overlapped
+                        (bug #2). The bone/soft color still switches here so the pulsing wrapper
+                        actually has a visible bone stroke at entry/ambient. */}
+                    <div style={{ position: "absolute", left: 0, right: 0, top: "50%", height: 2, background: (stage === "entry" || ambient) ? C.bone : C.soft,
                         transform: `translateY(-50%) scaleX(${holding ? 0 : 1})`, transformOrigin: "center", transition: trackTransition }} />
                     {/* centre fill — grows symmetrically from the middle, overshoots the track when you go beyond.
                         LINE_MODE "tilt" skips this entirely: the tilt on the wrapper above is the only signal. */}
