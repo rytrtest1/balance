@@ -3120,12 +3120,22 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
         {/* =================== NOW =================== */}
         {/* full viewport height (not calc(100vh-150px) as before): guarantees the line is
             the only thing on screen at open — save/load/log/reset below only reach the
-            fold on scroll (Maxence 12/07: was visible without scrolling on his phone). */}
+            fold on scroll (Maxence 12/07: was visible without scrolling on his phone).
+            Centering fix (Maxence 24/07, bug #1 — "la vraie ligne pas alignée au logo
+            centré du splash"): (a) 100dvh, not 100vh, so the mobile URL bar's slice
+            isn't counted — the centre is the *visible* centre, not the tall-viewport one;
+            (b) marginTop cancels the .wrap's own 26px top padding so this block starts at
+            the true top of the screen instead of 26px below it — otherwise its centred
+            content (the line) sat ~26px low. Bottom controls (log/save/reset) stay in the
+            footer after this block, i.e. below the fold, out of the centred zone. */}
         {tab === "now" && (
-          <div style={{ display: "flex", flexDirection: "column", minHeight: "100vh" }}>
+          <div style={{ display: "flex", flexDirection: "column", minHeight: "100dvh", marginTop: -26 }}>
 
-            {/* the stage: instruction above, the living line as hero, controls below — vertically centered */}
-            <div style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "center", paddingBottom: 30 }}>
+            {/* the stage: instruction above, the living line as hero, controls below — vertically centered.
+                No paddingBottom here (removed 24/07, bug #1): the above/below blocks are already symmetric
+                (both minHeight 130 + a 30 margin toward the line), so any extra bottom padding just pushed
+                the line off-centre upward. With it gone the line sits exactly at the flex centre. */}
+            <div style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "center" }}>
 
               {/* ---------- above the line: the instruction ---------- */}
               {/* ambient (Maxence 24/07): stays mounted, just fades via opacity — slow
