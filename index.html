@@ -935,6 +935,12 @@ const css = `
 .tab.on .u{background:${C.bone}}
 .in{font-family:inherit;color:inherit;background:transparent;border:none;outline:none;width:100%}
 .in::placeholder{color:${C.faint}}
+/* masks a plain text input like a password field WITHOUT type=password — used for
+   the API key. type=password was the page's only login-ish field, and its mere
+   presence made the OS keyboard pop the "mots de passe sécurisés" bar over the
+   comment fields too (bug #4, Maxence 24/07). text-security keeps the key hidden
+   while looking like an ordinary text field, so no password-manager pairing. */
+.mask{-webkit-text-security:disc}
 .seg{font-family:var(--mono);font-size:10px;letter-spacing:.12em;text-transform:uppercase;padding:6px 12px;border:1px solid ${C.line};color:${C.mut};background:transparent;cursor:pointer;transition:all .18s}
 .seg.on{color:${C.bg};background:${C.bone};border-color:${C.bone}}
 .ghost{font-family:var(--mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;background:none;border:none;color:${C.faint};cursor:pointer;transition:color .2s}
@@ -3364,6 +3370,7 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                             gap: this and the slider just below read as one piece, not a form field
                             sitting over a separate control (Maxence 16/07, round 2). */}
                         <input className="in" value={curTitle.text} placeholder="titre écouté"
+                          autoComplete="off" name="titre"
                           onChange={(e) => { const v = e.target.value; setAlbumTitles((arr) => arr.map((t, i) => (i === albumIdx ? { ...t, text: v } : t))); }}
                           onKeyDown={(e) => { if (e.key === "Enter") advanceAlbumTitle(1); }}
                           style={{ fontFamily: "var(--mono)", fontSize: 13, fontWeight: 400, lineHeight: 1.55, letterSpacing: ".02em", textTransform: "lowercase",
@@ -3407,6 +3414,7 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                         once you actually type — a different register there read as inconsistent. */}
                     <div style={{ position: "relative", maxWidth: 320, margin: "54px auto 0" }}>
                       <input className="in" value={comment}
+                        autoComplete="off" name="comment-running"
                         onChange={(e) => setComment(e.target.value)}
                         onKeyDown={(e) => { if (e.key === "Enter") submitRunningComment(); }}
                         style={{ fontFamily: "var(--mono)", fontSize: 13, textAlign: "center", display: "block", color: C.text }} />
@@ -3466,6 +3474,7 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                             once the session already ended (round 6, was here since round 1). */}
                         <div style={{ position: "relative", maxWidth: 360, margin: "0 auto" }}>
                           <input className="in" value={comment}
+                            autoComplete="off" name="comment-done"
                             onChange={(e) => setComment(e.target.value)}
                             onKeyDown={(e) => { if (e.key === "Enter") submitComment(); }}
                             style={{ fontFamily: "var(--mono)", fontSize: 13, textAlign: "center", display: "block", color: C.text }} />
@@ -3703,6 +3712,7 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
           {logOpen && (
             <div style={{ marginTop: 18, maxWidth: 320, marginLeft: "auto", marginRight: "auto" }}>
               <input className="in" value={logText} placeholder="qu'as-tu fait ?"
+                autoComplete="off" name="freelog"
                 onChange={(e) => setLogText(e.target.value)}
                 onKeyDown={(e) => { if (e.key === "Enter") submitFreeLog(); }}
                 disabled={logBusy}
@@ -3715,7 +3725,8 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
           </div>
           {keyOpen && (
             <div style={{ marginTop: 18, maxWidth: 320, marginLeft: "auto", marginRight: "auto" }}>
-              <input className="in" type="password" value={apiKey} placeholder="anthropic api key — sk-ant-…"
+              <input className="in mask" value={apiKey} placeholder="anthropic api key — sk-ant-…"
+                autoComplete="off" autoCorrect="off" autoCapitalize="none" spellCheck={false} name="anthropic-key" inputMode="text"
                 onChange={(e) => setApiKey(e.target.value)}
                 style={{ fontSize: 12, textAlign: "center", borderBottom: `1px solid ${C.line}`, paddingBottom: 6 }} />
               <div style={{ display: "flex", justifyContent: "center", gap: 20, marginTop: 12 }}>
