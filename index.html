@@ -66,51 +66,6 @@ const fmtLong = (s) => fromKey(s).toLocaleDateString(undefined, { weekday: "long
 const fmtHM = (d) => `${pad(d.getHours())}h${pad(d.getMinutes())}`;
 const uid = () => Math.random().toString(36).slice(2, 9);
 
-// 25/07: replaced the live Web-Audio-oscillator-into-<audio srcObject> trick.
-// Notification permission alone didn't bring back lock-screen/notif controls,
-// so trying a different mechanism rather than tuning the same one further —
-// a synthetic MediaStream may just not be what Android's media-notification
-// code looks for. This renders one real (tiny, quiet, non-zero) audio buffer
-// once, encodes it as an actual WAV file, and hands that to <audio src> as a
-// normal decoded media resource, exactly like an mp3 would be.
-function encodeWavPCM16(buffer) {
-  const numCh = buffer.numberOfChannels, len = buffer.length, sr = buffer.sampleRate;
-  const bytesPerSample = 2, blockAlign = numCh * bytesPerSample;
-  const dataSize = len * blockAlign;
-  const ab = new ArrayBuffer(44 + dataSize);
-  const v = new DataView(ab);
-  const writeStr = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
-  writeStr(0, "RIFF"); v.setUint32(4, 36 + dataSize, true); writeStr(8, "WAVE");
-  writeStr(12, "fmt "); v.setUint32(16, 16, true); v.setUint16(20, 1, true);
-  v.setUint16(22, numCh, true); v.setUint32(24, sr, true);
-  v.setUint32(28, sr * blockAlign, true); v.setUint16(32, blockAlign, true); v.setUint16(34, 16, true);
-  writeStr(36, "data"); v.setUint32(40, dataSize, true);
-  const chans = []; for (let c = 0; c < numCh; c++) chans.push(buffer.getChannelData(c));
-  let off = 44;
-  for (let i = 0; i < len; i++) {
-    for (let c = 0; c < numCh; c++) {
-      const s = Math.max(-1, Math.min(1, chans[c][i]));
-      v.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7fff, true);
-      off += 2;
-    }
-  }
-  return new Blob([ab], { type: "audio/wav" });
-}
-async function buildSilentLoopUrl() {
-  const OfflineCtx = window.OfflineAudioContext || window.webkitOfflineAudioContext;
-  if (!OfflineCtx) return null;
-  const sr = 8000, dur = 5; // longer loop = fewer restart boundaries to trip over
-  const ctx = new OfflineCtx(1, sr * dur, sr);
-  const osc = ctx.createOscillator();
-  osc.frequency.value = 40;
-  const gain = ctx.createGain();
-  gain.gain.value = 0.02; // real, non-zero, still practically inaudible
-  osc.connect(gain).connect(ctx.destination);
-  osc.start();
-  const rendered = await ctx.startRendering();
-  return URL.createObjectURL(encodeWavPCM16(rendered));
-}
-
 // manual place override — the "dehors" footer link toggles this for today
 // (Maxence 20/07: any user should be able to flip it, but it can't clutter the
 // épuré main screen — so it lives below the fold, same weight as save/load/key).
@@ -1058,93 +1013,49 @@ function Throughline() {
   const stageRef = useRef(stage); // read fresh inside listeners below (media session, devicemotion, idle timer) — avoids stale closures
   stageRef.current = stage;
 
-  // "ligne présence" scoped down to what a PWA can actually do (Maxence 19/07):
-  // a real, near-silent, looping audio keeps a genuine OS Media Session alive, so
-  // the lock screen/notification shade gets real play/pause controls while a
-  // session runs — mapped straight onto the existing togglePause above, no new
-  // concept. Bonus (not the point, just true on his phone): on Samsung/One UI a
-  // live media session surfaces a small widget on the always-on display too,
-  // covering part of the original "visible screen-off" ask with zero native code.
-  // gain is near-zero, not exact 0 — some browsers filter genuinely-silent
-  // streams out of the rules that keep background audio/media-session alive.
-  const silentAudioRef = useRef(null);
+  // 25/07: abandoned the silent-audio/MediaSession trick entirely. Even once the
+  // audio genuinely looped (audible, confirmed by M.), Android never surfaced a
+  // lock-screen/notif media control from it — that path just doesn't work
+  // reliably on his device/browser. Different mechanism instead: a real,
+  // actionable Service Worker notification with Pause/Reprendre buttons. It
+  // doesn't depend on audio focus or media-session heuristics at all — it's the
+  // same primitive chat apps use for reply buttons in a notification. Trade-off:
+  // no AOD widget (that was tied to the media session specifically), but this
+  // is the reliable way to get an outside-the-app pause/resume.
+  const togglePauseRef = useRef(togglePause);
+  togglePauseRef.current = togglePause;
   useEffect(() => {
-    if (typeof window === "undefined") return;
-    let url = null, cancelled = false;
-    (async () => {
-      try {
-        url = await buildSilentLoopUrl();
-        if (!url || cancelled) return;
-        const el = document.createElement("audio");
-        el.src = url;
-        el.loop = true;
-        // 25/07: chrome://media-internals on his phone showed the player hitting
-        // "Ended" instead of looping — the native `loop` attribute isn't being
-        // honored (blob-URL source, Android WebView), so the media session dies
-        // ~1s in and lock-screen/notif controls never persist. Belt-and-suspenders:
-        // restart manually on "ended" too, since that's the actual failure mode.
-        el.addEventListener("ended", () => {
-          try { el.currentTime = 0; el.play().catch(() => {}); } catch (e) {}
-        });
-        // 24/07 (bug #5, "pause sans rouvrir l'app"): attach the element to the DOM.
-        // A detached <audio> plays, but several Android browsers won't keep an OS
-        // MediaSession (and its lock-screen / notif / AOD play-pause controls) alive
-        // unless the media element is actually in the document. Hidden + muted-to-UI,
-        // it just anchors the session so togglePause is reachable from outside the app.
-        el.setAttribute("playsinline", "");
-        el.style.display = "none";
-        document.body.appendChild(el);
-        silentAudioRef.current = el;
-      } catch (e) {}
-    })();
-    return () => { cancelled = true; if (url) URL.revokeObjectURL(url); };
+    if (!("serviceWorker" in navigator)) return;
+    const onMsg = (e) => {
+      if (e.data?.type === "balance-notif-action" && stageRef.current === "running") togglePauseRef.current();
+    };
+    navigator.serviceWorker.addEventListener("message", onMsg);
+    return () => navigator.serviceWorker.removeEventListener("message", onMsg);
   }, []);
   useEffect(() => {
-    if (!("mediaSession" in navigator)) return;
-    // extended 24/07 (Maxence: "et le always on display?") — the real AOD is
-    // still out of reach (no API lets a web app draw on it), but this media
-    // session trick is the one lever that DOES reach it, so widen its window to
-    // match: alive during a running session (as before) OR whenever ambient is
-    // showing (idle 30s+), not just during a session. Idle has no real activity
-    // to name, so metadata falls back to plain "BALANCE" and playbackState reads
-    // "paused" (nothing actually happening) rather than "playing".
-    const runningActive = stage === "running";
-    const active = runningActive || ambient;
-    const el = silentAudioRef.current;
-    if (runningActive && !paused) {
-      el?.play()?.catch(() => {});
-      try { navigator.mediaSession.playbackState = "playing"; } catch (e) {}
-    } else if (active) {
-      el?.play()?.catch(() => {});
-      try { navigator.mediaSession.playbackState = "paused"; } catch (e) {}
-    } else {
-      el?.pause?.();
-      try { navigator.mediaSession.playbackState = "none"; navigator.mediaSession.metadata = null; } catch (e) {}
-    }
-    if (active && typeof MediaMetadata !== "undefined") {
+    if (!("serviceWorker" in navigator) || typeof Notification === "undefined") return;
+    let cancelled = false;
+    (async () => {
+      const reg = await navigator.serviceWorker.ready.catch(() => null);
+      if (!reg || cancelled) return;
+      const running = stage === "running";
+      if (!running) {
+        reg.getNotifications({ tag: "balance-session" }).then((list) => list.forEach((n) => n.close())).catch(() => {});
+        return;
+      }
+      if (Notification.permission !== "granted") return;
       try {
-        navigator.mediaSession.metadata = new MediaMetadata({
-          title: (runningActive && current?.action?.text) || "BALANCE",
-          artist: (runningActive && current?.activity?.name) || "",
+        await reg.showNotification(current?.action?.text || "BALANCE en cours", {
+          tag: "balance-session",
+          body: current?.activity?.name || "",
+          silent: true,
+          requireInteraction: true,
+          actions: [paused ? { action: "resume", title: "reprendre" } : { action: "pause", title: "pause" }],
         });
       } catch (e) {}
-    }
-  }, [stage, paused, current, ambient]);
-  useEffect(() => {
-    if (!("mediaSession" in navigator)) return;
-    // play/pause only meaningful mid-session — a tap while merely ambient/idle
-    // (no real timer running) is a no-op rather than corrupting session state.
-    try {
-      navigator.mediaSession.setActionHandler("play", () => { if (stageRef.current === "running" && paused) togglePause(); });
-      navigator.mediaSession.setActionHandler("pause", () => { if (stageRef.current === "running" && !paused) togglePause(); });
-    } catch (e) {}
-    return () => {
-      try {
-        navigator.mediaSession.setActionHandler("play", null);
-        navigator.mediaSession.setActionHandler("pause", null);
-      } catch (e) {}
-    };
-  }, [paused]);
+    })();
+    return () => { cancelled = true; };
+  }, [stage, paused, current]);
 
   // long-press to swap: hold the line and it retracts to nothing, then re-picks.
   // there is no visible "something else" button — this is the only way to change.
@@ -2270,20 +2181,13 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
     setAlbumTitles(isAlbumActivity ? [{ id: uid(), text: "", rating: 50 }] : []);
     setAlbumIdx(0);
     setRunning(true); setStage("running");
-    // 25/07 (bug: aucun play/pause verrouillé/volet — hyp. de M. confirmée) : sur
-    // un PWA installé (WebAPK), Android 13+ exige la permission POST_NOTIFICATIONS
-    // pour afficher QUOI QUE CE SOIT côté notif, y compris le contrôle média
-    // système du MediaSession ci-dessous. L'app ne la demandait jamais → jamais
-    // affichée. On la demande ici, dans un vrai tap utilisateur, une seule fois.
+    // permission notif demandée ici (vrai tap utilisateur), une seule fois — la
+    // notification actionnable pause/reprendre (voir effect plus haut) en dépend.
     try {
       if (typeof Notification !== "undefined" && Notification.permission === "default") {
         Notification.requestPermission().catch(() => {});
       }
     } catch (e) {}
-    // renforce l'autoplay : play() directement dans ce geste utilisateur, en
-    // plus de l'effect stage/paused (certains WebView Android sont plus
-    // stricts que Chrome desktop sur ce qui compte comme "déclenché par un tap").
-    try { silentAudioRef.current?.play?.()?.catch(() => {}); } catch (e) {}
   };
 
   // auto-start (Maxence 16/07): a proposal used to need its own separate tap before

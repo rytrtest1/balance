@@ -1,6 +1,6 @@
 // throughline service worker — makes the app work offline after first load.
 // Bump CACHE when you change index.html or assets so phones pick up the update.
-const CACHE = "throughline-v70";
+const CACHE = "throughline-v71";
 const CORE = [
   "./",
   "./index.html",
@@ -55,6 +55,24 @@ self.addEventListener("fetch", (e) => {
         caches.open(CACHE).then((c) => c.put(e.request, copy)).catch(() => {});
         return res;
       }).catch(() => hit);
+    })
+  );
+});
+
+// 25/07: pause/reprendre depuis la notification de session (voir index.html) —
+// remplace l'astuce media-session/audio silencieux, qui ne déclenchait jamais
+// de contrôle système sur le tel de M. malgré un vrai son audible en boucle.
+self.addEventListener("notificationclick", (e) => {
+  const action = e.action || "toggle";
+  e.notification.close();
+  e.waitUntil(
+    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((list) => {
+      if (list.length > 0) {
+        list[0].focus();
+        list[0].postMessage({ type: "balance-notif-action", action });
+      } else {
+        self.clients.openWindow("./");
+      }
     })
   );
 });
