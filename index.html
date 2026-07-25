@@ -1037,6 +1037,14 @@ function Throughline() {
       const el = document.createElement("audio");
       el.srcObject = dest.stream;
       el.loop = true;
+      // 24/07 (bug #5, "pause sans rouvrir l'app"): attach the element to the DOM.
+      // A detached <audio> plays, but several Android browsers won't keep an OS
+      // MediaSession (and its lock-screen / notif / AOD play-pause controls) alive
+      // unless the media element is actually in the document. Hidden + muted-to-UI,
+      // it just anchors the session so togglePause is reachable from outside the app.
+      el.setAttribute("playsinline", "");
+      el.style.display = "none";
+      document.body.appendChild(el);
       silentAudioRef.current = el;
       silentCtxRef.current = ctx;
     } catch (e) {}
