@@ -1013,17 +1013,15 @@ function Throughline() {
   const stageRef = useRef(stage); // read fresh inside listeners below (media session, devicemotion, idle timer) — avoids stale closures
   stageRef.current = stage;
 
-  // 25/07 (table rase, 4e tentative) : MediaSession marche bien sur son tel en
-  // général (confirmé avec un vrai podcast Captivate.fm) et il teste déjà en
-  // onglet Chrome normal (pas PWA installée) — donc ni le device/OS ni le mode
-  // d'ouverture ne sont en cause, forcément quelque chose dans notre setup
-  // précis. Dernier écart identifié avec un lecteur qui marche : eux servent un
-  // vrai fichier statique (URL http normale), nous générions le WAV à la volée
-  // en `blob:` via OfflineAudioContext. M. a confirmé par ailleurs qu'un silence
-  // numérique pur fonctionne très bien ailleurs (silence.wav ci-dessous en est
-  // un, littéralement — mêmes octets qu'un lasonotheque.org). Retour à un vrai
-  // fichier statique du dépôt, chargé par une URL normale comme n'importe quel
-  // asset (mis en cache par le service worker), plus aucune génération JS.
+  // 25/07 : cause racine trouvée par repro isolée (mstest.html/mstest2.html,
+  // hors app). Rien à voir avec blob vs fichier statique, l'API MediaSession,
+  // l'audibilité ou un réglage Android — comparé à lasonotheque.org (qui
+  // marche sans aucun appel JS mediaSession), le seul écart qui comptait est
+  // la DURÉE réelle du clip : Chrome n'affiche le widget média système que
+  // passé un certain seuil de durée. Un clip de 2s bouclé manuellement ne le
+  // franchit jamais ; un clip de 60s réelles (avec `loop` natif, qui s'honore
+  // très bien sur un fichier statique) le franchit et le widget tient bien
+  // au-delà de la boucle. silence.wav est donc 60s de silence pur, pas 2s.
   const silentAudioRef = useRef(null);
   useEffect(() => {
     if (typeof window === "undefined") return;
