@@ -1508,13 +1508,27 @@ function Throughline() {
       clearTimeout(idleTimerRef.current);
       idleTimerRef.current = setTimeout(() => setAmbient(true), AMBIENT_IDLE_MS);
     };
+    // reopening the app always wakes it (bug #6, Maxence 24/07: "quitter le mode
+    // ambiant à la fermeture/réouverture"). A PWA task-switch backgrounds the page
+    // rather than killing it, so without this the idle timer could flip to ambient
+    // while hidden — or it was already ambient when he left — and reopening would
+    // land straight back in the faded ambient view instead of the live screen.
+    // On becoming visible we rearm (dismiss ambient + restart the 30s countdown);
+    // while hidden we cancel the timer so the fade only ever happens from real,
+    // on-screen idleness, never in the background.
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") rearm();
+      else clearTimeout(idleTimerRef.current);
+    };
     rearm();
     window.addEventListener("pointerdown", rearm, true);
     window.addEventListener("keydown", rearm, true);
+    document.addEventListener("visibilitychange", onVisibility);
     return () => {
       clearTimeout(idleTimerRef.current);
       window.removeEventListener("pointerdown", rearm, true);
       window.removeEventListener("keydown", rearm, true);
+      document.removeEventListener("visibilitychange", onVisibility);
     };
   }, []);
 
