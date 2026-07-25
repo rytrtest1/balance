@@ -27,7 +27,16 @@ function log(msg) {
   logEl.scrollTop = logEl.scrollHeight;
 }
 
+window.addEventListener("error", (e) => {
+  log("WINDOW ERROR: " + e.message + " @ " + e.filename + ":" + e.lineno);
+});
+window.addEventListener("unhandledrejection", (e) => {
+  log("UNHANDLED REJECTION: " + e.reason);
+});
+log("script start, readyState=" + document.readyState);
+
 const audio = document.getElementById("silent");
+log("audio element found: " + !!audio);
 audio.addEventListener("ended", () => {
   log("audio ended -> manual restart");
   audio.currentTime = 0;
@@ -47,43 +56,55 @@ if (!("mediaSession" in navigator)) {
   log("navigator.mediaSession available");
 }
 
-document.getElementById("startBtn").addEventListener("click", () => {
-  audio.play()
-    .then(() => log("audio.play() resolved"))
-    .catch((e) => log("audio.play() rejected: " + e));
+const startBtn = document.getElementById("startBtn");
+log("startBtn found: " + !!startBtn);
+startBtn.addEventListener("click", () => {
+  log("startBtn CLICKED");
+  try {
+    audio.play()
+      .then(() => log("audio.play() resolved"))
+      .catch((e) => log("audio.play() rejected: " + e));
 
-  if ("mediaSession" in navigator) {
-    navigator.mediaSession.metadata = new MediaMetadata({
-      title: "Test action",
-      artist: "Test activity",
-      album: "BALANCE minimal repro",
-      artwork: [
-        { src: "./icon-192.png", sizes: "192x192", type: "image/png" },
-        { src: "./icon-512.png", sizes: "512x512", type: "image/png" },
-      ],
-    });
-    navigator.mediaSession.playbackState = "playing";
-    navigator.mediaSession.setActionHandler("play", () => {
-      log("action handler: play");
-      audio.play();
+    if ("mediaSession" in navigator) {
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: "Test action",
+        artist: "Test activity",
+        album: "BALANCE minimal repro",
+        artwork: [
+          { src: "./icon-192.png", sizes: "192x192", type: "image/png" },
+          { src: "./icon-512.png", sizes: "512x512", type: "image/png" },
+        ],
+      });
       navigator.mediaSession.playbackState = "playing";
-    });
-    navigator.mediaSession.setActionHandler("pause", () => {
-      log("action handler: pause");
-      audio.pause();
-      navigator.mediaSession.playbackState = "paused";
-    });
-    log("mediaSession metadata + handlers set, playbackState=playing");
+      navigator.mediaSession.setActionHandler("play", () => {
+        log("action handler: play");
+        audio.play();
+        navigator.mediaSession.playbackState = "playing";
+      });
+      navigator.mediaSession.setActionHandler("pause", () => {
+        log("action handler: pause");
+        audio.pause();
+        navigator.mediaSession.playbackState = "paused";
+      });
+      log("mediaSession metadata + handlers set, playbackState=playing");
+    }
+  } catch (err) {
+    log("SYNC THROW in click handler: " + err.message);
   }
 });
 
-document.getElementById("stopBtn").addEventListener("click", () => {
+const stopBtn = document.getElementById("stopBtn");
+log("stopBtn found: " + !!stopBtn);
+stopBtn.addEventListener("click", () => {
+  log("stopBtn CLICKED");
   audio.pause();
   if ("mediaSession" in navigator) {
     navigator.mediaSession.playbackState = "paused";
   }
   log("stopped");
 });
+
+log("script fully executed, all listeners registered");
 </script>
 </body>
 </html>
