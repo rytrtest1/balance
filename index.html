@@ -1049,7 +1049,7 @@ function Throughline() {
       el?.play()?.catch(() => {});
       try { navigator.mediaSession.playbackState = "playing"; } catch (e) {}
     } else if (runningActive) {
-      el?.play()?.catch(() => {});
+      el?.pause?.();
       try { navigator.mediaSession.playbackState = "paused"; } catch (e) {}
     } else {
       el?.pause?.();
