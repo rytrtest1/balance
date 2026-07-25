@@ -66,14 +66,46 @@ const fmtLong = (s) => fromKey(s).toLocaleDateString(undefined, { weekday: "long
 const fmtHM = (d) => `${pad(d.getHours())}h${pad(d.getMinutes())}`;
 const uid = () => Math.random().toString(36).slice(2, 9);
 
-// glyphs for the session notification's action button (25/07) — Android
-// re-tints these from their alpha shape, so plain black-on-transparent is fine.
-const ICON_PAUSE = "data:image/svg+xml;base64," + btoa(
-  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><rect x="6" y="5" width="4" height="14"/><rect x="14" y="5" width="4" height="14"/></svg>'
-);
-const ICON_PLAY = "data:image/svg+xml;base64," + btoa(
-  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>'
-);
+// real (tiny, quiet, non-zero) WAV loop for the MediaSession trick below —
+// a synthesized Web Audio stream piped via srcObject wasn't reliably treated
+// as real playback; a decoded static file is, same as an mp3 would be.
+function encodeWavPCM16(buffer) {
+  const numCh = buffer.numberOfChannels, len = buffer.length, sr = buffer.sampleRate;
+  const bytesPerSample = 2, blockAlign = numCh * bytesPerSample;
+  const dataSize = len * blockAlign;
+  const ab = new ArrayBuffer(44 + dataSize);
+  const v = new DataView(ab);
+  const writeStr = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+  writeStr(0, "RIFF"); v.setUint32(4, 36 + dataSize, true); writeStr(8, "WAVE");
+  writeStr(12, "fmt "); v.setUint32(16, 16, true); v.setUint16(20, 1, true);
+  v.setUint16(22, numCh, true); v.setUint32(24, sr, true);
+  v.setUint32(28, sr * blockAlign, true); v.setUint16(32, blockAlign, true); v.setUint16(34, 16, true);
+  writeStr(36, "data"); v.setUint32(40, dataSize, true);
+  const chans = []; for (let c = 0; c < numCh; c++) chans.push(buffer.getChannelData(c));
+  let off = 44;
+  for (let i = 0; i < len; i++) {
+    for (let c = 0; c < numCh; c++) {
+      const s = Math.max(-1, Math.min(1, chans[c][i]));
+      v.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+      off += 2;
+    }
+  }
+  return new Blob([ab], { type: "audio/wav" });
+}
+async function buildSilentLoopUrl() {
+  const OfflineCtx = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+  if (!OfflineCtx) return null;
+  const sr = 8000, dur = 5;
+  const ctx = new OfflineCtx(1, sr * dur, sr);
+  const osc = ctx.createOscillator();
+  osc.frequency.value = 40;
+  const gain = ctx.createGain();
+  gain.gain.value = 0.02; // above Chromium's silent-stream detection threshold, still practically inaudible
+  osc.connect(gain).connect(ctx.destination);
+  osc.start();
+  const rendered = await ctx.startRendering();
+  return URL.createObjectURL(encodeWavPCM16(rendered));
+}
 
 // manual place override — the "dehors" footer link toggles this for today
 // (Maxence 20/07: any user should be able to flip it, but it can't clutter the
@@ -1022,51 +1054,79 @@ function Throughline() {
   const stageRef = useRef(stage); // read fresh inside listeners below (media session, devicemotion, idle timer) — avoids stale closures
   stageRef.current = stage;
 
-  // 25/07: abandoned the silent-audio/MediaSession trick entirely. Even once the
-  // audio genuinely looped (audible, confirmed by M.), Android never surfaced a
-  // lock-screen/notif media control from it — that path just doesn't work
-  // reliably on his device/browser. Different mechanism instead: a real,
-  // actionable Service Worker notification with Pause/Reprendre buttons. It
-  // doesn't depend on audio focus or media-session heuristics at all — it's the
-  // same primitive chat apps use for reply buttons in a notification. Trade-off:
-  // no AOD widget (that was tied to the media session specifically), but this
-  // is the reliable way to get an outside-the-app pause/resume.
-  const togglePauseRef = useRef(togglePause);
-  togglePauseRef.current = togglePause;
+  // 25/07 (table rase, 3e tentative) : retour au vrai MediaSession — l'objectif
+  // reste "comme un podcast Chrome" (titre/épisode + play/pause sur volet ET
+  // écran verrouillé), et la notification actionnable (tentative précédente)
+  // ne donnait que des boutons texte à dérouler, jamais accessibles verrouillé.
+  // Seul ingrédient jamais essayé jusqu'ici : `artwork` dans MediaMetadata —
+  // sans lui, Android peut refuser d'afficher le widget "now playing" riche
+  // même avec metadata+playbackState corrects. On réutilise les icônes déjà
+  // présentes pour le manifest.
+  const silentAudioRef = useRef(null);
   useEffect(() => {
-    if (!("serviceWorker" in navigator)) return;
-    const onMsg = (e) => {
-      if (e.data?.type === "balance-notif-action" && stageRef.current === "running") togglePauseRef.current();
-    };
-    navigator.serviceWorker.addEventListener("message", onMsg);
-    return () => navigator.serviceWorker.removeEventListener("message", onMsg);
-  }, []);
-  useEffect(() => {
-    if (!("serviceWorker" in navigator) || typeof Notification === "undefined") return;
-    let cancelled = false;
+    if (typeof window === "undefined") return;
+    let url = null, cancelled = false;
     (async () => {
-      const reg = await navigator.serviceWorker.ready.catch(() => null);
-      if (!reg || cancelled) return;
-      const running = stage === "running";
-      if (!running) {
-        reg.getNotifications({ tag: "balance-session" }).then((list) => list.forEach((n) => n.close())).catch(() => {});
-        return;
-      }
-      if (Notification.permission !== "granted") return;
       try {
-        await reg.showNotification(current?.action?.text || "BALANCE en cours", {
-          tag: "balance-session",
-          body: current?.activity?.name || "",
-          silent: true,
-          requireInteraction: true,
-          actions: [paused
-            ? { action: "resume", title: "reprendre", icon: ICON_PLAY }
-            : { action: "pause", title: "pause", icon: ICON_PAUSE }],
+        url = await buildSilentLoopUrl();
+        if (!url || cancelled) return;
+        const el = document.createElement("audio");
+        el.src = url;
+        el.loop = true;
+        // le `loop` natif ne s'était pas honoré sur une source blob dans le
+        // WebView de M. (vu via chrome://media-internals: "Ended") — filet.
+        el.addEventListener("ended", () => {
+          try { el.currentTime = 0; el.play().catch(() => {}); } catch (e) {}
         });
+        el.setAttribute("playsinline", "");
+        el.style.display = "none";
+        document.body.appendChild(el);
+        silentAudioRef.current = el;
       } catch (e) {}
     })();
-    return () => { cancelled = true; };
+    return () => { cancelled = true; if (url) URL.revokeObjectURL(url); };
+  }, []);
+  useEffect(() => {
+    if (!("mediaSession" in navigator)) return;
+    const runningActive = stage === "running";
+    const el = silentAudioRef.current;
+    if (runningActive && !paused) {
+      el?.play()?.catch(() => {});
+      try { navigator.mediaSession.playbackState = "playing"; } catch (e) {}
+    } else if (runningActive) {
+      el?.play()?.catch(() => {});
+      try { navigator.mediaSession.playbackState = "paused"; } catch (e) {}
+    } else {
+      el?.pause?.();
+      try { navigator.mediaSession.playbackState = "none"; navigator.mediaSession.metadata = null; } catch (e) {}
+    }
+    if (runningActive && typeof MediaMetadata !== "undefined") {
+      try {
+        navigator.mediaSession.metadata = new MediaMetadata({
+          title: current?.action?.text || "BALANCE",
+          artist: current?.activity?.name || "",
+          album: "BALANCE",
+          artwork: [
+            { src: "./icon-192.png", sizes: "192x192", type: "image/png" },
+            { src: "./icon-512.png", sizes: "512x512", type: "image/png" },
+          ],
+        });
+      } catch (e) {}
+    }
   }, [stage, paused, current]);
+  useEffect(() => {
+    if (!("mediaSession" in navigator)) return;
+    try {
+      navigator.mediaSession.setActionHandler("play", () => { if (stageRef.current === "running" && paused) togglePause(); });
+      navigator.mediaSession.setActionHandler("pause", () => { if (stageRef.current === "running" && !paused) togglePause(); });
+    } catch (e) {}
+    return () => {
+      try {
+        navigator.mediaSession.setActionHandler("play", null);
+        navigator.mediaSession.setActionHandler("pause", null);
+      } catch (e) {}
+    };
+  }, [paused]);
 
   // long-press to swap: hold the line and it retracts to nothing, then re-picks.
   // there is no visible "something else" button — this is the only way to change.
@@ -1398,6 +1458,12 @@ function Throughline() {
   // lastStartDelayRef for finish() to attach to the completed log entry.
   const proposedAtRef = useRef(null);
   const lastStartDelayRef = useRef(null);
+  // undo support (see undoLast()): snapshot of a pipeline's items right before
+  // finish() logs a session on it, so undo can restore them even if advanceViaClaude
+  // already moved the piece by the time "annuler" is tapped; cancelledEntryIdsRef
+  // stops that same in-flight call from re-applying the move after undo already ran.
+  const pipelineUndoRef = useRef(null);
+  const cancelledEntryIdsRef = useRef(new Set());
 
   // 16/07: rewritten after the CSS-animation→CSS-transition handoff (removing the
   // "sway" class mid-swing while starting a transition to rotate(0)) kept producing a
@@ -1937,6 +2003,9 @@ Détermine où en est la pièce APRÈS cette session. new_stage = index (0 à ${
       // itself reporting done), never a multi-stage skip.
       const justFinished = ns > last && prevStage <= last;
       const justGraduated = act.graduatesTo && justFinished;
+      // undone while this was in flight (see undoLast()) — the entry's gone and
+      // pipelineUndoRef already restored the pre-session items, don't re-apply the move.
+      if (cancelledEntryIdsRef.current.has(doneEntryId)) { setSyncing(false); return; }
       setActivities((arr) => arr.map((a) => {
         if (a.id === aid) {
           let items = a.items || [];
@@ -2192,13 +2261,10 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
     setAlbumTitles(isAlbumActivity ? [{ id: uid(), text: "", rating: 50 }] : []);
     setAlbumIdx(0);
     setRunning(true); setStage("running");
-    // permission notif demandée ici (vrai tap utilisateur), une seule fois — la
-    // notification actionnable pause/reprendre (voir effect plus haut) en dépend.
-    try {
-      if (typeof Notification !== "undefined" && Notification.permission === "default") {
-        Notification.requestPermission().catch(() => {});
-      }
-    } catch (e) {}
+    // renforce l'autoplay : play() directement dans ce vrai tap utilisateur, en
+    // plus de l'effect stage/paused (certains WebView Android sont plus stricts
+    // que Chrome desktop sur ce qui compte comme "déclenché par un tap").
+    try { silentAudioRef.current?.play?.()?.catch(() => {}); } catch (e) {}
   };
 
   // auto-start (Maxence 16/07): a proposal used to need its own separate tap before
@@ -2243,6 +2309,20 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
     }
     if (current.action.deferredReminder) {
       scheduleReminder(current.action.deferredReminder.text, current.action.deferredReminder.afterMin);
+    }
+    // undo snapshot — see pipelineUndoRef declaration. Taken here, before any
+    // funnel move exists, so undoLast() can restore it whether or not
+    // advanceViaClaude has run yet by the time "annuler" is tapped.
+    if (current.activity.kind === "pipeline") {
+      const other = current.activity.graduatesTo ? activities.find((a) => a.id === current.activity.graduatesTo) : null;
+      pipelineUndoRef.current = {
+        entryId: e.id, aid,
+        prevItems: current.activity.items || [],
+        graduatesTo: current.activity.graduatesTo || null,
+        prevGraduateItems: other ? (other.items || []) : null,
+      };
+    } else {
+      pipelineUndoRef.current = null;
     }
     setDoneEntryId(e.id);
     // Album de la semaine (item 5): each title noted during the session gets its own
@@ -2744,22 +2824,30 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
     const r = new FileReader(); r.onload = () => applyImport(String(r.result)); r.readAsText(f); ev.target.value = "";
   };
   // undo a bad tap (Maxence 25/07: logged Erasure as done, hadn't actually written
-  // anything — no way to fix it except editing the raw save file by hand). Only
-  // targets the most recent real completion (isClick), within a short window so
-  // this never lingers as a standing "annuler" fixture on the entry screen — it's
-  // for catching a mistake right after it happens, not an editable history.
-  // Doesn't revert a pipeline's stage/items — the window is short enough that in
-  // practice the piece hasn't been advanced yet (that only happens once the
-  // after-session comment round-trips through advanceViaClaude).
-  const UNDO_WINDOW_MS = 15 * 60 * 1000;
-  const lastClickEntry = log.filter(isClick).reduce((x, y) => (!x || y.ts > x.ts ? y : x), null);
-  const canUndoLast = !!lastClickEntry && (realNow().getTime() - lastClickEntry.ts) < UNDO_WINDOW_MS;
-  const undoLastLabel = canUndoLast ? (activities.find((a) => a.id === lastClickEntry.activityId) || {}).name : "";
+  // anything — no way to fix it except editing the raw save file by hand). Lives
+  // only on the "done" screen (see stage === "done" render below) — gone the moment
+  // the flow returns to the waiting screen, by design (M. 25/07: not a standing
+  // fixture on the entry screen, just a way to catch a mistake before it's final).
+  // Reverts the pipeline move too if one already happened (advanceViaClaude), via
+  // the snapshot finish() takes in pipelineUndoRef before logging the session.
   const undoLast = () => {
-    if (!lastClickEntry) return;
-    const id = lastClickEntry.id, aid = lastClickEntry.activityId;
+    if (!doneEntryId || !current) return;
+    const id = doneEntryId, act = current.activity;
+    cancelledEntryIdsRef.current.add(id);
     setLog((L) => L.filter((en) => en.id !== id && en.parentId !== id));
-    setActivities((arr) => arr.map((a) => (a.id === aid && a.kind === "task" ? { ...a, done: false } : a)));
+    if (act.kind === "task") {
+      setActivities((arr) => arr.map((a) => (a.id === act.id ? { ...a, done: false } : a)));
+    }
+    const snap = pipelineUndoRef.current;
+    if (snap && snap.entryId === id) {
+      setActivities((arr) => arr.map((a) => {
+        if (a.id === snap.aid) return { ...a, items: snap.prevItems };
+        if (snap.graduatesTo && a.id === snap.graduatesTo) return { ...a, items: snap.prevGraduateItems };
+        return a;
+      }));
+      pipelineUndoRef.current = null;
+    }
+    resetFlow("entry");
     setMsg("annulé"); setTimeout(() => setMsg(""), 1500);
   };
   const resetAll = () => {
@@ -3342,15 +3430,6 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                   </div>
                 )}
 
-                {/* short-lived undo for a bad tap — see undoLast() */}
-                {stage === "entry" && canUndoLast && (
-                  <div className="fade">
-                    <button className="link" style={{ fontSize: 11, color: C.faint }} onClick={undoLast}>
-                      annuler {undoLastLabel}
-                    </button>
-                  </div>
-                )}
-
                 {/* rapport button — unlocks itself once today's objective is reached,
                     replacing the old "type rapport to open it" discovery mechanic
                     (Maxence 19/07: a button is more direct than typing a keyword by
@@ -3471,6 +3550,13 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
 
                 {stage === "done" && (
                   <div className="fade">
+                    {/* undo — only reachable here, gone the instant the flow returns to
+                        the waiting screen (see undoLast()). */}
+                    {doneEntryId && (
+                      <div style={{ marginBottom: 14 }}>
+                        <button className="link" style={{ fontSize: 11, color: C.faint }} onClick={undoLast}>annuler</button>
+                      </div>
+                    )}
                     {/* hero-line slider's number dropped (Maxence 20/07) — now that a plain
                         tap confirms distinctly from a drag, the fill position on the line is
                         legible enough on its own. */}
