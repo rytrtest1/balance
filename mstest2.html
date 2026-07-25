@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>MediaSession test 2 - duration + explicit API isolation</title>
+<style>
+  body { font-family: sans-serif; background: #111; color: #eee; padding: 24px; }
+  button { font-size: 18px; padding: 14px 20px; margin: 6px 0; display: block; width: 100%; }
+  h2 { margin-top: 28px; border-top: 1px solid #444; padding-top: 16px; }
+  #log { white-space: pre-wrap; font-family: monospace; font-size: 11px; background: #000; padding: 8px; margin-top: 16px; max-height: 40vh; overflow-y: auto; }
+</style>
+</head>
+<body>
+<h1>Test 2: 60s duration, no-loop</h1>
+<p>Compare against lasonotheque's own approach: real 60s file, no <code>loop</code>, no JS mediaSession calls at all for Player A. Player B adds the explicit API on the same file.</p>
+
+<h2>Player A — bare &lt;audio&gt;, NO mediaSession JS at all</h2>
+<audio id="audioA" src="./silence60.wav" preload="metadata"></audio>
+<button id="btnA">Play/Pause A (bare, Chrome default only)</button>
+
+<h2>Player B — same 60s file, WITH explicit mediaSession API</h2>
+<audio id="audioB" src="./silence60.wav" preload="metadata"></audio>
+<button id="btnB">Play/Pause B (explicit mediaSession)</button>
+
+<div id="log"></div>
+
+<script>
+const logEl = document.getElementById("log");
+function log(msg) {
+  const line = `[${new Date().toISOString().split("T")[1].slice(0,12)}] ${msg}`;
+  console.log(line);
+  logEl.textContent += line + "\n";
+  logEl.scrollTop = logEl.scrollHeight;
+}
+window.addEventListener("error", (e) => log("WINDOW ERROR: " + e.message));
+window.addEventListener("unhandledrejection", (e) => log("UNHANDLED REJECTION: " + e.reason));
+
+const audioA = document.getElementById("audioA");
+const audioB = document.getElementById("audioB");
+[audioA, audioB].forEach((el, i) => {
+  const name = i === 0 ? "A" : "B";
+  el.addEventListener("play", () => log(name + ": play event"));
+  el.addEventListener("pause", () => log(name + ": pause event"));
+  el.addEventListener("ended", () => log(name + ": ended event (no manual restart in this test)"));
+  el.addEventListener("loadedmetadata", () => log(name + ": loadedmetadata, duration=" + el.duration));
+  el.addEventListener("error", () => log(name + ": error " + JSON.stringify(el.error)));
+});
+
+document.getElementById("btnA").addEventListener("click", () => {
+  log("btnA clicked, audioA.paused=" + audioA.paused);
+  if (audioA.paused) {
+    audioA.play().then(() => log("A: play() resolved")).catch((e) => log("A: play() rejected: " + e));
+  } else {
+    audioA.pause();
+  }
+});
+
+document.getElementById("btnB").addEventListener("click", () => {
+  log("btnB clicked, audioB.paused=" + audioB.paused);
+  if (audioB.paused) {
+    audioB.play().then(() => log("B: play() resolved")).catch((e) => log("B: play() rejected: " + e));
+    if ("mediaSession" in navigator) {
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: "Test action B",
+        artist: "Test activity B",
+        album: "BALANCE mstest2",
+        artwork: [
+          { src: "./icon-192.png", sizes: "192x192", type: "image/png" },
+          { src: "./icon-512.png", sizes: "512x512", type: "image/png" },
+        ],
+      });
+      navigator.mediaSession.playbackState = "playing";
+      navigator.mediaSession.setActionHandler("play", () => {
+        log("B action handler: play");
+        audioB.play();
+        navigator.mediaSession.playbackState = "playing";
+      });
+      navigator.mediaSession.setActionHandler("pause", () => {
+        log("B action handler: pause");
+        audioB.pause();
+        navigator.mediaSession.playbackState = "paused";
+      });
+      log("B: mediaSession metadata + handlers set");
+    }
+  } else {
+    audioB.pause();
+    if ("mediaSession" in navigator) {
+      navigator.mediaSession.playbackState = "paused";
+    }
+  }
+});
+
+log("script ready. Test A first (bare), lock screen, check. Then unlock, stop A, test B (explicit API), lock screen, check.");
+</script>
+</body>
+</html>
