@@ -66,6 +66,51 @@ const fmtLong = (s) => fromKey(s).toLocaleDateString(undefined, { weekday: "long
 const fmtHM = (d) => `${pad(d.getHours())}h${pad(d.getMinutes())}`;
 const uid = () => Math.random().toString(36).slice(2, 9);
 
+// 25/07: replaced the live Web-Audio-oscillator-into-<audio srcObject> trick.
+// Notification permission alone didn't bring back lock-screen/notif controls,
+// so trying a different mechanism rather than tuning the same one further —
+// a synthetic MediaStream may just not be what Android's media-notification
+// code looks for. This renders one real (tiny, quiet, non-zero) audio buffer
+// once, encodes it as an actual WAV file, and hands that to <audio src> as a
+// normal decoded media resource, exactly like an mp3 would be.
+function encodeWavPCM16(buffer) {
+  const numCh = buffer.numberOfChannels, len = buffer.length, sr = buffer.sampleRate;
+  const bytesPerSample = 2, blockAlign = numCh * bytesPerSample;
+  const dataSize = len * blockAlign;
+  const ab = new ArrayBuffer(44 + dataSize);
+  const v = new DataView(ab);
+  const writeStr = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+  writeStr(0, "RIFF"); v.setUint32(4, 36 + dataSize, true); writeStr(8, "WAVE");
+  writeStr(12, "fmt "); v.setUint32(16, 16, true); v.setUint16(20, 1, true);
+  v.setUint16(22, numCh, true); v.setUint32(24, sr, true);
+  v.setUint32(28, sr * blockAlign, true); v.setUint16(32, blockAlign, true); v.setUint16(34, 16, true);
+  writeStr(36, "data"); v.setUint32(40, dataSize, true);
+  const chans = []; for (let c = 0; c < numCh; c++) chans.push(buffer.getChannelData(c));
+  let off = 44;
+  for (let i = 0; i < len; i++) {
+    for (let c = 0; c < numCh; c++) {
+      const s = Math.max(-1, Math.min(1, chans[c][i]));
+      v.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+      off += 2;
+    }
+  }
+  return new Blob([ab], { type: "audio/wav" });
+}
+async function buildSilentLoopUrl() {
+  const OfflineCtx = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+  if (!OfflineCtx) return null;
+  const sr = 8000, dur = 1;
+  const ctx = new OfflineCtx(1, sr * dur, sr);
+  const osc = ctx.createOscillator();
+  osc.frequency.value = 40;
+  const gain = ctx.createGain();
+  gain.gain.value = 0.02; // real, non-zero, still practically inaudible
+  osc.connect(gain).connect(ctx.destination);
+  osc.start();
+  const rendered = await ctx.startRendering();
+  return URL.createObjectURL(encodeWavPCM16(rendered));
+}
+
 // manual place override — the "dehors" footer link toggles this for today
 // (Maxence 20/07: any user should be able to flip it, but it can't clutter the
 // épuré main screen — so it lives below the fold, same weight as save/load/key).
@@ -1023,36 +1068,28 @@ function Throughline() {
   // gain is near-zero, not exact 0 — some browsers filter genuinely-silent
   // streams out of the rules that keep background audio/media-session alive.
   const silentAudioRef = useRef(null);
-  const silentCtxRef = useRef(null);
   useEffect(() => {
-    if (typeof window === "undefined" || !(window.AudioContext || window.webkitAudioContext)) return;
-    try {
-      const ctx = new (window.AudioContext || window.webkitAudioContext)();
-      const dest = ctx.createMediaStreamDestination();
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      // 25/07: 0.0001 sits right on top of the threshold several Chromium builds
-      // use to detect "silent" streams and quietly refuse to keep a background
-      // media session/notification alive for them (the anti-abuse rule this exact
-      // trick is meant to dodge). 0.01 stays inaudible in practice but reads as
-      // real audio output.
-      gain.gain.value = 0.01;
-      osc.connect(gain).connect(dest);
-      osc.start();
-      const el = document.createElement("audio");
-      el.srcObject = dest.stream;
-      el.loop = true;
-      // 24/07 (bug #5, "pause sans rouvrir l'app"): attach the element to the DOM.
-      // A detached <audio> plays, but several Android browsers won't keep an OS
-      // MediaSession (and its lock-screen / notif / AOD play-pause controls) alive
-      // unless the media element is actually in the document. Hidden + muted-to-UI,
-      // it just anchors the session so togglePause is reachable from outside the app.
-      el.setAttribute("playsinline", "");
-      el.style.display = "none";
-      document.body.appendChild(el);
-      silentAudioRef.current = el;
-      silentCtxRef.current = ctx;
-    } catch (e) {}
+    if (typeof window === "undefined") return;
+    let url = null, cancelled = false;
+    (async () => {
+      try {
+        url = await buildSilentLoopUrl();
+        if (!url || cancelled) return;
+        const el = document.createElement("audio");
+        el.src = url;
+        el.loop = true;
+        // 24/07 (bug #5, "pause sans rouvrir l'app"): attach the element to the DOM.
+        // A detached <audio> plays, but several Android browsers won't keep an OS
+        // MediaSession (and its lock-screen / notif / AOD play-pause controls) alive
+        // unless the media element is actually in the document. Hidden + muted-to-UI,
+        // it just anchors the session so togglePause is reachable from outside the app.
+        el.setAttribute("playsinline", "");
+        el.style.display = "none";
+        document.body.appendChild(el);
+        silentAudioRef.current = el;
+      } catch (e) {}
+    })();
+    return () => { cancelled = true; if (url) URL.revokeObjectURL(url); };
   }, []);
   useEffect(() => {
     if (!("mediaSession" in navigator)) return;
@@ -1067,11 +1104,9 @@ function Throughline() {
     const active = runningActive || ambient;
     const el = silentAudioRef.current;
     if (runningActive && !paused) {
-      silentCtxRef.current?.resume?.()?.catch(() => {});
       el?.play()?.catch(() => {});
       try { navigator.mediaSession.playbackState = "playing"; } catch (e) {}
     } else if (active) {
-      silentCtxRef.current?.resume?.()?.catch(() => {});
       el?.play()?.catch(() => {});
       try { navigator.mediaSession.playbackState = "paused"; } catch (e) {}
     } else {
@@ -2237,13 +2272,10 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
         Notification.requestPermission().catch(() => {});
       }
     } catch (e) {}
-    // renforce l'autoplay : resume/play directement dans ce geste utilisateur,
-    // en plus de l'effect stage/paused (certains WebView Android sont plus
+    // renforce l'autoplay : play() directement dans ce geste utilisateur, en
+    // plus de l'effect stage/paused (certains WebView Android sont plus
     // stricts que Chrome desktop sur ce qui compte comme "déclenché par un tap").
-    try {
-      silentCtxRef.current?.resume?.()?.catch(() => {});
-      silentAudioRef.current?.play?.()?.catch(() => {});
-    } catch (e) {}
+    try { silentAudioRef.current?.play?.()?.catch(() => {}); } catch (e) {}
   };
 
   // auto-start (Maxence 16/07): a proposal used to need its own separate tap before
