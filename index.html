@@ -99,7 +99,7 @@ function encodeWavPCM16(buffer) {
 async function buildSilentLoopUrl() {
   const OfflineCtx = window.OfflineAudioContext || window.webkitOfflineAudioContext;
   if (!OfflineCtx) return null;
-  const sr = 8000, dur = 1;
+  const sr = 8000, dur = 5; // longer loop = fewer restart boundaries to trip over
   const ctx = new OfflineCtx(1, sr * dur, sr);
   const osc = ctx.createOscillator();
   osc.frequency.value = 40;
@@ -1078,6 +1078,14 @@ function Throughline() {
         const el = document.createElement("audio");
         el.src = url;
         el.loop = true;
+        // 25/07: chrome://media-internals on his phone showed the player hitting
+        // "Ended" instead of looping — the native `loop` attribute isn't being
+        // honored (blob-URL source, Android WebView), so the media session dies
+        // ~1s in and lock-screen/notif controls never persist. Belt-and-suspenders:
+        // restart manually on "ended" too, since that's the actual failure mode.
+        el.addEventListener("ended", () => {
+          try { el.currentTime = 0; el.play().catch(() => {}); } catch (e) {}
+        });
         // 24/07 (bug #5, "pause sans rouvrir l'app"): attach the element to the DOM.
         // A detached <audio> plays, but several Android browsers won't keep an OS
         // MediaSession (and its lock-screen / notif / AOD play-pause controls) alive
