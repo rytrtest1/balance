@@ -1031,7 +1031,12 @@ function Throughline() {
       const dest = ctx.createMediaStreamDestination();
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
-      gain.gain.value = 0.0001;
+      // 25/07: 0.0001 sits right on top of the threshold several Chromium builds
+      // use to detect "silent" streams and quietly refuse to keep a background
+      // media session/notification alive for them (the anti-abuse rule this exact
+      // trick is meant to dodge). 0.01 stays inaudible in practice but reads as
+      // real audio output.
+      gain.gain.value = 0.01;
       osc.connect(gain).connect(dest);
       osc.start();
       const el = document.createElement("audio");
@@ -2222,6 +2227,23 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
     setAlbumTitles(isAlbumActivity ? [{ id: uid(), text: "", rating: 50 }] : []);
     setAlbumIdx(0);
     setRunning(true); setStage("running");
+    // 25/07 (bug: aucun play/pause verrouillé/volet — hyp. de M. confirmée) : sur
+    // un PWA installé (WebAPK), Android 13+ exige la permission POST_NOTIFICATIONS
+    // pour afficher QUOI QUE CE SOIT côté notif, y compris le contrôle média
+    // système du MediaSession ci-dessous. L'app ne la demandait jamais → jamais
+    // affichée. On la demande ici, dans un vrai tap utilisateur, une seule fois.
+    try {
+      if (typeof Notification !== "undefined" && Notification.permission === "default") {
+        Notification.requestPermission().catch(() => {});
+      }
+    } catch (e) {}
+    // renforce l'autoplay : resume/play directement dans ce geste utilisateur,
+    // en plus de l'effect stage/paused (certains WebView Android sont plus
+    // stricts que Chrome desktop sur ce qui compte comme "déclenché par un tap").
+    try {
+      silentCtxRef.current?.resume?.()?.catch(() => {});
+      silentAudioRef.current?.play?.()?.catch(() => {});
+    } catch (e) {}
   };
 
   // auto-start (Maxence 16/07): a proposal used to need its own separate tap before
