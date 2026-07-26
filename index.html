@@ -470,6 +470,14 @@ function buildLotteryRows(activities, log, place, skipQuota = false) {
         // the widget). relax now only ever bypasses the quota cap.
         if (action.id === "x_cu_faire" && !isMealTime(realNow())) continue;
         if (action.id === "x_mp_focaccia" && !isTwoDaysBeforeWorkStretch()) continue;
+        // espagnol anki: cards need real time to become due again (Maxence 25/07 —
+        // a review fired right after the previous one with almost nothing due yet).
+        // Same physical-constraint shape as the two rows above: never relaxed either,
+        // since relax bypassing it would just re-surface the same empty-deck problem.
+        if (action.id === "x_es_anki") {
+          const last = lastRealTs(log, a.id, action.id);
+          if (last != null && realNow().getTime() - last < 24 * 3600 * 1000) continue;
+        }
         // log-only, never drawn (Maxence 16/07) — the only door in is the free-text
         // field at the bottom of the app (submitFreeLog), typed once he's actually
         // baked. See pendingGarnitureFrom/lastCuireTs above for what this unlocks.
@@ -1868,7 +1876,14 @@ function Throughline() {
     if (!albumDragged.current && e.clientX != null && Math.abs(e.clientX - albumDownX.current) > 8) albumDragged.current = true;
     if (albumDragged.current) setAlbumRatingFromPointer(e.clientX);
   };
-  const onAlbumLineUp = () => { albumDragging.current = false; albumDragged.current = false; };
+  // plain tap (no real drag) commits the current title and opens the next slot —
+  // same idiom as the main hero line's tap-to-advance (Maxence 25/07: a tap here
+  // used to just reset the drag flags and do nothing, so the note never validated).
+  const onAlbumLineUp = () => {
+    const dragged = albumDragged.current;
+    albumDragging.current = false; albumDragged.current = false;
+    if (!dragged) advanceAlbumTitle(1);
+  };
   // swipe right (or a dot tap, wired at render time) moves between titles. Advancing
   // past the last slot only opens a fresh one once the current one has real text —
   // an empty slot has nothing to commit yet, swiping right from it does nothing.
