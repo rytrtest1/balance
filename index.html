@@ -318,6 +318,23 @@ function pipelineStep(a) {
   return { id: uid(), text: `${label(live.stage)} — « ${live.text} »`, min: 15, pieceId: live.id, pieceStage: live.stage, fresh: false };
 }
 
+// --- single persistent "current" item, per ACTION not per activity (Livre, Podcast,
+// but also Sudoku's "vidéo" action or Parfum exploration's "livre"/"vidéo" actions —
+// an activity can carry several independently-tracked titles alongside actions that
+// don't track one at all, e.g. Sudoku's "résoudre une grille"). Tagged on the action
+// itself (`action.singleItem`/`action.itemLabel`), items[] entries carry `actionId`
+// so several tracked slots can coexist on the same activity without clashing. No
+// funnel/stages needed (linear consumption, not creation with phases) — same "fresh
+// slot only opens once nothing's live" idiom as pipelineStep above. Finished items
+// stay with done:true, same history-kept spirit as a graduated pipeline piece.
+function resolveSingleItem(a, action) {
+  const items = (a.items || []).filter((it) => it.actionId === action.id);
+  const current = [...items].reverse().find((it) => !it.done);
+  const label = action.itemLabel || "titre";
+  if (!current) return { ...action, text: `${action.text} — nouveau ${label}`, itemId: null, fresh: true };
+  return { ...action, text: `${action.text} — « ${current.text} »`, itemId: current.id, fresh: false };
+}
+
 // --- items[] LRU picker (Chant micro, Ordre, Clean, Cuisiner…) ---
 function hasDoingItems(a) {
   return (a.kind === "practice" || a.kind === "recommandeur") && (a.items || []).some((it) => it.status === "doing");
@@ -604,6 +621,10 @@ function resolveDraw(drawn, log) {
       : hasDoingItems(a)
         ? itemStep(a, log)
         : a.actions[Math.floor(Math.random() * a.actions.length)];
+  // singleItem applies regardless of which path produced the action — a real
+  // per-action row from buildLotteryRows (Sudoku's "vidéo", Parfum's "livre"/
+  // "vidéo") just as much as the single-action whole-activity case (Livre, Podcast).
+  if (action && action.singleItem) action = resolveSingleItem(a, action);
   if (drawn.action && action && /\(LRU\)/.test(action.text || "") && hasDoingItems(a)) {
     action = pickItemLRU(a, log, action);
   }
@@ -639,6 +660,29 @@ function migratePickerActions(acts) {
         note: "Attention → observation → description poétique d'un seul détail. Friction nulle. 1/sem. 2 modes tirés à 50/50 (picker), comme Free poetry — continuer une minuscule existante ou repartir de zéro." };
     }
     return a;
+  });
+}
+// structural migration (same idea as migratePickerActions above): tags a_livre/
+// a_podcast with singleItem/itemLabel so the data already on the phone picks up
+// the "remembers current title, proposes a new one once marked finished" behavior
+// (see singleItemStep) without a manual reimport of balance-catalogue.json — the
+// full reset with the two rows' new items[] shape lives there for fresh installs,
+// this patches existing ones in place. Idempotent: only touches rows missing it.
+function migrateSingleItemActivities(acts) {
+  // per ACTION, not per activity — Sudoku and Parfum exploration each have several
+  // actions, only some of which track an ongoing title (Sudoku's "résoudre une
+  // grille" and Parfum's "sentir"/"famille"/"touche"/"forum" don't, so they're
+  // absent here and stay untouched).
+  const TARGETS = {
+    a_livre: { x_lire: "livre" },
+    a_podcast: { x_podcast: "podcast" },
+    a_sudoku: { x_su_video: "vidéo" },
+    a_parfum_explo: { x_pf_livre: "livre", x_pf_video: "vidéo" },
+  };
+  return acts.map((a) => {
+    const t = TARGETS[a.id];
+    if (!t) return a;
+    return { ...a, actions: (a.actions || []).map((x) => (t[x.id] && !x.singleItem ? { ...x, singleItem: true, itemLabel: t[x.id] } : x)) };
   });
 }
 function pickAging(activities, log, place, options = {}) {
@@ -1157,6 +1201,13 @@ function Throughline() {
 
   // after-session comment + the Claude bridge that advances pipeline pieces
   const [comment, setComment] = useState("");
+  // singleItem "choisir" step (Livre, Podcast, Sudoku vidéo, Parfum livre/vidéo…):
+  // naming a fresh title is ephemeral, not a real session — no timer, no log entry,
+  // no click counted. Typed here, then submitItemName() swaps `current.action` to
+  // the real resolved action in place and lets the normal proposal flow (tap or
+  // AUTO_START_MS) carry on from there (Maxence 01/08: "avant que l'action de base
+  // apparaisse on fait apparaître une action éphémère choisir").
+  const [itemNameInput, setItemNameInput] = useState("");
   // mid-session comment confirmation (Maxence 17/07): submitRunningComment used to
   // clear the field with zero feedback — same class of gap as "done"'s syncMsg, just
   // missing here since a running note never touches the API. Brief local flash only.
@@ -1708,7 +1759,7 @@ function Throughline() {
       medReminderShownRef.current = await store.get(NS("tlx_medReminderDate"));
       lastLoadDateRef.current = await store.get(NS("tlx_lastLoadDate"));
       if (!alive) return;
-      setActivities(migratePickerActions(a ?? SEED));
+      setActivities(migrateSingleItemActivities(migratePickerActions(a ?? SEED)));
       setLog(l ?? []);
       setApiKey(k || "");
       if (hs && hs.date === todayKey()) { setHoldMs(hs.ms); setHoldDate(hs.date); } // same day → keep the accumulated penalty
@@ -1847,7 +1898,7 @@ function Throughline() {
     setAlbumTitles([]); setAlbumIdx(0); setDescOpen(false); setRating(50);
     propose(log, activities, false, current ? current.activity.id : null);
   };
-  const resetFlow = (nextStage = "entry") => { setStage(nextStage); setCurrent(null); setRunning(false); setElapsedMs(0); setPaused(false); setComment(""); setDescOpen(false); setSyncMsg(""); setSyncing(false); setAlbumTitles([]); setAlbumIdx(0); setRating(50); };
+  const resetFlow = (nextStage = "entry") => { setStage(nextStage); setCurrent(null); setRunning(false); setElapsedMs(0); setPaused(false); setComment(""); setItemNameInput(""); setDescOpen(false); setSyncMsg(""); setSyncing(false); setAlbumTitles([]); setAlbumIdx(0); setRating(50); };
   // Album de la semaine title-by-title appreciation (Maxence 16/07, item 4/5) —
   // isAlbumActivity gates the extra running-stage UI to that one activity only.
   const isAlbumActivity = !!(current && current.activity.id === "a_ecoute_album");
@@ -1937,24 +1988,36 @@ function Throughline() {
       : `Pièce existante : « ${piece ? piece.text : "?"} », à l'étape ${action.pieceStage} (${(stages[action.pieceStage] || {}).text || "?"}).`;
     // named after the activity itself, not hardcoded to erasure — this same function
     // drives every pipeline (piano, cover, parfum-création…), not just poems.
+    // Folds in the same observations growth practice-kind activities get via
+    // coachViaClaude (Maxence 01/08: "on met ça partout, on garde toujours aussi le
+    // log brut") — one call, same comment as input for both. The raw comment itself
+    // is untouched by any of this: submitComment() already saves it verbatim onto
+    // the log entry regardless of kind, before either Claude call ever runs.
     const prompt = `Tu suis l'avancement d'une pièce dans un funnel « ${act.name} » (domaine : ${act.domain}).
 Étapes du funnel (index: nom) :
 ${stages.map((s, i) => `${i}: ${s.text}`).join("\n")}
 
 ${ctx}
 
+Le champ « observations » est une MÉMOIRE qui s'accumule séparément : patterns, ce qui marche, tendances repérées au fil des sessions — distincte de l'avancement du funnel ci-dessus.
+
+Observations actuelles :
+"""
+${act.observations || "(vide)"}
+"""
+
 Commentaire laissé après la session :
 « ${text} »
 
-Détermine où en est la pièce APRÈS cette session. new_stage = index (0 à ${last}) de l'étape courante : si une étape vient d'être finie, avance à la suivante, sinon garde l'étape. Cas particulier : si la session avait lieu SUR la dernière étape (${last} : ${(stages[last] || {}).text || "?"}) et que le commentaire indique qu'elle est terminée/réussie, new_stage = ${last + 1} — la pièce sort du funnel, terminée. Ne mets ${last + 1} QUE dans ce cas précis (jamais pour sauter directement d'une étape antérieure à la fin sans passer par la dernière étape elle-même). piece_name = nom court (existant, ou tiré du commentaire si fraîche). progressed = true si cette session a fait avancer concrètement la pièce (même sans changer d'étape — un chunk appris, une itération réelle), false si elle n'a rien fait gagner (rejoué sans progrès, session avortée, bloqué).`;
+Détermine où en est la pièce APRÈS cette session. new_stage = index (0 à ${last}) de l'étape courante : si une étape vient d'être finie, avance à la suivante, sinon garde l'étape. Cas particulier : si la session avait lieu SUR la dernière étape (${last} : ${(stages[last] || {}).text || "?"}) et que le commentaire indique qu'elle est terminée/réussie, new_stage = ${last + 1} — la pièce sort du funnel, terminée. Ne mets ${last + 1} QUE dans ce cas précis (jamais pour sauter directement d'une étape antérieure à la fin sans passer par la dernière étape elle-même). piece_name = nom court (existant, ou tiré du commentaire si fraîche). progressed = true si cette session a fait avancer concrètement la pièce (même sans changer d'étape — un chunk appris, une itération réelle), false si elle n'a rien fait gagner (rejoué sans progrès, session avortée, bloqué). updated_observations = les observations réécrites en y intégrant ce qu'apporte ce commentaire — garde tout ce qui reste pertinent, ne raccourcis pas artificiellement, ne retire que ce qui est vraiment obsolète ou remplacé.`;
     setSyncing(true); setSyncMsg("lecture du commentaire…");
     try {
       const out = await claudeJSON(key, prompt, {
         type: "object",
-        properties: { piece_name: { type: "string" }, new_stage: { type: "integer" }, progressed: { type: "boolean" } },
-        required: ["piece_name", "new_stage", "progressed"],
+        properties: { piece_name: { type: "string" }, new_stage: { type: "integer" }, progressed: { type: "boolean" }, updated_observations: { type: "string" } },
+        required: ["piece_name", "new_stage", "progressed", "updated_observations"],
         additionalProperties: false,
-      });
+      }, 4000);
       // ns can reach last+1 — that's the sentinel for "graduated out of the funnel",
       // only ever produced by a session held ON the last stage itself (fixed 11/07,
       // see pipelineStep and the prompt above: the last stage is a real session to
@@ -1981,7 +2044,7 @@ Détermine où en est la pièce APRÈS cette session. new_stage = index (0 à ${
           let items = a.items || [];
           if (action.fresh) items = [...items, { id: uid(), text: pieceName, stage: ns }];
           else if (action.pieceId) items = items.map((it) => (it.id === action.pieceId ? { ...it, stage: ns } : it));
-          return { ...a, items };
+          return { ...a, items, observations: out.updated_observations };
         }
         if (justGraduated && a.id === act.graduatesTo) {
           return { ...a, items: [...(a.items || []), { id: uid(), text: pieceName, status: "doing" }] };
@@ -2066,9 +2129,21 @@ Détermine où en est la pièce APRÈS ce qui est décrit. new_stage = index (0 
   // Cuisiner) — their taste signal lives in items[] status/rating instead, set
   // synchronously in submitComment(), never by an LLM rewrite of free text.
   const coachViaClaude = async (key, text) => {
-    const act = current.activity;
+    const act = current.activity, action = current.action;
+    // singleItem actions (Livre, Podcast, Sudoku vidéo, Parfum livre/vidéo…) also
+    // carry a persistent "current title" in items[] (see resolveSingleItem) —
+    // folded into this same call rather than a second round-trip, since it needs
+    // the same comment as input. Naming a NEW title never reaches here — that's
+    // the ephemeral "choisir" input (submitItemName), not a commented session, so
+    // action.fresh is never true at this point. Only question left for Claude:
+    // item_done=true clears the slot so the next draw re-opens "nouveau X".
+    const singleItem = !!action.singleItem;
+    const label = action.itemLabel || "titre";
+    const curItem = singleItem && action.itemId ? (act.items || []).find((it) => it.id === action.itemId) : null;
+    const itemCtx = !singleItem || !curItem ? "" : `\nCette activité suit aussi un ${label} "en cours" persistant, distinct des observations. ${label[0].toUpperCase()}${label.slice(1)} en cours : « ${curItem.text} ».`;
     const prompt = `Activité : « ${act.name} » (type: ${act.kind}, domaine: ${act.domain}).
 Action faite : « ${current.action.text} ».
+${itemCtx}
 
 Mécanique de l'activité (fixe — règles, contraintes, structure ; sert de contexte, ne la modifie jamais) :
 """
@@ -2085,7 +2160,7 @@ ${act.observations || "(vide)"}
 Commentaire laissé après cette session :
 « ${text} »
 
-Réécris les observations en y intégrant ce qu'apporte ce commentaire — garde tout ce qui reste pertinent, ne raccourcis pas artificiellement pour économiser de la place. Ne retire que ce qui est vraiment obsolète ou remplacé par une observation plus récente. updated_observations = les observations complètes réécrites.`;
+Réécris les observations en y intégrant ce qu'apporte ce commentaire — garde tout ce qui reste pertinent, ne raccourcis pas artificiellement pour économiser de la place. Ne retire que ce qui est vraiment obsolète ou remplacé par une observation plus récente. updated_observations = les observations complètes réécrites.${curItem ? `\n\nDétermine aussi si le commentaire indique que « ${curItem.text} » est fini/terminé (la prochaine session en proposera un nouveau ${label}) : item_done = true si oui, false s'il reste en cours.` : ""}`;
     setSyncing(true); setSyncMsg("lecture du commentaire…");
     try {
       // maxTokens generous here (found 10/07: the default 400 truncates mid-JSON
@@ -2094,12 +2169,20 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
       // negligible, so there's no reason to keep this tight.
       const out = await claudeJSON(key, prompt, {
         type: "object",
-        properties: { updated_observations: { type: "string" } },
-        required: ["updated_observations"],
+        properties: {
+          updated_observations: { type: "string" },
+          ...(curItem ? { item_done: { type: "boolean" } } : {}),
+        },
+        required: curItem ? ["updated_observations", "item_done"] : ["updated_observations"],
         additionalProperties: false,
       }, 4000);
       const aid = act.id;
-      setActivities((arr) => arr.map((a) => (a.id === aid ? { ...a, observations: out.updated_observations } : a)));
+      setActivities((arr) => arr.map((a) => {
+        if (a.id !== aid) return a;
+        const patch = { observations: out.updated_observations };
+        if (curItem) patch.items = (a.items || []).map((it) => (it.id === curItem.id ? { ...it, done: !!out.item_done } : it));
+        return { ...a, ...patch };
+      }));
       setSyncMsg("observations mises à jour ✓");
     } catch (err) {
       setSyncMsg("lecture impossible (" + (err.message || "erreur") + ") — commentaire gardé");
@@ -2155,7 +2238,7 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
     if (wantsClaude) {
       const key = (await store.get("tlx_apiKey")) || "";
       if (key) { (kind === "pipeline" ? advanceViaClaude : coachViaClaude)(key, text); return; }
-      setSyncMsg(kind === "pipeline" ? "pas de clé API — commentaire gardé, pièce non avancée" : "pas de clé API — commentaire gardé, observations non mises à jour");
+      setSyncMsg(kind === "pipeline" ? "pas de clé API — commentaire gardé, pièce/observations non mises à jour" : "pas de clé API — commentaire gardé, observations non mises à jour");
       setTimeout(() => { setSyncMsg(""); finishFlow(text); }, 2200);
       return;
     }
@@ -2216,6 +2299,10 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
     // med reminder card (see start()): never a real session — move straight to
     // an actual proposal instead, nothing logged, no click counted.
     if (current?.medReminder) { propose(); return; }
+    // singleItem "choisir" step: not a session either — naming happens via the
+    // input below (submitItemName), a tap or the auto-start timer here is a no-op
+    // until a title's been given and current.action.fresh has cleared.
+    if (current?.action?.fresh) return;
     lastStartDelayRef.current = proposedAtRef.current ? Date.now() - proposedAtRef.current : null;
     let preMs = 0;
     if (current?.activity?.timed) {
@@ -2235,6 +2322,26 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
     // plus de l'effect stage/paused (certains WebView Android sont plus stricts
     // que Chrome desktop sur ce qui compte comme "déclenché par un tap").
     try { silentAudioRef.current?.play?.()?.catch(() => {}); } catch (e) {}
+  };
+
+  // singleItem "choisir" step: typed title becomes the item directly (no Claude
+  // round-trip — it's already exact text, not something to infer from a comment).
+  // Swaps current.action to the real resolved action in place, stage stays
+  // "proposal" so the existing tap/AUTO_START_MS path takes it from here exactly
+  // like any normal proposal — no separate "now start the session" call needed.
+  const submitItemName = () => {
+    const title = itemNameInput.trim();
+    if (!title || !current?.action?.fresh) return;
+    const { activity: a, action } = current;
+    // current.action is already the RESOLVED fresh proposal (text carries the
+    // "— nouveau X" suffix) — resolveSingleItem needs the pristine action from
+    // a.actions to build the real "— « titre »" text from, not double-suffix it.
+    const baseAction = (a.actions || []).find((x) => x.id === action.id) || action;
+    const newItem = { id: uid(), text: title, done: false, actionId: action.id };
+    const nextItems = [...(a.items || []), newItem];
+    setActivities((arr) => arr.map((act) => (act.id === a.id ? { ...act, items: nextItems } : act)));
+    setCurrent({ activity: { ...a, items: nextItems }, action: resolveSingleItem({ ...a, items: nextItems }, baseAction) });
+    setItemNameInput("");
   };
 
   // auto-start (Maxence 16/07): a proposal used to need its own separate tap before
@@ -3421,6 +3528,30 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                   </div>
                 )}
 
+                {/* singleItem "choisir" step (Livre, Podcast, Sudoku vidéo, Parfum
+                    livre/vidéo…): ephemeral, not a session — tap/auto-start are no-ops
+                    while action.fresh (see begin()). Same "« ... »" input idiom as the
+                    running/done comment fields, submitItemName() swaps the proposal to
+                    the real action in place once a title's given. */}
+                {stage === "proposal" && current?.action?.fresh && (
+                  <div className="fade">
+                    <div style={{ position: "relative", maxWidth: 320, margin: "24px auto 0" }}>
+                      <input className="in" value={itemNameInput}
+                        autoComplete="off" name="item-name"
+                        onChange={(e) => setItemNameInput(e.target.value)}
+                        onKeyDown={(e) => { if (e.key === "Enter") submitItemName(); }}
+                        style={{ fontFamily: "var(--mono)", fontSize: 13, textAlign: "center", display: "block", color: C.text }} />
+                      {!itemNameInput && (
+                        <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: COMMENT_HINT_MODE === "cursor" ? "flex-start" : "center", justifyContent: "center", gap: 6, pointerEvents: "none", fontFamily: "var(--mono)", fontSize: 13, color: C.faint }}>
+                          {COMMENT_HINT_MODE === "cursor"
+                            ? <span className="hintcursor" />
+                            : <><span>«</span><span>...</span><span>»</span></>}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
                 {/* running: a quiet pause, for when something outside interrupts the session
                     (a call, someone at the door) — for stopping the clock without abandoning
                     the activity. Abandoning it entirely is still the hold-the-line gesture
@@ -3574,7 +3705,7 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                             instruction, not a standing affordance (Maxence 16/07). */}
                         {showDoneHint && current && (() => {
                           const k = current.activity.kind;
-                          const hint = k === "pipeline" ? "ton mot fait avancer la pièce dans le funnel"
+                          const hint = k === "pipeline" ? "ton mot fait avancer la pièce et nourrit la mémoire de l'activité"
                             : k === "recommandeur" ? "glisse la ligne pour noter, tape pour valider"
                             : k === "practice" ? "ton mot nourrit la mémoire de l'activité"
                             : null;
