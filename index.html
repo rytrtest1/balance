@@ -355,6 +355,41 @@ function pickItemLRU(a, log, base) {
 function itemStep(a, log) {
   return pickItemLRU(a, log, a.actions[0] || { id: uid(), text: "—", min: 15 });
 }
+// --- parfum — sentir une matière : le pick du jour (checkpoint "ouverture") reste
+// le seul clic loggé, comme avant. Round 3 (01/08) ajoute une matière "du jour" —
+// `item.today` — qui porte les 3 checkpoints suivants (cœur/fond/résiduel), notés
+// via un mini-écran dédié (chips + curseur + texte), zéro clic (voir
+// submitParfumNote). Au plus une matière `.today` à la fois (comme avant).
+function parfumTodayItem(a) {
+  return (a.items || []).find((it) => it.today);
+}
+// prochain checkpoint dû et pas encore noté, ou null si rien à faire maintenant
+// (soit tout est noté, soit le suivant n'est physiquement pas encore là — jamais
+// relaxé, même contrainte que x_es_anki).
+function parfumDueCheckpoint(item) {
+  const t = item.today;
+  const notedKeys = t.notedKeys || [];
+  for (let i = 0; i < PARFUM_CHECKPOINTS.length; i++) {
+    const cp = PARFUM_CHECKPOINTS[i];
+    if (notedKeys.includes(cp.key)) continue;
+    if (realNow().getTime() < t.startTs + cp.afterMin * 60000) return null;
+    return { cp, idx: i };
+  }
+  return null;
+}
+function resolveParfumSession(a, log, action) {
+  const label = (action.text || "").replace(/\s*\(LRU\)\s*/, "").trim();
+  const todayItem = parfumTodayItem(a);
+  if (todayItem) {
+    const due = parfumDueCheckpoint(todayItem);
+    if (!due) return action; // rien de dû là maintenant (ne devrait pas être proposé)
+    return { ...action, text: `${label} — « ${todayItem.text} » — ${due.cp.label}`, itemId: todayItem.id,
+      parfumCheckpoint: due.cp.key, parfumNoteOnly: true, desc: PARFUM_AIDE };
+  }
+  const picked = pickItemLRU(a, log, action);
+  if (picked === action) return action; // pool vide, rien à résoudre
+  return { ...action, text: `${label} — « ${picked.text} »`, itemId: picked.itemId, parfumCheckpoint: "ouverture", desc: PARFUM_AIDE };
+}
 
 // --- vaisselle: derived straight from the log (cooked − washed, whole history), not
 // kept in a separate piece of state that resets to 0 on every reload. A completed
@@ -422,6 +457,114 @@ const FOCACCIA_GARNITURE_DEADLINE_HOUR = 20;
 // isn't a debt that needs to fire eventually, just a window that closes.
 const WORK_LISTEN_GATE_HOURS = 5;
 const WORK_LISTEN_GATE_IDS = new Set(["a_film", "a_podcast", "a_ecoute_titre", "a_ecoute_album"]);
+// parfum — sentir une matière : 4 points de contact sur la même mouillette
+// (revu 01/08 round 3 — cœur précoce/+20min retiré, "on commence simple"). Le
+// checkpoint 0 (ouverture) est loggé normalement (le pick du jour, 1 clic) ; les
+// 3 suivants passent par le mini-écran de note (voir parfumDueCheckpoint/
+// submitParfumNote), zéro clic, structuré (chips + curseur). Le brut est gardé tel
+// quel ; depuis le 02/08 une synthèse Claude s'écrit EN PLUS à la clôture du cycle
+// (synthParfumSession — "tant qu'on garde le log brut aussi"), stockée, pas affichée.
+// Cœur et fond posent aussi une notif à l'ouverture (voir scheduleReminder).
+const PARFUM_CHECKPOINTS = [
+  { key: "ouverture", afterMin: 0, label: "0–5min — ouverture" },
+  { key: "coeur", afterMin: 90, label: "+1-2h — cœur/transition" },
+  { key: "fond", afterMin: 300, label: "+5h — fond" },
+  { key: "residuel", afterMin: 1440, label: "+24h — résiduel/tenue" },
+];
+// --- vocabulaire descripteur (revu 02/08 — Maxence : "une liste plus exhaustive qui
+// couvrirait tous les possibles dans laquelle piocher au jugé en même temps que je
+// sens"). Le round 3 n'avait que 8 chips texture/forme à plat ; exhaustif à plat
+// (~100 mots) serait illisible le nez sur la mouillette, donc DEUX NIVEAUX :
+//  - au repos, une seule rangée : les 11 familles olfactives + « forme » ;
+//  - taper une famille la SÉLECTIONNE et déplie ses facettes juste dessous.
+// Pourquoi cette forme et pas une liste plate ni un champ de recherche :
+//  - loi de Hick — le temps de décision croît avec le log du nombre d'options :
+//    12 puis 10 se choisit bien plus vite que 92 d'un coup ;
+//  - on ne lit pas 92 mots le nez occupé ; on suit une association. « c'est boisé »
+//    (1 tap) → « …santalé, crémeux » (2 taps) : ~3s, jamais plus de ~22 mots à l'œil ;
+//  - la hiérarchie est celle du métier (famille → facette) : s'en servir entraîne la
+//    taxonomie au lieu de la contourner — un nuage à plat n'apprend rien ;
+//  - recognition, pas recall : le champ texte libre juste dessous couvre déjà le mot
+//    qu'on a en tête et qui n'est pas listé, donc les chips n'ont qu'à faire
+//    reconnaître. Un champ de recherche ferait l'inverse (il faut connaître le mot).
+// La donnée stockée ne change pas de forme : toujours un string[] dans chips[cp],
+// juste avec un vocabulaire beaucoup plus large (familles ET facettes mêlées).
+const PARFUM_TEXTURE_CHIPS = ["rond", "sec", "linéaire", "évolutif", "plat", "texturé", "fondu", "tranchant", "transparent", "massif", "projection", "collé-peau"];
+const PARFUM_FAMILLES = [
+  { key: "agrumes", facets: ["zesté", "amer", "citronné", "orangé", "pamplemousse", "pétillant", "terpénique", "cireux"] },
+  { key: "vert", facets: ["feuille froissée", "tige", "gazon coupé", "galbanum", "concombre", "sève", "foin", "herbacé"] },
+  { key: "floral", facets: ["rosé", "jasminé", "indolique", "fleur d'oranger", "muguet", "violette", "iris", "tubéreuse", "poudré", "miellé"] },
+  { key: "fruité", facets: ["pêche/lactone", "baie rouge", "poire", "pomme", "tropical", "confituré", "vineux", "raisin sec"] },
+  { key: "épicé", facets: ["poivré", "girofle", "cannelle", "cardamome", "cumin", "safran", "anisé", "gingembre"] },
+  { key: "boisé", facets: ["santalé", "cédré", "vétiver", "patchouli", "oud", "crayon", "poussiéreux", "crémeux"] },
+  { key: "balsamique", facets: ["encens", "ambré", "vanillé", "benjoin", "labdanum", "baume de tolu", "coumarine", "camphré"] },
+  { key: "animal", facets: ["musqué", "cuiré", "fumé", "goudron/phénolique", "tabac", "castoréum", "civette", "urineux", "fécal", "fromagé"] },
+  { key: "terreux", facets: ["mousse", "humus", "champignon", "betterave", "pierre/silex", "iodé/marin", "métallique", "poussière"] },
+  { key: "gourmand", facets: ["caramel", "chocolat", "amande", "noisette", "beurré/lacté", "miel", "malté", "grillé"] },
+  { key: "frais", facets: ["ozonique", "aldéhydé", "savonneux", "mentholé", "eucalyptus", "aqueux", "glacé", "ferreux"] },
+  // seule entrée non olfactive : « forme » est un axe orthogonal (un boisé peut être
+  // rond ou tranchant), pas une famille. `head: false` — la taper ouvre seulement,
+  // sans s'ajouter aux descripteurs : « boisé » se dit d'une matière, « forme » non.
+  { key: "forme", head: false, facets: PARFUM_TEXTURE_CHIPS },
+];
+// Le sélecteur lui-même — un seul composant, monté aux DEUX endroits où on note un
+// checkpoint (le mini-écran cœur/fond/résiduel et l'écran "done" de l'ouverture),
+// pour qu'ils ne puissent pas diverger. Une seule famille ouverte à la fois ; les
+// facettes choisies d'une famille refermée resteraient invisibles, d'où la ligne de
+// rappel en haut — qui n'apparaît que s'il y a quelque chose (rien à l'écran tant
+// qu'on n'a rien dit), et où retaper un mot le retire.
+function ParfumNotePicker({ chips, setChips, intensity, setIntensity }) {
+  const [open, setOpen] = useState(null);
+  const toggle = (w) => setChips((arr) => (arr.includes(w) ? arr.filter((x) => x !== w) : [...arr, w]));
+  const row = { display: "flex", flexWrap: "wrap", justifyContent: "center", gap: 6, maxWidth: 320, margin: "0 auto" };
+  return (
+    <div>
+      {chips.length > 0 && (
+        <div style={{ ...row, marginTop: 18 }}>
+          {chips.map((w) => (
+            <button key={w} className="chip on" onClick={() => toggle(w)} style={{ fontSize: 11, padding: "3px 9px" }}>{w}</button>
+          ))}
+        </div>
+      )}
+      <div style={{ ...row, marginTop: 16 }}>
+        {PARFUM_FAMILLES.map((f) => (
+          <button key={f.key} className={`chip ${chips.includes(f.key) ? "on" : ""}`}
+            onClick={() => { setOpen((o) => (o === f.key ? null : f.key)); if (f.head !== false && open !== f.key && !chips.includes(f.key)) toggle(f.key); }}
+            style={{ fontSize: 11, padding: "3px 9px", opacity: open && open !== f.key ? 0.45 : 1 }}>{f.key}</button>
+        ))}
+      </div>
+      {open && (
+        <div style={{ ...row, marginTop: 8 }}>
+          {(PARFUM_FAMILLES.find((f) => f.key === open) || { facets: [] }).facets.map((w) => (
+            <button key={w} className={`chip ${chips.includes(w) ? "on" : ""}`} onClick={() => toggle(w)}
+              style={{ fontSize: 11, padding: "3px 9px", color: chips.includes(w) ? undefined : C.mut }}>{w}</button>
+          ))}
+        </div>
+      )}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, maxWidth: 320, margin: "16px auto 0" }}>
+        <span className="mono" style={{ fontSize: 10, color: C.faint, letterSpacing: ".08em" }}>intensité</span>
+        <input type="range" min="0" max="10" step="1" value={intensity ?? 5}
+          onChange={(e) => setIntensity(parseInt(e.target.value))}
+          style={{ flex: 1, accentColor: C.text }} />
+        <span className="mono" style={{ fontSize: 11, color: intensity == null ? C.faint : C.text, width: 16, textAlign: "right" }}>
+          {intensity ?? "—"}
+        </span>
+      </div>
+    </div>
+  );
+}
+// aide facultative (toggle "détails" déjà existant, réutilisé tel quel — voir
+// current.action.desc dans le JSX) — guide de dimensions, pas un formulaire.
+// Trois familles de dimensions : classique (déjà validé), texture/forme (couverte
+// aussi par PARFUM_TEXTURE_CHIPS ci-dessus, ce texte reste un rappel complémentaire),
+// sensoriel/imaginaire (technique synesthésique — décrire en couleur/texture au
+// toucher/température/lieu/porteur imaginé plutôt qu'en ingrédients, demandé par
+// Maxence 01/08 après une vidéo vue sur le sujet). Le timing des points de contact
+// restants ouvre le texte : c'est le repère qu'il se sert lui-même, à main levée.
+// Famille · facettes · forme · intensité sont passées dans les chips/curseur (voir
+// PARFUM_FAMILLES) — ce texte ne garde donc que ce qu'aucun chip ne peut couvrir :
+// les dimensions qui demandent une phrase.
+const PARFUM_AIDE = "aide, facultatif — à toi de gérer : " + PARFUM_CHECKPOINTS.slice(1).map((cp) => cp.label).join(" · ") + ". À dire en mots (le reste est dans les chips) — « sent comme X + Y » · évolution vs le point précédent · naturel/synthétique · couleur ressentie · texture au toucher · température · lieu évoqué · identité du porteur imaginé";
 // which cook created the OLDEST still-open dish debt (Maxence 11/07: "l'app
 // propose peu de temps après l'action qui ramène à 0" — eligible ≠ prioritized;
 // pickAging's weight() ages a row off when THAT ROW was last done, so a vaisselle
@@ -625,7 +768,9 @@ function resolveDraw(drawn, log) {
   // per-action row from buildLotteryRows (Sudoku's "vidéo", Parfum's "livre"/
   // "vidéo") just as much as the single-action whole-activity case (Livre, Podcast).
   if (action && action.singleItem) action = resolveSingleItem(a, action);
-  if (drawn.action && action && /\(LRU\)/.test(action.text || "") && hasDoingItems(a)) {
+  if (drawn.action && action && action.id === "x_pf_matiere" && hasDoingItems(a)) {
+    action = resolveParfumSession(a, log, action);
+  } else if (drawn.action && action && /\(LRU\)/.test(action.text || "") && hasDoingItems(a)) {
     action = pickItemLRU(a, log, action);
   }
   // picker: pure coin flip between text variants of the SAME action — doesn't
@@ -711,6 +856,26 @@ function pickAging(activities, log, place, options = {}) {
     const es = activities.find((x) => x.id === "a_espagnol");
     const anki = es && (es.actions || []).find((x) => x.id === "x_es_anki");
     if (es && anki && placeOkW(anki.where || es.where, place)) return resolveDraw({ activity: es, action: anki }, log);
+  }
+  // parfum — matière du jour : forcé jusqu'à résolution (pick du jour ET tous ses
+  // checkpoints dus notés), même idée que vaisselle/anki ci-dessus mais sur un état
+  // (pas juste "dernier logué") — sinon le tirage pondéré pourrait ne jamais le
+  // proposer avant que Maxence sorte de chez lui (retour du 01/08 sur la 1ère
+  // version qui laissait ça au hasard). Le checkpoint "résiduel" (+24h) d'hier
+  // tombe ici aussi, tout naturellement, juste avant que le pick du jour reprenne
+  // le dessus une fois noté (item.today déjà archivé — voir submitParfumNote).
+  if (avoidId !== "a_parfum_explo") {
+    const pf = activities.find((x) => x.id === "a_parfum_explo");
+    if (pf && placeOk(pf, place)) {
+      const matAction = (pf.actions || []).find((x) => x.id === "x_pf_matiere");
+      const todayItem = matAction ? parfumTodayItem(pf) : null;
+      const doneToday = matAction ? completionsInPeriod(log, "a_parfum_explo", "x_pf_matiere", "day") > 0 : true;
+      if (matAction && todayItem) {
+        if (parfumDueCheckpoint(todayItem)) return resolveDraw({ activity: pf, action: matAction }, log);
+      } else if (matAction && !doneToday && hasDoingItems(pf)) {
+        return resolveDraw({ activity: pf, action: matAction }, log);
+      }
+    }
   }
   let rows = buildLotteryRows(activities, log, place, relax).filter((r) => r.activity.id !== avoidId);
   if (!rows.length) return null;
@@ -1208,6 +1373,12 @@ function Throughline() {
   // AUTO_START_MS) carry on from there (Maxence 01/08: "avant que l'action de base
   // apparaisse on fait apparaître une action éphémère choisir").
   const [itemNameInput, setItemNameInput] = useState("");
+  // parfum checkpoint note (cœur/fond/résiduel) : chips texture/forme + curseur
+  // d'intensité, saisis sur le mini-écran "proposal" (parfumNoteOnly), soumis avec
+  // le `comment` déjà existant par submitParfumNote() — brut, pas de synthèse Claude
+  // (Maxence 01/08, round 3).
+  const [parfumChips, setParfumChips] = useState([]);
+  const [parfumIntensity, setParfumIntensity] = useState(null);
   // mid-session comment confirmation (Maxence 17/07): submitRunningComment used to
   // clear the field with zero feedback — same class of gap as "done"'s syncMsg, just
   // missing here since a running note never touches the API. Brief local flash only.
@@ -1646,29 +1817,59 @@ function Throughline() {
       else new Notification("balance", { body: text });
     } catch {}
   };
-  const checkDueReminder = async () => {
+  // 02/08 : passé d'un slot unique à une FILE. La lessive n'avait jamais qu'un rappel
+  // en vol, mais les checkpoints parfum en posent deux d'un coup (cœur, fond) — avec
+  // l'ancien slot le second écrasait le premier. `key` sert à ré-armer ou annuler un
+  // rappel précis (un checkpoint noté à la main dans l'app annule sa notif, sinon
+  // elle sonnerait pour rien).
+  const readReminders = async () => {
     const r = await loadJSON(NS("tlx_reminder"), null);
-    if (!r || Date.now() < r.dueTs) return;
-    fireReminder(r.text);
-    saveJSON(NS("tlx_reminder"), null);
+    if (!r) return [];
+    return Array.isArray(r) ? r : [r]; // tolère l'ancienne forme (objet seul) déjà en storage
   };
-  const scheduleReminder = (text, afterMin) => {
+  const armNextReminder = (rest) => {
+    if (!rest.length) return;
+    const next = Math.min(...rest.map((r) => r.dueTs)) - Date.now();
+    setTimeout(checkDueReminder, Math.max(500, next + 500));
+  };
+  const checkDueReminder = async () => {
+    const all = await readReminders();
+    if (!all.length) return;
+    const now = Date.now();
+    const due = all.filter((r) => now >= r.dueTs);
+    if (!due.length) return;
+    due.forEach((r) => fireReminder(r.text));
+    const rest = all.filter((r) => now < r.dueTs);
+    saveJSON(NS("tlx_reminder"), rest);
+    armNextReminder(rest);
+  };
+  const scheduleReminder = async (text, afterMin, key = null) => {
     // same piggyback-on-a-real-tap pattern as devicemotion's permission grab in
     // start() above — no dedicated prompt/button.
     if (typeof Notification !== "undefined" && Notification.permission === "default") {
       Notification.requestPermission().catch(() => {});
     }
+    if (afterMin <= 0) return;
     const dueTs = Date.now() + afterMin * 60000;
-    saveJSON(NS("tlx_reminder"), { text, dueTs });
+    const rest = (await readReminders()).filter((r) => !key || r.key !== key);
+    saveJSON(NS("tlx_reminder"), [...rest, { text, dueTs, key }]);
     setTimeout(checkDueReminder, afterMin * 60000 + 500);
+  };
+  const cancelReminder = async (key) => {
+    const all = await readReminders();
+    if (!all.some((r) => r.key === key)) return;
+    saveJSON(NS("tlx_reminder"), all.filter((r) => r.key !== key));
   };
   useEffect(() => {
     (async () => {
-      const r = await loadJSON(NS("tlx_reminder"), null);
-      if (!r) return;
-      const remain = r.dueTs - Date.now();
-      if (remain <= 0) { fireReminder(r.text); saveJSON(NS("tlx_reminder"), null); }
-      else setTimeout(checkDueReminder, remain + 500);
+      const all = await readReminders();
+      if (!all.length) return;
+      const now = Date.now();
+      const due = all.filter((r) => now >= r.dueTs);
+      due.forEach((r) => fireReminder(r.text));
+      const rest = all.filter((r) => now < r.dueTs);
+      if (due.length) saveJSON(NS("tlx_reminder"), rest);
+      armNextReminder(rest);
     })();
     const onVis = () => { if (document.visibilityState === "visible") checkDueReminder(); };
     document.addEventListener("visibilitychange", onVis);
@@ -1898,7 +2099,7 @@ function Throughline() {
     setAlbumTitles([]); setAlbumIdx(0); setDescOpen(false); setRating(50);
     propose(log, activities, false, current ? current.activity.id : null);
   };
-  const resetFlow = (nextStage = "entry") => { setStage(nextStage); setCurrent(null); setRunning(false); setElapsedMs(0); setPaused(false); setComment(""); setItemNameInput(""); setDescOpen(false); setSyncMsg(""); setSyncing(false); setAlbumTitles([]); setAlbumIdx(0); setRating(50); };
+  const resetFlow = (nextStage = "entry") => { setStage(nextStage); setCurrent(null); setRunning(false); setElapsedMs(0); setPaused(false); setComment(""); setItemNameInput(""); setParfumChips([]); setParfumIntensity(null); setDescOpen(false); setSyncMsg(""); setSyncing(false); setAlbumTitles([]); setAlbumIdx(0); setRating(50); };
   // Album de la semaine title-by-title appreciation (Maxence 16/07, item 4/5) —
   // isAlbumActivity gates the extra running-stage UI to that one activity only.
   const isAlbumActivity = !!(current && current.activity.id === "a_ecoute_album");
@@ -2229,6 +2430,41 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
         ? { ...a, items: (a.items || []).map((it) => (it.id === itemId ? { ...it, status: "done", rating } : it)) }
         : a)));
     }
+    // parfum — matière du jour : le pick "ouverture" est le seul checkpoint qui
+    // passe par le flux normal (session + clic) — c'est ici qu'on initialise
+    // item.today, avec ouverture déjà notée (chips/curseur/texte inclus). Les 3
+    // checkpoints suivants s'écrivent dessus via submitParfumNote(), zéro clic.
+    if (current && current.activity.id === "a_parfum_explo" && current.action.id === "x_pf_matiere"
+        && current.action.parfumCheckpoint === "ouverture" && current.action.itemId) {
+      const itemId = current.action.itemId;
+      const startTs = existing ? existing.ts : realNow().getTime();
+      // notif sur les checkpoints intermédiaires (Maxence 02/08 : "oui pour la notif").
+      // Cœur et fond seulement : le résiduel (+24h) n'en a pas besoin, il tombe de
+      // lui-même sur le pick forcé du lendemain matin (et un setTimeout de 24h ne
+      // survit de toute façon pas à un onglet tué). Même limite best-effort que la
+      // lessive — pas de push serveur possible sur un PWA statique : la notif part si
+      // l'app est encore vivante, sinon elle se rattrape au prochain retour au
+      // premier plan. Le forçage dans pickAging reste le vrai filet.
+      if (!SIM) {
+        const matiere = (current.activity.items || []).find((it) => it.id === itemId);
+        PARFUM_CHECKPOINTS.filter((cp) => cp.key === "coeur" || cp.key === "fond").forEach((cp) => {
+          const afterMin = (startTs + cp.afterMin * 60000 - Date.now()) / 60000;
+          scheduleReminder(`« ${matiere ? matiere.text : "matière"} » — ${cp.label}`, afterMin, "pf:" + cp.key);
+        });
+      }
+      setActivities((arr) => arr.map((act) => (act.id !== "a_parfum_explo" ? act : {
+        ...act,
+        items: (act.items || []).map((it) => (it.id !== itemId ? it : {
+          ...it,
+          today: {
+            dateKey: todayKey(), startTs, notedKeys: ["ouverture"],
+            notes: { ouverture: text, coeur: "", fond: "", residuel: "" },
+            chips: { ouverture: parfumChips, coeur: [], fond: [], residuel: [] },
+            intensity: { ouverture: parfumIntensity, coeur: null, fond: null, residuel: null },
+          },
+        })),
+      })));
+    }
     // pipeline advances the piece, practice grows observations — recommandeur (with a
     // drawn item, or without) already has everything it needs synchronously above
     // (rating+status, or just log.note): no Claude round-trip for it (24/07 — removed
@@ -2303,6 +2539,11 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
     // input below (submitItemName), a tap or the auto-start timer here is a no-op
     // until a title's been given and current.action.fresh has cleared.
     if (current?.action?.fresh) return;
+    // parfum checkpoint note (cœur/fond/résiduel) : pas une session non plus — même
+    // idiome que fresh ci-dessus. Le mini-écran de note (voir JSX) reste sur
+    // "proposal", submitParfumNote() referme le flux directement, jamais de
+    // running/finish, donc jamais de clic (Maxence 01/08).
+    if (current?.action?.parfumNoteOnly) return;
     lastStartDelayRef.current = proposedAtRef.current ? Date.now() - proposedAtRef.current : null;
     let preMs = 0;
     if (current?.activity?.timed) {
@@ -2342,6 +2583,78 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
     setActivities((arr) => arr.map((act) => (act.id === a.id ? { ...act, items: nextItems } : act)));
     setCurrent({ activity: { ...a, items: nextItems }, action: resolveSingleItem({ ...a, items: nextItems }, baseAction) });
     setItemNameInput("");
+  };
+
+  // parfum checkpoint note (cœur/fond/résiduel) : même idiome que submitItemName
+  // ci-dessus — pas une session, écrit directement sur l'item puis referme le flux.
+  // Note brute, pas de synthèse Claude (Maxence 01/08, round 3 : "on garde brut
+  // pour l'instant"). Le dernier checkpoint (résiduel) clôt le cycle : `.today`
+  // archivé tel quel dans `.sessions` (pas de perte de la dernière note), l'item
+  // redevient un item "doing" ordinaire, réutilisable dès le prochain pick.
+  const submitParfumNote = () => {
+    if (!current?.action?.parfumNoteOnly) return;
+    const { activity: a, action } = current;
+    const itemId = action.itemId, cp = action.parfumCheckpoint;
+    const text = comment.trim();
+    const item = (a.items || []).find((it) => it.id === itemId);
+    if (!item || !item.today) { resetFlow(); return; }
+    const updatedToday = {
+      ...item.today,
+      notedKeys: [...(item.today.notedKeys || []), cp],
+      notes: { ...item.today.notes, [cp]: text },
+      chips: { ...item.today.chips, [cp]: parfumChips },
+      intensity: { ...item.today.intensity, [cp]: parfumIntensity },
+    };
+    const isLast = cp === PARFUM_CHECKPOINTS[PARFUM_CHECKPOINTS.length - 1].key;
+    setActivities((arr) => arr.map((act) => (act.id !== a.id ? act : {
+      ...act,
+      items: (act.items || []).map((it) => {
+        if (it.id !== itemId || !it.today) return it;
+        if (!isLast) return { ...it, today: updatedToday };
+        const { today, ...rest } = it;
+        return { ...rest, sessions: [...(it.sessions || []), updatedToday] };
+      }),
+    })));
+    // noté à la main avant que la notif ne parte : elle n'a plus lieu d'être.
+    cancelReminder("pf:" + cp);
+    resetFlow();
+    // le cycle est clos → synthèse Claude, en tâche de fond (Maxence 02/08 : "on peut
+    // évidemment synthétiser tout tant qu'on garde le log brut aussi" / "on le stocke
+    // juste"). Après resetFlow et sans await : zéro attente à l'écran, et si l'appel
+    // échoue le brut est déjà écrit, rien n'est perdu.
+    if (isLast) synthParfumSession(a.id, itemId, updatedToday);
+  };
+  // écrit `synthesis` À CÔTÉ du brut sur la session archivée — jamais à la place.
+  // Rien ne l'affiche pour l'instant, c'est un stock à relire plus tard.
+  const synthParfumSession = async (aid, itemId, session) => {
+    const key = (await store.get("tlx_apiKey")) || "";
+    if (!key) return;
+    const matiere = ((activities.find((x) => x.id === aid) || {}).items || []).find((it) => it.id === itemId);
+    const bloc = PARFUM_CHECKPOINTS.map((cp) => {
+      const chips = (session.chips || {})[cp.key] || [];
+      const inten = (session.intensity || {})[cp.key];
+      return `${cp.label}\n  descripteurs : ${chips.length ? chips.join(", ") : "(aucun)"}\n  intensité : ${inten == null ? "(non notée)" : inten + "/10"}\n  note : ${((session.notes || {})[cp.key] || "").trim() || "(vide)"}`;
+    }).join("\n\n");
+    const prompt = `Matière première de parfumerie sentie sur mouillette : « ${matiere ? matiere.text : "?"} », suivie sur 24h en 4 points de contact.
+
+${bloc}
+
+Écris une synthèse en français de cette matière telle qu'elle a été perçue : l'accord d'ensemble, l'arc d'évolution de l'ouverture au résiduel (ce qui tombe, ce qui tient, ce qui apparaît), la tenue, et ce qui ressort comme caractéristique. Appuie-toi UNIQUEMENT sur les notes ci-dessus — n'ajoute aucune connaissance générale sur cette matière, ne comble aucun trou, et dis franchement quand un point de contact est resté vide. Prose dense, sans liste à puces, sans préambule.`;
+    try {
+      const out = await claudeJSON(key, prompt, {
+        type: "object",
+        properties: { synthesis: { type: "string" } },
+        required: ["synthesis"],
+        additionalProperties: false,
+      }, 1200);
+      setActivities((arr) => arr.map((act) => (act.id !== aid ? act : {
+        ...act,
+        items: (act.items || []).map((it) => (it.id !== itemId ? it : {
+          ...it,
+          sessions: (it.sessions || []).map((s) => (s.startTs === session.startTs ? { ...s, synthesis: out.synthesis } : s)),
+        })),
+      })));
+    } catch (e) {}
   };
 
   // auto-start (Maxence 16/07): a proposal used to need its own separate tap before
@@ -2948,6 +3261,8 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
       stage, tab, current, activities, log, holdMs, holdDate, place,
       begin, finish, tapAction, submitComment, start, resetFlow,
       setManualMin, setComment, setTab, applyDebugTime, simReseed, runSimBatch,
+      parfumChips, setParfumChips, parfumIntensity, setParfumIntensity, submitParfumNote,
+      readReminders, scheduleReminder, cancelReminder, checkDueReminder,
       setLog, setActivities, setStage, setCurrent,
       albumTitles, albumIdx, setAlbumTitles, setAlbumIdx, advanceAlbumTitle,
       rating, setRating, setRatingFromPointer,
@@ -3552,6 +3867,32 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                   </div>
                 )}
 
+                {/* parfum checkpoint note (cœur/fond/résiduel) : même idiome que le
+                    "choisir" ci-dessus — ephemeral, pas une session, tap/auto-start
+                    no-ops tant que parfumNoteOnly (voir begin()). Chips texture/forme
+                    (multi-select, toggle direct) + curseur d'intensité + le même champ
+                    texte "« ... »", dont l'Enter soumet tout via submitParfumNote()
+                    (brut, zéro clic — Maxence 01/08, round 3). */}
+                {stage === "proposal" && current?.action?.parfumNoteOnly && (
+                  <div className="fade">
+                    <ParfumNotePicker chips={parfumChips} setChips={setParfumChips} intensity={parfumIntensity} setIntensity={setParfumIntensity} />
+                    <div style={{ position: "relative", maxWidth: 320, margin: "20px auto 0" }}>
+                      <input className="in" value={comment}
+                        autoComplete="off" name="parfum-note"
+                        onChange={(e) => setComment(e.target.value)}
+                        onKeyDown={(e) => { if (e.key === "Enter") submitParfumNote(); }}
+                        style={{ fontFamily: "var(--mono)", fontSize: 13, textAlign: "center", display: "block", color: C.text }} />
+                      {!comment && (
+                        <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: COMMENT_HINT_MODE === "cursor" ? "flex-start" : "center", justifyContent: "center", gap: 6, pointerEvents: "none", fontFamily: "var(--mono)", fontSize: 13, color: C.faint }}>
+                          {COMMENT_HINT_MODE === "cursor"
+                            ? <span className="hintcursor" />
+                            : <><span>«</span><span>...</span><span>»</span></>}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
                 {/* running: a quiet pause, for when something outside interrupts the session
                     (a call, someone at the door) — for stopping the clock without abandoning
                     the activity. Abandoning it entirely is still the hold-the-line gesture
@@ -3679,6 +4020,15 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                               style={{ width: 44, fontSize: 12, textAlign: "center", borderBottom: `1px solid ${C.line}`, color: C.mut }}
                             />
                             <span className="mono" style={{ fontSize: 10, color: C.faint }}>min</span>
+                          </div>
+                        )}
+                        {/* parfum — checkpoint "ouverture" : mêmes chips/curseur que le mini-écran
+                            de checkpoint note (cœur/fond/résiduel), pour une saisie uniforme sur
+                            les 4 points de contact — capturés dans item.today par submitComment()
+                            en plus du flux normal (log + coachViaClaude, inchangés). */}
+                        {current && current.action.id === "x_pf_matiere" && current.action.parfumCheckpoint === "ouverture" && (
+                          <div style={{ marginBottom: 18 }}>
+                            <ParfumNotePicker chips={parfumChips} setChips={setParfumChips} intensity={parfumIntensity} setIntensity={setParfumIntensity} />
                           </div>
                         )}
                         {/* same "« … »" idea as the running field (Maxence 16/07, round 6): a
