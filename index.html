@@ -2749,6 +2749,16 @@ ${bloc}
     // (same as the old "passer"/"valider" button) then moves on — one control surface,
     // no separate button needed.
     else if (stage === "done") submitComment();
+    // parfum checkpoint note (cœur/fond/résiduel) : begin() no-ops ici comme pour
+    // "fresh" (voir begin()), mais contrairement à "fresh" il n'y a rien à choisir
+    // en amont — chips/curseur/texte sont tous facultatifs, exactement comme le
+    // commentaire sur "done". Sans ce cas, taper la ligne ne faisait plus rien du
+    // tout sur ces écrans, cassant la convention "la ligne est la seule surface de
+    // contrôle" — bug remonté par Maxence (02/08) : "toucher la ligne ne fait pas
+    // passer l'activité à partir du deuxième clic... surement parce que ce n'est
+    // plus considéré comme un clic". submitParfumNote() gère déjà très bien un
+    // envoi à vide (chips/texte non touchés).
+    else if (stage === "proposal" && current?.action?.parfumNoteOnly) submitParfumNote();
     else if (stage === "proposal") begin();
     else if (stage === "running" && !paused) {
       // album de la semaine: a plain tap on the hero line commits the current
