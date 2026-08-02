@@ -332,7 +332,11 @@ function resolveSingleItem(a, action) {
   const current = [...items].reverse().find((it) => !it.done);
   const label = action.itemLabel || "titre";
   if (!current) return { ...action, text: `${action.text} — nouveau ${label}`, itemId: null, fresh: true };
-  return { ...action, text: `${action.text} — « ${current.text} »`, itemId: current.id, fresh: false };
+  // progress (page/épisode/chapitre…) is tracked separately from the title itself
+  // (Maxence 02/08: a page number typed into the title once just goes stale — see
+  // coachViaClaude, which is what keeps `progress` current from session comments).
+  const progressSuffix = current.progress ? ` (${current.progress})` : "";
+  return { ...action, text: `${action.text} — « ${current.text} »${progressSuffix}`, itemId: current.id, fresh: false };
 }
 
 // --- items[] LRU picker (Chant micro, Ordre, Clean, Cuisiner…) ---
@@ -1379,6 +1383,11 @@ function Throughline() {
   // (Maxence 01/08, round 3).
   const [parfumChips, setParfumChips] = useState([]);
   const [parfumIntensity, setParfumIntensity] = useState(null);
+  // vocabulaire caché (Maxence 02/08) : le picker de chips restait toujours visible,
+  // ce qui ancre la description sur les mots déjà là avant même d'avoir essayé de
+  // décrire avec les siens. Replié par défaut, révélé à la demande — comme une aide,
+  // pas comme le formulaire lui-même.
+  const [vocabOpen, setVocabOpen] = useState(false);
   // mid-session comment confirmation (Maxence 17/07): submitRunningComment used to
   // clear the field with zero feedback — same class of gap as "done"'s syncMsg, just
   // missing here since a running note never touches the API. Brief local flash only.
@@ -2099,7 +2108,7 @@ function Throughline() {
     setAlbumTitles([]); setAlbumIdx(0); setDescOpen(false); setRating(50);
     propose(log, activities, false, current ? current.activity.id : null);
   };
-  const resetFlow = (nextStage = "entry") => { setStage(nextStage); setCurrent(null); setRunning(false); setElapsedMs(0); setPaused(false); setComment(""); setItemNameInput(""); setParfumChips([]); setParfumIntensity(null); setDescOpen(false); setSyncMsg(""); setSyncing(false); setAlbumTitles([]); setAlbumIdx(0); setRating(50); };
+  const resetFlow = (nextStage = "entry") => { setStage(nextStage); setCurrent(null); setRunning(false); setElapsedMs(0); setPaused(false); setComment(""); setItemNameInput(""); setParfumChips([]); setParfumIntensity(null); setDescOpen(false); setVocabOpen(false); setSyncMsg(""); setSyncing(false); setAlbumTitles([]); setAlbumIdx(0); setRating(50); };
   // Album de la semaine title-by-title appreciation (Maxence 16/07, item 4/5) —
   // isAlbumActivity gates the extra running-stage UI to that one activity only.
   const isAlbumActivity = !!(current && current.activity.id === "a_ecoute_album");
@@ -2210,7 +2219,7 @@ ${act.observations || "(vide)"}
 Commentaire laissé après la session :
 « ${text} »
 
-Détermine où en est la pièce APRÈS cette session. new_stage = index (0 à ${last}) de l'étape courante : si une étape vient d'être finie, avance à la suivante, sinon garde l'étape. Cas particulier : si la session avait lieu SUR la dernière étape (${last} : ${(stages[last] || {}).text || "?"}) et que le commentaire indique qu'elle est terminée/réussie, new_stage = ${last + 1} — la pièce sort du funnel, terminée. Ne mets ${last + 1} QUE dans ce cas précis (jamais pour sauter directement d'une étape antérieure à la fin sans passer par la dernière étape elle-même). piece_name = nom court (existant, ou tiré du commentaire si fraîche). progressed = true si cette session a fait avancer concrètement la pièce (même sans changer d'étape — un chunk appris, une itération réelle), false si elle n'a rien fait gagner (rejoué sans progrès, session avortée, bloqué). updated_observations = les observations réécrites en y intégrant ce qu'apporte ce commentaire — garde tout ce qui reste pertinent, ne raccourcis pas artificiellement, ne retire que ce qui est vraiment obsolète ou remplacé.`;
+Détermine où en est la pièce APRÈS cette session. new_stage = index (0 à ${last}) de l'étape courante : si une étape vient d'être finie, avance à la suivante, sinon garde l'étape. new_stage = ${last + 1} — la pièce sort du funnel, terminée — dans DEUX cas : (a) la session avait lieu SUR la dernière étape (${last} : ${(stages[last] || {}).text || "?"}) et le commentaire indique qu'elle est terminée/réussie ; (b) le commentaire dit explicitement que la pièce entière est finie/terminée (« fini », « c'est bon », etc.), peu importe l'étape où elle en était — un aveu clair de fin fait toujours sortir la pièce du funnel directement, sans repasser par les étapes intermédiaires (Maxence 02/08 : la correction manuelle passe aussi par le commentaire, pas seulement par un vrai passage séquentiel). piece_name = nom court (existant, ou tiré du commentaire si fraîche). progressed = true si cette session a fait avancer concrètement la pièce (même sans changer d'étape — un chunk appris, une itération réelle), false si elle n'a rien fait gagner (rejoué sans progrès, session avortée, bloqué). updated_observations = les observations réécrites en y intégrant ce qu'apporte ce commentaire — garde tout ce qui reste pertinent, ne raccourcis pas artificiellement, ne retire que ce qui est vraiment obsolète ou remplacé.`;
     setSyncing(true); setSyncMsg("lecture du commentaire…");
     try {
       const out = await claudeJSON(key, prompt, {
@@ -2288,7 +2297,7 @@ ${ctx}
 Ce qu'il a tapé :
 « ${text} »
 
-Détermine où en est la pièce APRÈS ce qui est décrit. new_stage = index (0 à ${last}) de l'étape courante : si une étape vient d'être finie, avance à la suivante, sinon garde l'étape (${live ? live.stage : 0} si le texte ne décrit pas d'avancée claire). Cas particulier : si le texte décrit une session sur la DERNIÈRE étape (${last} : ${(stages[last] || {}).text || "?"}) et qu'elle est terminée/réussie, new_stage = ${last + 1} — la pièce sort du funnel, terminée. Ne mets ${last + 1} QUE dans ce cas précis. piece_name = nom court (existant, ou tiré du texte si fraîche). progressed = true si le texte décrit un vrai pas en avant, false sinon.`;
+Détermine où en est la pièce APRÈS ce qui est décrit. new_stage = index (0 à ${last}) de l'étape courante : si une étape vient d'être finie, avance à la suivante, sinon garde l'étape (${live ? live.stage : 0} si le texte ne décrit pas d'avancée claire). new_stage = ${last + 1} — la pièce sort du funnel, terminée — dans DEUX cas : (a) le texte décrit une session sur la DERNIÈRE étape (${last} : ${(stages[last] || {}).text || "?"}) et qu'elle est terminée/réussie ; (b) le texte dit explicitement que la pièce entière est finie/terminée, peu importe l'étape où elle en était — une correction manuelle passe aussi par ce texte libre. piece_name = nom court (existant, ou tiré du texte si fraîche). progressed = true si le texte décrit un vrai pas en avant, false sinon.`;
     try {
       const out = await claudeJSON(key, prompt, {
         type: "object",
@@ -2341,7 +2350,16 @@ Détermine où en est la pièce APRÈS ce qui est décrit. new_stage = index (0 
     const singleItem = !!action.singleItem;
     const label = action.itemLabel || "titre";
     const curItem = singleItem && action.itemId ? (act.items || []).find((it) => it.id === action.itemId) : null;
-    const itemCtx = !singleItem || !curItem ? "" : `\nCette activité suit aussi un ${label} "en cours" persistant, distinct des observations. ${label[0].toUpperCase()}${label.slice(1)} en cours : « ${curItem.text} ».`;
+    // progress (page/épisode/chapitre…) lives in its own field, never folded into
+    // `text` itself — a page number typed straight into the title just goes stale
+    // as it's re-read later (Maxence 02/08, caught on the parfum livre item).
+    const itemCtx = !singleItem || !curItem ? "" : `\nCette activité suit aussi un ${label} "en cours" persistant, distinct des observations. ${label[0].toUpperCase()}${label.slice(1)} en cours : « ${curItem.text} »${curItem.progress ? ` (repère de progression actuel : ${curItem.progress})` : ""}.`;
+    // self-healing titles (Maxence 02/08): some titles were typed once with a stray
+    // progress marker baked in (e.g. "livre X, page 22/117") before `progress` existed
+    // as its own field — there's no in-app rename UI, so instead of asking for a manual
+    // fix, every session touching that item is a chance for Claude to notice and clean
+    // it, same call as the progress extraction above.
+    const titleCleanupCtx = curItem ? `\n\nSi « ${curItem.text} » contient encore un repère de progression collé au nom (numéro de page, épisode, %...) qui aurait dû être séparé, renvoie le titre nettoyé (sans ce repère, juste le nom) dans clean_title, et mets le repère qu'il contenait dans progress s'il n'y est pas déjà. Sinon clean_title = null (ne renomme jamais un titre déjà propre).` : "";
     const prompt = `Activité : « ${act.name} » (type: ${act.kind}, domaine: ${act.domain}).
 Action faite : « ${current.action.text} ».
 ${itemCtx}
@@ -2361,7 +2379,7 @@ ${act.observations || "(vide)"}
 Commentaire laissé après cette session :
 « ${text} »
 
-Réécris les observations en y intégrant ce qu'apporte ce commentaire — garde tout ce qui reste pertinent, ne raccourcis pas artificiellement pour économiser de la place. Ne retire que ce qui est vraiment obsolète ou remplacé par une observation plus récente. updated_observations = les observations complètes réécrites.${curItem ? `\n\nDétermine aussi si le commentaire indique que « ${curItem.text} » est fini/terminé (la prochaine session en proposera un nouveau ${label}) : item_done = true si oui, false s'il reste en cours.` : ""}`;
+Réécris les observations en y intégrant ce qu'apporte ce commentaire — garde tout ce qui reste pertinent, ne raccourcis pas artificiellement pour économiser de la place. Ne retire que ce qui est vraiment obsolète ou remplacé par une observation plus récente. updated_observations = les observations complètes réécrites.${curItem ? `\n\nDétermine aussi si le commentaire indique que « ${curItem.text} » est fini/terminé (la prochaine session en proposera un nouveau ${label}) : item_done = true si oui, false s'il reste en cours.\n\nSi le commentaire mentionne un repère de progression (page, épisode, chapitre, minute…), donne-le dans progress — court (ex: "p.22/117", "ép.6"), JAMAIS intégré au titre lui-même qui reste stable. progress = null si aucun repère n'est mentionné cette fois (garde alors l'ancien tel quel, ne l'efface pas).${titleCleanupCtx}` : ""}`;
     setSyncing(true); setSyncMsg("lecture du commentaire…");
     try {
       // maxTokens generous here (found 10/07: the default 400 truncates mid-JSON
@@ -2372,16 +2390,16 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
         type: "object",
         properties: {
           updated_observations: { type: "string" },
-          ...(curItem ? { item_done: { type: "boolean" } } : {}),
+          ...(curItem ? { item_done: { type: "boolean" }, progress: { type: ["string", "null"] }, clean_title: { type: ["string", "null"] } } : {}),
         },
-        required: curItem ? ["updated_observations", "item_done"] : ["updated_observations"],
+        required: curItem ? ["updated_observations", "item_done", "progress", "clean_title"] : ["updated_observations"],
         additionalProperties: false,
       }, 4000);
       const aid = act.id;
       setActivities((arr) => arr.map((a) => {
         if (a.id !== aid) return a;
         const patch = { observations: out.updated_observations };
-        if (curItem) patch.items = (a.items || []).map((it) => (it.id === curItem.id ? { ...it, done: !!out.item_done } : it));
+        if (curItem) patch.items = (a.items || []).map((it) => (it.id === curItem.id ? { ...it, done: !!out.item_done, progress: out.progress || it.progress || null, text: out.clean_title || it.text } : it));
         return { ...a, ...patch };
       }));
       setSyncMsg("observations mises à jour ✓");
@@ -2890,8 +2908,22 @@ ${bloc}
       // a pipeline piece advances through the funnel stages, not todo/doing/done.
       // Tapping here is for setup/correction in the editor — in the live flow, Claude
       // advances the stage from the after-session comment (no manual tapping there).
-      const n = (a.stages || []).length || 1;
-      upd(id, { items: a.items.map((it) => (it.id === iid ? { ...it, stage: (((it.stage ?? 0) + 1) % n) } : it)) });
+      // Cycle includes one extra stop past the last stage: "terminé" (the same
+      // graduation sentinel advanceViaClaude uses for a piece finished on its last
+      // stage) — lets a piece be corrected straight to done, and triggers the same
+      // graduatesTo hand-off (e.g. Piano → Répertoire) a real session would (Maxence 02/08).
+      const stages = a.stages || [];
+      const last = stages.length - 1;
+      const n = stages.length + 1; // + terminé
+      const it = a.items.find((x) => x.id === iid);
+      const prevStage = it ? (it.stage ?? 0) : 0;
+      const ns = (prevStage + 1) % n;
+      const justGraduated = a.graduatesTo && ns > last && prevStage <= last;
+      setActivities((arr) => arr.map((act) => {
+        if (act.id === id) return { ...act, items: act.items.map((x) => (x.id === iid ? { ...x, stage: ns } : x)) };
+        if (justGraduated && act.id === a.graduatesTo) return { ...act, items: [...(act.items || []), { id: uid(), text: it.text, status: "doing" }] };
+        return act;
+      }));
       return;
     }
     const order = ["todo", "doing", "done"];
@@ -3885,7 +3917,13 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                     (brut, zéro clic — Maxence 01/08, round 3). */}
                 {stage === "proposal" && current?.action?.parfumNoteOnly && (
                   <div className="fade">
-                    <ParfumNotePicker chips={parfumChips} setChips={setParfumChips} intensity={parfumIntensity} setIntensity={setParfumIntensity} />
+                    {/* vocabulaire caché : décrire d'abord avec ses mots (champ texte en
+                        dessous), le picker de chips n'est qu'une aide à la demande
+                        (Maxence 02/08). */}
+                    <div style={{ textAlign: "center", marginBottom: vocabOpen ? 0 : 8 }}>
+                      <button className="link" onClick={() => setVocabOpen((o) => !o)}>{vocabOpen ? "cacher le vocabulaire" : "vocabulaire"}</button>
+                    </div>
+                    {vocabOpen && <ParfumNotePicker chips={parfumChips} setChips={setParfumChips} intensity={parfumIntensity} setIntensity={setParfumIntensity} />}
                     <div style={{ position: "relative", maxWidth: 320, margin: "20px auto 0" }}>
                       <input className="in" value={comment}
                         autoComplete="off" name="parfum-note"
@@ -4038,7 +4076,10 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                             en plus du flux normal (log + coachViaClaude, inchangés). */}
                         {current && current.action.id === "x_pf_matiere" && current.action.parfumCheckpoint === "ouverture" && (
                           <div style={{ marginBottom: 18 }}>
-                            <ParfumNotePicker chips={parfumChips} setChips={setParfumChips} intensity={parfumIntensity} setIntensity={setParfumIntensity} />
+                            <div style={{ textAlign: "center", marginBottom: vocabOpen ? 0 : 8 }}>
+                              <button className="link" onClick={() => setVocabOpen((o) => !o)}>{vocabOpen ? "cacher le vocabulaire" : "vocabulaire"}</button>
+                            </div>
+                            {vocabOpen && <ParfumNotePicker chips={parfumChips} setChips={setParfumChips} intensity={parfumIntensity} setIntensity={setParfumIntensity} />}
                           </div>
                         )}
                         {/* same "« … »" idea as the running field (Maxence 16/07, round 6): a
@@ -4486,15 +4527,18 @@ function ActivityCard({ a, upd, del, addAction, editAction, delAction, addStage,
           <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
             {a.items.map((it) => {
               const isPipe = a.kind === "pipeline";
+              const isGraduated = isPipe && (it.stage ?? 0) >= (a.stages || []).length;
               const st = (a.stages || [])[it.stage ?? 0];
-              const stageTxt = st ? st.text : "—";
+              const stageTxt = isGraduated ? "terminé" : (st ? st.text : "—");
               const isDone = !isPipe && it.status === "done";
               return (
               <div key={it.id} style={{ display: "flex", alignItems: "center", gap: 10 }}>
                 <button className="chip" onClick={() => cycleItem(a.id, it.id)}
-                  title={isPipe ? "set stage (setup / correction)" : "cycle status"}
-                  style={{ minWidth: 64, color: isPipe ? C.mut : statusColor(it.status), borderColor: isDone ? C.bone : C.line }}>{isPipe ? stageTxt : it.status}</button>
-                <span style={{ flex: 1, fontSize: 14, fontWeight: 300, color: isDone ? C.mut : C.text, textDecoration: isDone ? "line-through" : "none" }}>{it.text}</span>
+                  title={isPipe ? "cycle stage — one tap past the last stage reaches terminé (setup / correction)" : "cycle status"}
+                  style={{ minWidth: 64, color: isPipe ? (isGraduated ? C.bone : C.mut) : statusColor(it.status), borderColor: isDone || isGraduated ? C.bone : C.line }}>{isPipe ? stageTxt : it.status}</button>
+                <span style={{ flex: 1, fontSize: 14, fontWeight: 300, color: (isDone || isGraduated) ? C.mut : C.text, textDecoration: (isDone || isGraduated) ? "line-through" : "none" }}>
+                  {it.text}{it.progress && <span className="mono" style={{ fontSize: 11, color: C.faint }}> · {it.progress}</span>}
+                </span>
                 <button className="x" onClick={() => delItem(a.id, it.id)}>×</button>
               </div>
               );
