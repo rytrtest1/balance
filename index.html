@@ -3274,7 +3274,10 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
   };
   const onFile = (ev) => {
     const f = ev.target.files?.[0]; if (!f) return;
-    if (lastLoadDateRef.current === todayKey()) {
+    // 1x/jour calendaire = anti-triche pour l'usage réel (Maxence 18/07). Sans objet
+    // dans le bac à sable — pas de "jour" à tricher là, juste des recharges répétées
+    // pendant les tests (Maxence 03/08) — donc le gate ne s'applique qu'en prod.
+    if (!SIM && lastLoadDateRef.current === todayKey()) {
       setMsg("déjà chargé aujourd'hui"); setTimeout(() => setMsg(""), 2200);
       ev.target.value = ""; return;
     }
