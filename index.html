@@ -861,6 +861,18 @@ function pickAging(activities, log, place, options = {}) {
     const anki = es && (es.actions || []).find((x) => x.id === "x_es_anki");
     if (es && anki && placeOkW(anki.where || es.where, place)) return resolveDraw({ activity: es, action: anki }, log);
   }
+  // sudoku: video forces grille right after, same shape as espagnol above (Maxence
+  // 02/08 — noted in the log: "mettre sudoku grille après video sudoku tout comme
+  // Anki après conversation espagnol"). Doesn't touch x_su_grille's own target/
+  // period — its normal quota-driven draws elsewhere are untouched, this is one
+  // extra guaranteed channel. placeOkW gates it to where=work like the row itself,
+  // so it only actually fires when he's somewhere the grille can be proposed. One
+  // rejected forced proposal (avoidId) and it falls straight through to the normal draw.
+  if (lastLogged && avoidId !== "a_sudoku" && lastLogged.actionId === "x_su_video") {
+    const su = activities.find((x) => x.id === "a_sudoku");
+    const grille = su && (su.actions || []).find((x) => x.id === "x_su_grille");
+    if (su && grille && placeOkW(grille.where || su.where, place)) return resolveDraw({ activity: su, action: grille }, log);
+  }
   // parfum — matière du jour : forcé jusqu'à résolution (pick du jour ET tous ses
   // checkpoints dus notés), même idée que vaisselle/anki ci-dessus mais sur un état
   // (pas juste "dernier logué") — sinon le tirage pondéré pourrait ne jamais le
