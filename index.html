@@ -331,7 +331,10 @@ function resolveSingleItem(a, action) {
   const items = (a.items || []).filter((it) => it.actionId === action.id);
   const current = [...items].reverse().find((it) => !it.done);
   const label = action.itemLabel || "titre";
-  if (!current) return { ...action, text: `${action.text} — nouveau ${label}`, itemId: null, fresh: true };
+  // grammatical gender of itemLabel (Maxence 03/08: "vidéo" is feminine, "nouveau
+  // vidéo" was wrong) — action.itemFeminine flags it, defaults masculine.
+  const article = action.itemFeminine ? "nouvelle" : "nouveau";
+  if (!current) return { ...action, text: `${action.text} — ${article} ${label}`, itemId: null, fresh: true };
   // progress (page/épisode/chapitre…) is tracked separately from the title itself
   // (Maxence 02/08: a page number typed into the title once just goes stale — see
   // coachViaClaude, which is what keeps `progress` current from session comments).
@@ -822,16 +825,26 @@ function migrateSingleItemActivities(acts) {
   // actions, only some of which track an ongoing title (Sudoku's "résoudre une
   // grille" and Parfum's "sentir"/"famille"/"touche"/"forum" don't, so they're
   // absent here and stay untouched).
+  // feminine: itemLabel's grammatical gender (Maxence 03/08 — "nouveau vidéo" was
+  // wrong, "vidéo" is feminine; drives resolveSingleItem's "nouveau"/"nouvelle").
+  // Re-applied even on rows that already have singleItem (2nd branch below), so
+  // this specific fix reaches phones that got singleItem before this field
+  // existed, without needing a full reimport.
   const TARGETS = {
-    a_livre: { x_lire: "livre" },
-    a_podcast: { x_podcast: "podcast" },
-    a_sudoku: { x_su_video: "vidéo" },
-    a_parfum_explo: { x_pf_livre: "livre", x_pf_video: "vidéo" },
+    a_livre: { x_lire: { label: "livre", feminine: false } },
+    a_podcast: { x_podcast: { label: "podcast", feminine: false } },
+    a_sudoku: { x_su_video: { label: "vidéo", feminine: true } },
+    a_parfum_explo: { x_pf_livre: { label: "livre", feminine: false }, x_pf_video: { label: "vidéo", feminine: true } },
   };
   return acts.map((a) => {
     const t = TARGETS[a.id];
     if (!t) return a;
-    return { ...a, actions: (a.actions || []).map((x) => (t[x.id] && !x.singleItem ? { ...x, singleItem: true, itemLabel: t[x.id] } : x)) };
+    return { ...a, actions: (a.actions || []).map((x) => {
+      if (!t[x.id]) return x;
+      if (!x.singleItem) return { ...x, singleItem: true, itemLabel: t[x.id].label, itemFeminine: t[x.id].feminine };
+      if (t[x.id].feminine && !x.itemFeminine) return { ...x, itemFeminine: true };
+      return x;
+    }) };
   });
 }
 function pickAging(activities, log, place, options = {}) {
