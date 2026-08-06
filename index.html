@@ -2363,8 +2363,8 @@ Détermine où en est la pièce APRÈS ce qui est décrit. Par défaut new_stage
   // tendencies noticed across sessions. NOT used for recommandeur (Film/Écoute/
   // Cuisiner) — their taste signal lives in items[] status/rating instead, set
   // synchronously in submitComment(), never by an LLM rewrite of free text.
-  const coachViaClaude = async (key, text) => {
-    const act = current.activity, action = current.action;
+  const coachViaClaude = async (key, text, actOverride, actionOverride) => {
+    const act = actOverride || current.activity, action = actionOverride || current.action;
     // singleItem actions (Livre, Podcast, Sudoku vidéo, Parfum livre/vidéo…) also
     // carry a persistent "current title" in items[] (see resolveSingleItem) —
     // folded into this same call rather than a second round-trip, since it needs
@@ -2440,8 +2440,38 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
     const text = comment.trim();
     const parsedManual = manualMin.trim() ? parseInt(manualMin) : null;
     const existing = log.find((en) => en.id === doneEntryId);
-    const kind = current && current.activity.kind;
-    const isRecoWithItem = kind === "recommandeur" && !!current.action.itemId;
+    // cross-activity misfile fix (Maxence 06/08, Karen Gilbert incident): the engine
+    // draws blind, so a singleItem session can land on the wrong action (Parfum vidéo
+    // drawn while actually listening to the Podcast) — the comment then gets attached
+    // to the wrong title. Since singleItem titles here are stored "lowercase title -
+    // Capitalized Author" by convention, any capitalized token from the comment that
+    // matches a token in ANOTHER tracked title (and only that one — ambiguous matches
+    // are left alone) is confident enough to reroute the whole entry before anything
+    // downstream (log fields, Claude context) reads it.
+    let act = current && current.activity, action = current && current.action;
+    if (text && action && action.singleItem) {
+      const candidates = [];
+      activities.forEach((a) => {
+        (a.items || []).forEach((it) => {
+          if (it.done || !it.actionId) return;
+          if (a.id === act.id && it.actionId === action.id) return;
+          const owner = (a.actions || []).find((x) => x.id === it.actionId);
+          if (!owner || !owner.singleItem) return;
+          const tokens = it.text.match(/\b[A-ZÀ-Ý][\wÀ-ÿ'-]{2,}\b/g) || [];
+          const hit = tokens.some((tok) => new RegExp(`\\b${tok.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(text));
+          if (hit) candidates.push({ activity: a, action: owner, item: it });
+        });
+      });
+      if (candidates.length === 1) {
+        const c = candidates[0];
+        act = c.activity; action = { ...c.action, itemId: c.item.id };
+        setLog((L) => L.map((en) => (en.id === doneEntryId
+          ? { ...en, activityId: act.id, actionId: action.id, actionText: action.text, domain: act.domain, itemId: c.item.id }
+          : en)));
+      }
+    }
+    const kind = act && act.kind;
+    const isRecoWithItem = kind === "recommandeur" && !!action.itemId;
     if (doneEntryId) {
       setLog((L) => L.map((en) => {
         if (en.id !== doneEntryId) return en;
@@ -2516,7 +2546,7 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
     const wantsClaude = !!text && (kind === "pipeline" || kind === "practice");
     if (wantsClaude) {
       const key = (await store.get("tlx_apiKey")) || "";
-      if (key) { (kind === "pipeline" ? advanceViaClaude : coachViaClaude)(key, text); return; }
+      if (key) { kind === "pipeline" ? advanceViaClaude(key, text) : coachViaClaude(key, text, act, action); return; }
       setSyncMsg(kind === "pipeline" ? "pas de clé API — commentaire gardé, pièce/observations non mises à jour" : "pas de clé API — commentaire gardé, observations non mises à jour");
       setTimeout(() => { setSyncMsg(""); finishFlow(text); }, 2200);
       return;
