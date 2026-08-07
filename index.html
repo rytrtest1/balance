@@ -362,40 +362,42 @@ function pickItemLRU(a, log, base) {
 function itemStep(a, log) {
   return pickItemLRU(a, log, a.actions[0] || { id: uid(), text: "—", min: 15 });
 }
-// --- parfum — sentir une matière : le pick du jour (checkpoint "ouverture") reste
-// le seul clic loggé, comme avant. Round 3 (01/08) ajoute une matière "du jour" —
-// `item.today` — qui porte les 3 checkpoints suivants (cœur/fond/résiduel), notés
-// via un mini-écran dédié (chips + curseur + texte), zéro clic (voir
-// submitParfumNote). Au plus une matière `.today` à la fois (comme avant).
-function parfumTodayItem(a) {
-  return (a.items || []).find((it) => it.today);
-}
-// prochain checkpoint dû et pas encore noté, ou null si rien à faire maintenant
-// (soit tout est noté, soit le suivant n'est physiquement pas encore là — jamais
-// relaxé, même contrainte que x_es_anki).
-function parfumDueCheckpoint(item) {
-  const t = item.today;
-  const notedKeys = t.notedKeys || [];
-  for (let i = 0; i < PARFUM_CHECKPOINTS.length; i++) {
-    const cp = PARFUM_CHECKPOINTS[i];
-    if (notedKeys.includes(cp.key)) continue;
-    if (realNow().getTime() < t.startTs + cp.afterMin * 60000) return null;
-    return { cp, idx: i };
-  }
-  return null;
-}
-function resolveParfumSession(a, log, action) {
-  const label = (action.text || "").replace(/\s*\(LRU\)\s*/, "").trim();
-  const todayItem = parfumTodayItem(a);
-  if (todayItem) {
-    const due = parfumDueCheckpoint(todayItem);
-    if (!due) return action; // rien de dû là maintenant (ne devrait pas être proposé)
-    return { ...action, text: `${label} — « ${todayItem.text} » — ${due.cp.label}`, itemId: todayItem.id,
-      parfumCheckpoint: due.cp.key, parfumNoteOnly: true, desc: PARFUM_AIDE };
-  }
-  const picked = pickItemLRU(a, log, action);
-  if (picked === action) return action; // pool vide, rien à résoudre
-  return { ...action, text: `${label} — « ${picked.text} »`, itemId: picked.itemId, parfumCheckpoint: "ouverture", desc: PARFUM_AIDE };
+// --- parfum — sentir matières premières : 3 par jour, à l'aveugle, sur 4 checkpoints
+// temporels par mouillette (revu 07/08, round 2 — round 1 avait laissé tomber le
+// suivi dans le temps pour ne garder que la comparaison entre 3 matières ; Maxence
+// veut les deux à la fois : 3 matières comparées entre elles ET l'évolution de
+// chacune — direct/ouverture, +2h/cœur, +6h/fond, résiduel le lendemain (jour
+// LOGIQUE, pas +Nh) juste avant le prochain tirage, voir PARFUM_ROUNDS). Le
+// forçage dans pickAging reste le vrai filet ; cœur/fond posent EN PLUS un
+// rappel best-effort (scheduleReminder, voir ackParfum) pour ne pas rater le
+// bon moment sans rouvrir l'app — rien pour l'ouverture (déjà en train de la
+// faire) ni pour le résiduel (tombe au réveil, c'est le premier pick du
+// lendemain). Chaque item porte un `num` PERMANENT (1..164,
+// assigné une fois pour toutes dans le catalogue, jamais réattribué — un futur ajout
+// prend max(num existants)+1) : c'est le numéro que Maxence écrit à la main sur sa
+// bouteille, donc l'app doit toujours désigner une matière par ce même numéro, pas
+// par une position de tirage éphémère. `pf.pf3` porte le tirage en cours : les 3
+// itemIds triés par `num` croissant, prepAcked/prepTs (horodatage réel qui ancre les
+// gates +2h/+6h), round/doneInRound (position dans les 4 checkpoints × 3 matières),
+// et revealed. L'aveugle est comportemental, pas cryptographique : sur 164
+// bouteilles numérotées, Maxence ne retient pas quel numéro est quelle matière —
+// l'app ne montre donc QUE le numéro pendant les 4×3 évaluations (jamais le nom), et
+// révèle la correspondance uniquement à la toute fin, une fois le résiduel noté sur
+// les 3 (voir le forçage dans pickAging ci-dessous). Le tirage ne se renouvelle plus
+// sur un changement de date calendaire (un cycle complet peut déborder sur plusieurs
+// jours à cause des gates +6h/résiduel) — seulement une fois `revealed` repassé à
+// true.
+function pickItemsLRU(a, log, n) {
+  const doing = (a.items || []).filter((it) => it.status === "doing");
+  const scored = doing.map((it) => {
+    let last = null;
+    for (const e of log) if (e.activityId === a.id && isDone(e) && e.itemId === it.id && (!last || e.date > last)) last = e.date;
+    return { it, w: (last ? daysBetween(last, todayKey()) : 999) * (0.7 + Math.random() * 0.6) };
+  });
+  // sorted by permanent bottle number, not draw order — .num is what actually
+  // gets read aloud/displayed, so its order is the only one that matters for
+  // display; draw-recency order would leak nothing useful and read worse.
+  return scored.sort((x, y) => y.w - x.w).slice(0, n).map((s) => s.it).sort((x, y) => (x.num || 0) - (y.num || 0));
 }
 
 // --- vaisselle: derived straight from the log (cooked − washed, whole history), not
@@ -464,20 +466,6 @@ const FOCACCIA_GARNITURE_DEADLINE_HOUR = 20;
 // isn't a debt that needs to fire eventually, just a window that closes.
 const WORK_LISTEN_GATE_HOURS = 5;
 const WORK_LISTEN_GATE_IDS = new Set(["a_film", "a_podcast", "a_ecoute_titre", "a_ecoute_album"]);
-// parfum — sentir une matière : 4 points de contact sur la même mouillette
-// (revu 01/08 round 3 — cœur précoce/+20min retiré, "on commence simple"). Le
-// checkpoint 0 (ouverture) est loggé normalement (le pick du jour, 1 clic) ; les
-// 3 suivants passent par le mini-écran de note (voir parfumDueCheckpoint/
-// submitParfumNote), zéro clic, structuré (chips + curseur). Le brut est gardé tel
-// quel ; depuis le 02/08 une synthèse Claude s'écrit EN PLUS à la clôture du cycle
-// (synthParfumSession — "tant qu'on garde le log brut aussi"), stockée, pas affichée.
-// Cœur et fond posent aussi une notif à l'ouverture (voir scheduleReminder).
-const PARFUM_CHECKPOINTS = [
-  { key: "ouverture", afterMin: 0, label: "0–5min — ouverture" },
-  { key: "coeur", afterMin: 90, label: "+1-2h — cœur/transition" },
-  { key: "fond", afterMin: 300, label: "+5h — fond" },
-  { key: "residuel", afterMin: 1440, label: "+24h — résiduel/tenue" },
-];
 // --- vocabulaire descripteur (revu 02/08 — Maxence : "une liste plus exhaustive qui
 // couvrirait tous les possibles dans laquelle piocher au jugé en même temps que je
 // sens"). Le round 3 n'avait que 8 chips texture/forme à plat ; exhaustif à plat
@@ -494,8 +482,9 @@ const PARFUM_CHECKPOINTS = [
 //  - recognition, pas recall : le champ texte libre juste dessous couvre déjà le mot
 //    qu'on a en tête et qui n'est pas listé, donc les chips n'ont qu'à faire
 //    reconnaître. Un champ de recherche ferait l'inverse (il faut connaître le mot).
-// La donnée stockée ne change pas de forme : toujours un string[] dans chips[cp],
-// juste avec un vocabulaire beaucoup plus large (familles ET facettes mêlées).
+// La donnée stockée reste un simple string[] (voir parfumChips) — vocabulaire
+// beaucoup plus large que les 8 chips plates du round 3 (familles ET facettes
+// mêlées), même forme de stockage.
 const PARFUM_TEXTURE_CHIPS = ["rond", "sec", "linéaire", "évolutif", "plat", "texturé", "fondu", "tranchant", "transparent", "massif", "projection", "collé-peau"];
 const PARFUM_FAMILLES = [
   { key: "agrumes", facets: ["zesté", "amer", "citronné", "orangé", "pamplemousse", "pétillant", "terpénique", "cireux"] },
@@ -514,9 +503,8 @@ const PARFUM_FAMILLES = [
   // sans s'ajouter aux descripteurs : « boisé » se dit d'une matière, « forme » non.
   { key: "forme", head: false, facets: PARFUM_TEXTURE_CHIPS },
 ];
-// Le sélecteur lui-même — un seul composant, monté aux DEUX endroits où on note un
-// checkpoint (le mini-écran cœur/fond/résiduel et l'écran "done" de l'ouverture),
-// pour qu'ils ne puissent pas diverger. Une seule famille ouverte à la fois ; les
+// Le sélecteur lui-même — monté sur l'écran "done" de chacune des 3 évaluations
+// à l'aveugle (voir plus bas). Une seule famille ouverte à la fois ; les
 // facettes choisies d'une famille refermée resteraient invisibles, d'où la ligne de
 // rappel en haut — qui n'apparaît que s'il y a quelque chose (rien à l'écran tant
 // qu'on n'a rien dit), et où retaper un mot le retire.
@@ -562,16 +550,26 @@ function ParfumNotePicker({ chips, setChips, intensity, setIntensity }) {
 }
 // aide facultative (toggle "détails" déjà existant, réutilisé tel quel — voir
 // current.action.desc dans le JSX) — guide de dimensions, pas un formulaire.
-// Trois familles de dimensions : classique (déjà validé), texture/forme (couverte
-// aussi par PARFUM_TEXTURE_CHIPS ci-dessus, ce texte reste un rappel complémentaire),
-// sensoriel/imaginaire (technique synesthésique — décrire en couleur/texture au
-// toucher/température/lieu/porteur imaginé plutôt qu'en ingrédients, demandé par
-// Maxence 01/08 après une vidéo vue sur le sujet). Le timing des points de contact
-// restants ouvre le texte : c'est le repère qu'il se sert lui-même, à main levée.
-// Famille · facettes · forme · intensité sont passées dans les chips/curseur (voir
-// PARFUM_FAMILLES) — ce texte ne garde donc que ce qu'aucun chip ne peut couvrir :
-// les dimensions qui demandent une phrase.
-const PARFUM_AIDE = "aide, facultatif — à toi de gérer : " + PARFUM_CHECKPOINTS.slice(1).map((cp) => cp.label).join(" · ") + ". À dire en mots (le reste est dans les chips) — « sent comme X + Y » · évolution vs le point précédent · naturel/synthétique · couleur ressentie · texture au toucher · température · lieu évoqué · identité du porteur imaginé";
+// Deux familles de dimensions : classique (déjà validé), sensoriel/imaginaire
+// (technique synesthésique — décrire en couleur/texture au toucher/température/
+// lieu/porteur imaginé plutôt qu'en ingrédients, demandé par Maxence 01/08 après
+// une vidéo vue sur le sujet). Famille · facettes · forme · intensité sont passées
+// dans les chips/curseur (voir PARFUM_FAMILLES) — ce texte ne garde donc que ce
+// qu'aucun chip ne peut couvrir : les dimensions qui demandent une phrase.
+const PARFUM_AIDE = "aide, facultatif — à dire en mots (le reste est dans les chips) — « sent comme X + Y » · naturel/synthétique · couleur ressentie · texture au toucher · température · lieu évoqué · identité du porteur imaginé";
+// checkpoints temporels par mouillette (revu 07/08, round 2 — Maxence voulait garder
+// la comparaison à l'aveugle des 3 matières ET l'évolution dans le temps d'une même
+// mouillette, pas l'un ou l'autre ; round 3, corrigé même jour : le résiduel n'est
+// pas "dès que prêt" mais bien LE LENDEMAIN, juste avant que l'app ne tire les 3
+// prochaines matières — pas un 4e round collé au fond le jour même). minHoursSincePrep=
+// "nextDay" pour "final" : prêt dès que le jour LOGIQUE (voir logicalNow/
+// DAY_PIVOT_HOUR, pas minuit) a changé depuis prepTs, quelle que soit l'heure.
+const PARFUM_ROUNDS = [
+  { id: "direct", label: "ouverture", minHoursSincePrep: 0 },
+  { id: "h2", label: "cœur", minHoursSincePrep: 2 },
+  { id: "h6", label: "fond", minHoursSincePrep: 6 },
+  { id: "final", label: "résiduel", minHoursSincePrep: "nextDay" },
+];
 // which cook created the OLDEST still-open dish debt (Maxence 11/07: "l'app
 // propose peu de temps après l'action qui ramène à 0" — eligible ≠ prioritized;
 // pickAging's weight() ages a row off when THAT ROW was last done, so a vaisselle
@@ -775,9 +773,7 @@ function resolveDraw(drawn, log) {
   // per-action row from buildLotteryRows (Sudoku's "vidéo", Parfum's "livre"/
   // "vidéo") just as much as the single-action whole-activity case (Livre, Podcast).
   if (action && action.singleItem) action = resolveSingleItem(a, action);
-  if (drawn.action && action && action.id === "x_pf_matiere" && hasDoingItems(a)) {
-    action = resolveParfumSession(a, log, action);
-  } else if (drawn.action && action && /\(LRU\)/.test(action.text || "") && hasDoingItems(a)) {
+  if (drawn.action && action && /\(LRU\)/.test(action.text || "") && hasDoingItems(a)) {
     action = pickItemLRU(a, log, action);
   }
   // picker: pure coin flip between text variants of the SAME action — doesn't
@@ -886,23 +882,57 @@ function pickAging(activities, log, place, options = {}) {
     const grille = su && (su.actions || []).find((x) => x.id === "x_su_grille");
     if (su && grille && placeOkW(grille.where || su.where, place)) return resolveDraw({ activity: su, action: grille }, log);
   }
-  // parfum — matière du jour : forcé jusqu'à résolution (pick du jour ET tous ses
-  // checkpoints dus notés), même idée que vaisselle/anki ci-dessus mais sur un état
-  // (pas juste "dernier logué") — sinon le tirage pondéré pourrait ne jamais le
-  // proposer avant que Maxence sorte de chez lui (retour du 01/08 sur la 1ère
-  // version qui laissait ça au hasard). Le checkpoint "résiduel" (+24h) d'hier
-  // tombe ici aussi, tout naturellement, juste avant que le pick du jour reprenne
-  // le dessus une fois noté (item.today déjà archivé — voir submitParfumNote).
+  // parfum — 3 matières/jour à l'aveugle par numéro de bouteille : forcé jusqu'à
+  // résolution des 3, même idée que vaisselle/anki/sudoku ci-dessus mais sur un
+  // état (pas juste "dernier logué") — sinon le tirage pondéré pourrait ne jamais
+  // le proposer avant que Maxence sorte de chez lui (retour du 01/08 sur la 1ère
+  // version qui laissait ça au hasard). `pf.pf3` porte le tirage du jour (voir
+  // pickItemsLRU ci-dessus) ; deux acquittements l'encadrent — prepAcked (a vu la
+  // liste des 3 numéros à préparer) et revealed (a vu la correspondance finale) —
+  // sans quoi le forçage boirait à l'infini sur la même carte (rien ne progresse
+  // "count" tant qu'on n'a pas vraiment noté une matière). L'app ne dit JAMAIS un
+  // nom avant la révélation finale (07/08, Maxence : le numéro doit être celui
+  // écrit sur la bouteille, sinon ça ne marche pas) — seul `.num` apparaît sur les
+  // écrans de prépa/évaluation, `.text` (le nom) n'est lu qu'au reveal. Un rejet
+  // (avoidId) fait retomber sur le tirage normal pour ce tour-là, comme les autres
+  // forçages ci-dessus.
   if (avoidId !== "a_parfum_explo") {
     const pf = activities.find((x) => x.id === "a_parfum_explo");
     if (pf && placeOk(pf, place)) {
       const matAction = (pf.actions || []).find((x) => x.id === "x_pf_matiere");
-      const todayItem = matAction ? parfumTodayItem(pf) : null;
-      const doneToday = matAction ? completionsInPeriod(log, "a_parfum_explo", "x_pf_matiere", "day") > 0 : true;
-      if (matAction && todayItem) {
-        if (parfumDueCheckpoint(todayItem)) return resolveDraw({ activity: pf, action: matAction }, log);
-      } else if (matAction && !doneToday && hasDoingItems(pf)) {
-        return resolveDraw({ activity: pf, action: matAction }, log);
+      if (matAction && hasDoingItems(pf)) {
+        if (!pf.pf3 || pf.pf3.revealed) {
+          const picks = pickItemsLRU(pf, log, 3);
+          pf.pf3 = { order: picks.map((p) => p.id), nums: picks.map((p) => p.num), names: picks.map((p) => p.text),
+            prepAcked: false, prepTs: null, round: 0, doneInRound: 0, revealed: false };
+          if (options.seeded) options.seeded.push(pf);
+        }
+        const numList = pf.pf3.nums.map((n) => `#${n}`).join(" · ");
+        if (!pf.pf3.prepAcked) {
+          return resolveDraw({ activity: pf, action: { ...matAction,
+            text: `aujourd'hui : ${numList}`,
+            parfumPrep: true, desc: "prépare une mouillette pour chacune de ces 3 bouteilles, puis reviens noter à l'aveugle." } }, log);
+        }
+        if (pf.pf3.round >= PARFUM_ROUNDS.length) {
+          if (!pf.pf3.revealed) {
+            const revealList = pf.pf3.nums.map((n, i) => `#${n} = ${pf.pf3.names[i]}`).join(" · ");
+            return resolveDraw({ activity: pf, action: { ...matAction,
+              text: `révélé — ${revealList}`,
+              parfumReveal: true } }, log);
+          }
+        } else {
+          const roundDef = PARFUM_ROUNDS[pf.pf3.round];
+          const roundReady = roundDef.minHoursSincePrep === "nextDay"
+            ? keyOf(logicalNow(new Date(pf.pf3.prepTs))) !== todayKey()
+            : (realNow().getTime() - pf.pf3.prepTs) / 3600000 >= roundDef.minHoursSincePrep;
+          if (roundReady) {
+            return resolveDraw({ activity: pf, action: { ...matAction,
+              text: `sentir matières premières — ${roundDef.label} — #${pf.pf3.nums[pf.pf3.doneInRound]} (${pf.pf3.doneInRound + 1}/3)`,
+              itemId: pf.pf3.order[pf.pf3.doneInRound], parfumRound: roundDef.id, desc: PARFUM_AIDE } }, log);
+          }
+          // pas encore l'heure du prochain checkpoint (+2h/+6h) — retombe sur le
+          // tirage normal pour ce tour-ci, comme un rejet (avoidId) des autres forçages.
+        }
       }
     }
   }
@@ -1402,10 +1432,9 @@ function Throughline() {
   // AUTO_START_MS) carry on from there (Maxence 01/08: "avant que l'action de base
   // apparaisse on fait apparaître une action éphémère choisir").
   const [itemNameInput, setItemNameInput] = useState("");
-  // parfum checkpoint note (cœur/fond/résiduel) : chips texture/forme + curseur
-  // d'intensité, saisis sur le mini-écran "proposal" (parfumNoteOnly), soumis avec
-  // le `comment` déjà existant par submitParfumNote() — brut, pas de synthèse Claude
-  // (Maxence 01/08, round 3).
+  // parfum — chips texture/forme + curseur d'intensité, saisis sur l'écran "done"
+  // de chacune des 3 évaluations à l'aveugle du jour, soumis avec le `comment`
+  // déjà existant par submitComment() — brut, pas de synthèse Claude.
   const [parfumChips, setParfumChips] = useState([]);
   const [parfumIntensity, setParfumIntensity] = useState(null);
   // vocabulaire caché (Maxence 02/08) : le picker de chips restait toujours visible,
@@ -2124,6 +2153,9 @@ function Throughline() {
     // med reminder card: holding to reject it shouldn't cost the escalating
     // hold-time penalty below — that's meant for declining real activities.
     if (current?.medReminder) { propose(log, activities, false, null); return; }
+    // same for the parfum prep/reveal info cards — nothing to actually decline.
+    if (current?.action?.parfumPrep) { ackParfum("prepAcked"); return; }
+    if (current?.action?.parfumReveal) { ackParfum("revealed"); return; }
     const today = todayKey();
     const cur = holdDate === today ? holdMs : BASE_HOLD_MS; // fresh day → start from 10s
     const next = cur * 2; // every skip doubles the next hold
@@ -2472,6 +2504,12 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
     }
     const kind = act && act.kind;
     const isRecoWithItem = kind === "recommandeur" && !!action.itemId;
+    // parfum — une des 3 évaluations à l'aveugle du jour (voir pickAging) : chips +
+    // intensité choisies sur l'écran "done" atterrissent sur le log entry lui-même
+    // (comme rating pour un recommandeur ci-dessous), plus une trace compacte sur
+    // l'item (voir plus bas) pour retrouver l'historique d'une matière sans rescanner
+    // tout le log.
+    const isParfumMatiere = act && act.id === "a_parfum_explo" && action.id === "x_pf_matiere" && !!action.itemId;
     if (doneEntryId) {
       setLog((L) => L.map((en) => {
         if (en.id !== doneEntryId) return en;
@@ -2479,6 +2517,7 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
         if (parsedManual > 0) { patch.min = parsedManual; patch.sec = parsedManual * 60; }
         if (text) patch.note = text;
         if (isRecoWithItem) patch.rating = rating;
+        if (isParfumMatiere) { patch.chips = parfumChips; patch.intensity = parfumIntensity; }
         return { ...en, ...patch };
       }));
     }
@@ -2503,39 +2542,24 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
         ? { ...a, items: (a.items || []).map((it) => (it.id === itemId ? { ...it, status: "done", rating } : it)) }
         : a)));
     }
-    // parfum — matière du jour : le pick "ouverture" est le seul checkpoint qui
-    // passe par le flux normal (session + clic) — c'est ici qu'on initialise
-    // item.today, avec ouverture déjà notée (chips/curseur/texte inclus). Les 3
-    // checkpoints suivants s'écrivent dessus via submitParfumNote(), zéro clic.
-    if (current && current.activity.id === "a_parfum_explo" && current.action.id === "x_pf_matiere"
-        && current.action.parfumCheckpoint === "ouverture" && current.action.itemId) {
-      const itemId = current.action.itemId;
-      const startTs = existing ? existing.ts : realNow().getTime();
-      // notif sur les checkpoints intermédiaires (Maxence 02/08 : "oui pour la notif").
-      // Cœur et fond seulement : le résiduel (+24h) n'en a pas besoin, il tombe de
-      // lui-même sur le pick forcé du lendemain matin (et un setTimeout de 24h ne
-      // survit de toute façon pas à un onglet tué). Même limite best-effort que la
-      // lessive — pas de push serveur possible sur un PWA statique : la notif part si
-      // l'app est encore vivante, sinon elle se rattrape au prochain retour au
-      // premier plan. Le forçage dans pickAging reste le vrai filet.
-      if (!SIM) {
-        const matiere = (current.activity.items || []).find((it) => it.id === itemId);
-        PARFUM_CHECKPOINTS.filter((cp) => cp.key === "coeur" || cp.key === "fond").forEach((cp) => {
-          const afterMin = (startTs + cp.afterMin * 60000 - Date.now()) / 60000;
-          scheduleReminder(`« ${matiere ? matiere.text : "matière"} » — ${cp.label}`, afterMin, "pf:" + cp.key);
-        });
-      }
-      setActivities((arr) => arr.map((act) => (act.id !== "a_parfum_explo" ? act : {
-        ...act,
-        items: (act.items || []).map((it) => (it.id !== itemId ? it : {
+    if (isParfumMatiere) {
+      const itemId = action.itemId;
+      const roundId = action.parfumRound;
+      // dès qu'il note une matière d'un round donné, il est déjà dessus — plus
+      // besoin du rappel de CE round (sinon il sonnerait pour rien plus tard).
+      if (roundId === "h2") cancelReminder("parfum_h2");
+      if (roundId === "h6") cancelReminder("parfum_h6");
+      setActivities((arr) => arr.map((a) => (a.id !== "a_parfum_explo" ? a : {
+        ...a,
+        items: (a.items || []).map((it) => (it.id !== itemId ? it : {
           ...it,
-          today: {
-            dateKey: todayKey(), startTs, notedKeys: ["ouverture"],
-            notes: { ouverture: text, coeur: "", fond: "", residuel: "" },
-            chips: { ouverture: parfumChips, coeur: [], fond: [], residuel: [] },
-            intensity: { ouverture: parfumIntensity, coeur: null, fond: null, residuel: null },
-          },
+          sessions: [...(it.sessions || []), { date: todayKey(), round: roundId, chips: parfumChips, intensity: parfumIntensity, note: text }],
         })),
+        // avance le curseur checkpoint × matière (voir PARFUM_ROUNDS/pickAging) — la
+        // 3e note d'un round fait passer au round suivant, doneInRound repart à 0.
+        pf3: a.pf3 ? (a.pf3.doneInRound + 1 >= 3
+          ? { ...a.pf3, round: a.pf3.round + 1, doneInRound: 0 }
+          : { ...a.pf3, doneInRound: a.pf3.doneInRound + 1 }) : a.pf3,
       })));
     }
     // pipeline advances the piece, practice grows observations — recommandeur (with a
@@ -2603,6 +2627,33 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
     if (Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy) * 1.5) go(dx < 0 ? 1 : -1);
   };
 
+  // parfum prep/reveal ack — flips the one flag on pf.pf3 and moves straight to
+  // the next forced card (see pickAging); no session, no log entry. Mutates the
+  // activity object in place (same reference trick as pickAging's seedTs) so the
+  // immediately-following propose() sees the flag already set even though
+  // setActivities' own re-render hasn't landed yet.
+  const ackParfum = async (flag) => {
+    const pf = activities.find((a) => a.id === "a_parfum_explo");
+    if (pf && pf.pf3) {
+      pf.pf3[flag] = true;
+      if (flag === "prepAcked") {
+        pf.pf3.prepTs = realNow().getTime();
+        // best-effort nudges pour cœur (+2h) et fond (+6h) — le forçage dans
+        // pickAging reste le vrai filet, la notif n'est qu'un rappel (Maxence
+        // 07/08 : rien pour l'ouverture — déjà en train de le faire — ni pour le
+        // résiduel — tombe au réveil, c'est le premier pick du lendemain).
+        // Les deux `await` sont nécessaires : scheduleReminder fait un
+        // read-modify-write sur le même tableau (tlx_reminder) — deux appels non
+        // séquentiels se marchent dessus et le second écrase le premier (piège
+        // déjà documenté au-dessus, sur readReminders).
+        const numList = pf.pf3.nums.map((n) => `#${n}`).join(" · ");
+        await scheduleReminder(`parfum — cœur : reviens noter ${numList} à l'aveugle`, 120, "parfum_h2");
+        await scheduleReminder(`parfum — fond : reviens noter ${numList} à l'aveugle`, 360, "parfum_h6");
+      }
+      setActivities((arr) => [...arr]);
+    }
+    propose();
+  };
   // tap to begin — for timed activities the line pre-fills with already-done minutes this period
   const begin = () => {
     // med reminder card (see start()): never a real session — move straight to
@@ -2612,11 +2663,12 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
     // input below (submitItemName), a tap or the auto-start timer here is a no-op
     // until a title's been given and current.action.fresh has cleared.
     if (current?.action?.fresh) return;
-    // parfum checkpoint note (cœur/fond/résiduel) : pas une session non plus — même
-    // idiome que fresh ci-dessus. Le mini-écran de note (voir JSX) reste sur
-    // "proposal", submitParfumNote() referme le flux directement, jamais de
-    // running/finish, donc jamais de clic (Maxence 01/08).
-    if (current?.action?.parfumNoteOnly) return;
+    // parfum — cartes prep/reveal (voir pickAging) : pas une session, même idiome
+    // que medReminder ci-dessus — un tap acquitte et repasse directement à la
+    // suite (3e slot noté → reveal ; reveal lu → tirage du lendemain), jamais de
+    // running/finish, donc jamais de clic compté.
+    if (current?.action?.parfumPrep) { ackParfum("prepAcked"); return; }
+    if (current?.action?.parfumReveal) { ackParfum("revealed"); return; }
     lastStartDelayRef.current = proposedAtRef.current ? Date.now() - proposedAtRef.current : null;
     let preMs = 0;
     if (current?.activity?.timed) {
@@ -2656,78 +2708,6 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
     setActivities((arr) => arr.map((act) => (act.id === a.id ? { ...act, items: nextItems } : act)));
     setCurrent({ activity: { ...a, items: nextItems }, action: resolveSingleItem({ ...a, items: nextItems }, baseAction) });
     setItemNameInput("");
-  };
-
-  // parfum checkpoint note (cœur/fond/résiduel) : même idiome que submitItemName
-  // ci-dessus — pas une session, écrit directement sur l'item puis referme le flux.
-  // Note brute, pas de synthèse Claude (Maxence 01/08, round 3 : "on garde brut
-  // pour l'instant"). Le dernier checkpoint (résiduel) clôt le cycle : `.today`
-  // archivé tel quel dans `.sessions` (pas de perte de la dernière note), l'item
-  // redevient un item "doing" ordinaire, réutilisable dès le prochain pick.
-  const submitParfumNote = () => {
-    if (!current?.action?.parfumNoteOnly) return;
-    const { activity: a, action } = current;
-    const itemId = action.itemId, cp = action.parfumCheckpoint;
-    const text = comment.trim();
-    const item = (a.items || []).find((it) => it.id === itemId);
-    if (!item || !item.today) { resetFlow(); return; }
-    const updatedToday = {
-      ...item.today,
-      notedKeys: [...(item.today.notedKeys || []), cp],
-      notes: { ...item.today.notes, [cp]: text },
-      chips: { ...item.today.chips, [cp]: parfumChips },
-      intensity: { ...item.today.intensity, [cp]: parfumIntensity },
-    };
-    const isLast = cp === PARFUM_CHECKPOINTS[PARFUM_CHECKPOINTS.length - 1].key;
-    setActivities((arr) => arr.map((act) => (act.id !== a.id ? act : {
-      ...act,
-      items: (act.items || []).map((it) => {
-        if (it.id !== itemId || !it.today) return it;
-        if (!isLast) return { ...it, today: updatedToday };
-        const { today, ...rest } = it;
-        return { ...rest, sessions: [...(it.sessions || []), updatedToday] };
-      }),
-    })));
-    // noté à la main avant que la notif ne parte : elle n'a plus lieu d'être.
-    cancelReminder("pf:" + cp);
-    resetFlow();
-    // le cycle est clos → synthèse Claude, en tâche de fond (Maxence 02/08 : "on peut
-    // évidemment synthétiser tout tant qu'on garde le log brut aussi" / "on le stocke
-    // juste"). Après resetFlow et sans await : zéro attente à l'écran, et si l'appel
-    // échoue le brut est déjà écrit, rien n'est perdu.
-    if (isLast) synthParfumSession(a.id, itemId, updatedToday);
-  };
-  // écrit `synthesis` À CÔTÉ du brut sur la session archivée — jamais à la place.
-  // Rien ne l'affiche pour l'instant, c'est un stock à relire plus tard.
-  const synthParfumSession = async (aid, itemId, session) => {
-    const key = (await store.get("tlx_apiKey")) || "";
-    if (!key) return;
-    const matiere = ((activities.find((x) => x.id === aid) || {}).items || []).find((it) => it.id === itemId);
-    const bloc = PARFUM_CHECKPOINTS.map((cp) => {
-      const chips = (session.chips || {})[cp.key] || [];
-      const inten = (session.intensity || {})[cp.key];
-      return `${cp.label}\n  descripteurs : ${chips.length ? chips.join(", ") : "(aucun)"}\n  intensité : ${inten == null ? "(non notée)" : inten + "/10"}\n  note : ${((session.notes || {})[cp.key] || "").trim() || "(vide)"}`;
-    }).join("\n\n");
-    const prompt = `Matière première de parfumerie sentie sur mouillette : « ${matiere ? matiere.text : "?"} », suivie sur 24h en 4 points de contact.
-
-${bloc}
-
-Écris une synthèse en français de cette matière telle qu'elle a été perçue : l'accord d'ensemble, l'arc d'évolution de l'ouverture au résiduel (ce qui tombe, ce qui tient, ce qui apparaît), la tenue, et ce qui ressort comme caractéristique. Appuie-toi UNIQUEMENT sur les notes ci-dessus — n'ajoute aucune connaissance générale sur cette matière, ne comble aucun trou, et dis franchement quand un point de contact est resté vide. Prose dense, sans liste à puces, sans préambule.`;
-    try {
-      const out = await claudeJSON(key, prompt, {
-        type: "object",
-        properties: { synthesis: { type: "string" } },
-        required: ["synthesis"],
-        additionalProperties: false,
-      }, 1200);
-      setActivities((arr) => arr.map((act) => (act.id !== aid ? act : {
-        ...act,
-        items: (act.items || []).map((it) => (it.id !== itemId ? it : {
-          ...it,
-          sessions: (it.sessions || []).map((s) => (s.startTs === session.startTs ? { ...s, synthesis: out.synthesis } : s)),
-        })),
-      })));
-    } catch (e) {}
   };
 
   // auto-start (Maxence 16/07): a proposal used to need its own separate tap before
@@ -2822,16 +2802,6 @@ ${bloc}
     // (same as the old "passer"/"valider" button) then moves on — one control surface,
     // no separate button needed.
     else if (stage === "done") submitComment();
-    // parfum checkpoint note (cœur/fond/résiduel) : begin() no-ops ici comme pour
-    // "fresh" (voir begin()), mais contrairement à "fresh" il n'y a rien à choisir
-    // en amont — chips/curseur/texte sont tous facultatifs, exactement comme le
-    // commentaire sur "done". Sans ce cas, taper la ligne ne faisait plus rien du
-    // tout sur ces écrans, cassant la convention "la ligne est la seule surface de
-    // contrôle" — bug remonté par Maxence (02/08) : "toucher la ligne ne fait pas
-    // passer l'activité à partir du deuxième clic... surement parce que ce n'est
-    // plus considéré comme un clic". submitParfumNote() gère déjà très bien un
-    // envoi à vide (chips/texte non touchés).
-    else if (stage === "proposal" && current?.action?.parfumNoteOnly) submitParfumNote();
     else if (stage === "proposal") begin();
     else if (stage === "running" && !paused) {
       // album de la semaine: a plain tap on the hero line commits the current
@@ -3361,7 +3331,7 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
       stage, tab, current, activities, log, holdMs, holdDate, place,
       begin, finish, tapAction, submitComment, start, resetFlow,
       setManualMin, setComment, setTab, applyDebugTime, simReseed, runSimBatch,
-      parfumChips, setParfumChips, parfumIntensity, setParfumIntensity, submitParfumNote,
+      parfumChips, setParfumChips, parfumIntensity, setParfumIntensity, ackParfum,
       readReminders, scheduleReminder, cancelReminder, checkDueReminder,
       setLog, setActivities, setStage, setCurrent,
       albumTitles, albumIdx, setAlbumTitles, setAlbumIdx, advanceAlbumTitle,
@@ -3967,37 +3937,6 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                   </div>
                 )}
 
-                {/* parfum checkpoint note (cœur/fond/résiduel) : même idiome que le
-                    "choisir" ci-dessus — ephemeral, pas une session, tap/auto-start
-                    no-ops tant que parfumNoteOnly (voir begin()). Chips texture/forme
-                    (multi-select, toggle direct) + curseur d'intensité + le même champ
-                    texte "« ... »", dont l'Enter soumet tout via submitParfumNote()
-                    (brut, zéro clic — Maxence 01/08, round 3). */}
-                {stage === "proposal" && current?.action?.parfumNoteOnly && (
-                  <div className="fade">
-                    {/* vocabulaire caché : décrire d'abord avec ses mots (champ texte en
-                        dessous), le picker de chips n'est qu'une aide à la demande
-                        (Maxence 02/08). */}
-                    <div style={{ textAlign: "center", marginBottom: vocabOpen ? 0 : 8 }}>
-                      <button className="link" onClick={() => setVocabOpen((o) => !o)}>{vocabOpen ? "cacher le vocabulaire" : "vocabulaire"}</button>
-                    </div>
-                    {vocabOpen && <ParfumNotePicker chips={parfumChips} setChips={setParfumChips} intensity={parfumIntensity} setIntensity={setParfumIntensity} />}
-                    <div style={{ position: "relative", maxWidth: 320, margin: "20px auto 0" }}>
-                      <input className="in" value={comment}
-                        autoComplete="off" name="parfum-note"
-                        onChange={(e) => setComment(e.target.value)}
-                        onKeyDown={(e) => { if (e.key === "Enter") submitParfumNote(); }}
-                        style={{ fontFamily: "var(--mono)", fontSize: 13, textAlign: "center", display: "block", color: C.text }} />
-                      {!comment && (
-                        <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: COMMENT_HINT_MODE === "cursor" ? "flex-start" : "center", justifyContent: "center", gap: 6, pointerEvents: "none", fontFamily: "var(--mono)", fontSize: 13, color: C.faint }}>
-                          {COMMENT_HINT_MODE === "cursor"
-                            ? <span className="hintcursor" />
-                            : <><span>«</span><span>...</span><span>»</span></>}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                )}
 
                 {/* running: a quiet pause, for when something outside interrupts the session
                     (a call, someone at the door) — for stopping the clock without abandoning
@@ -4128,11 +4067,10 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                             <span className="mono" style={{ fontSize: 10, color: C.faint }}>min</span>
                           </div>
                         )}
-                        {/* parfum — checkpoint "ouverture" : mêmes chips/curseur que le mini-écran
-                            de checkpoint note (cœur/fond/résiduel), pour une saisie uniforme sur
-                            les 4 points de contact — capturés dans item.today par submitComment()
+                        {/* parfum — une des 3 évaluations à l'aveugle du jour : chips/curseur
+                            sur l'écran "done", capturés sur le log entry par submitComment()
                             en plus du flux normal (log + coachViaClaude, inchangés). */}
-                        {current && current.action.id === "x_pf_matiere" && current.action.parfumCheckpoint === "ouverture" && (
+                        {current && current.action.id === "x_pf_matiere" && current.action.itemId && (
                           <div style={{ marginBottom: 18 }}>
                             <div style={{ textAlign: "center", marginBottom: vocabOpen ? 0 : 8 }}>
                               <button className="link" onClick={() => setVocabOpen((o) => !o)}>{vocabOpen ? "cacher le vocabulaire" : "vocabulaire"}</button>
