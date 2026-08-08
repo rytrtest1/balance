@@ -3163,13 +3163,19 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
   // free-text log for anything done outside the app — one field, one Claude call
   // resolves the intent instead of forcing every line into an activity match.
   // Replaces the old per-activity quick-log buttons (removed with the progress tab).
-  // Two intents (Maxence 14/07 — the original version always forced "activity",
+  // Three intents (Maxence 14/07 — the original version always forced "activity",
   // even when nothing in the catalogue actually matched; the "rapport" intent that
   // used to live here moved to its own footer button, 19/07 — see the entry
   // screen's rapport button, above where showTapHint renders):
   //   "activity" — logged exactly as before, a real "done" entry feeding the engine.
   //   "note" — anything else, kept as-is (type: "note", no activityId) rather than
   //   mis-matched to the nearest activity. Never counts toward "clics" (isClick).
+  //   "start_titre" (08/08, Maxence: "pouvoir demander dans le log un titre du jour
+  //   à écouter quand il a du temps libre dehors, affiché comme une activité normale
+  //   avec la ligne etc.") — he's asking to listen NOW, not describing something
+  //   already done. Forces a real "Titre du jour" proposal (same resolveDraw/LRU
+  //   pick as the lottery) straight to the running line, only when nothing is
+  //   already proposed/running (stage "entry") — never used to clobber a live pick.
   const submitFreeLog = async () => {
     const text = logText.trim();
     if (!text) return;
@@ -3197,6 +3203,7 @@ Ce qu'il a tapé :
 
 Détermine intent :
 - "activity" si le texte décrit clairement une activité qu'il vient de faire ET qui correspond à une ligne précise du catalogue.
+- "start_titre" si le texte exprime l'envie d'écouter un titre du jour MAINTENANT (temps libre, envie d'une chanson à l'instant) plutôt que de décrire une session déjà faite — ex: "j'ai du temps dehors, un titre à écouter", "propose-moi une chanson", "je veux écouter un titre là".
 - "note" pour tout le reste — une pensée, un fait à garder, quelque chose de flou ou qui ne colle à aucune activité précise. Ne force JAMAIS un match approximatif : dans le doute, "note".
 
 Si intent = "activity" : activity_id = l'id exact du catalogue qui correspond le mieux. action_id = l'id de l'action qui correspond (omets-le si aucune ne colle). min = durée en minutes déduite du texte, estimation raisonnable si non précisée.
@@ -3205,7 +3212,7 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
       const out = await claudeJSON(key, prompt, {
         type: "object",
         properties: {
-          intent: { type: "string", enum: ["activity", "note"] },
+          intent: { type: "string", enum: ["activity", "note", "start_titre"] },
           // structured-outputs strict mode requires every property in `required` —
           // nullable type + explicit null is how an LLM field stays optional under that
           // constraint. Omitting these from `required` was producing the http 400 on
@@ -3218,6 +3225,27 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
         additionalProperties: false,
       }, 300);
 
+      if (out.intent === "start_titre" && stage === "entry") {
+        const ta = activities.find((x) => x.id === "a_ecoute_titre");
+        const p = ta ? resolveDraw({ activity: ta, action: ta.actions[0] }, log) : null;
+        if (p) {
+          proposedAtRef.current = Date.now();
+          setRunning(false); setElapsedMs(0);
+          setCurrent(p); setStage("proposal");
+          if (ta.note) {
+            (async () => {
+              try {
+                const { title, desc } = await generateReco(key, ta, p.action, log);
+                setCurrent((c) => c && c.activity.id === ta.id ? { ...c, action: { ...c.action, baseText: c.action.baseText || c.action.text, text: title, desc } } : c);
+              } catch (e) {}
+            })();
+          }
+          setLogText(""); setLogOpen(false);
+          setMsg("titre proposé");
+          return;
+        }
+        // no doing item to pick — fall through and just keep it as a note below
+      }
       const a = out.intent === "activity" ? activities.find((x) => x.id === out.activity_id) : null;
       if (a) {
         const action = out.action_id ? (a.actions || []).find((x) => x.id === out.action_id) : null;
