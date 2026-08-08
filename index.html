@@ -413,8 +413,12 @@ const PARFUM_REVIEW_MAX_DAYS = 120;
 // anonyme sur les écrans de prépa/round, carte "avant de savoir" pour deviner,
 // révélation du nom en dernier) reste écrit et intact plus bas — juste gardé de
 // côté derrière ce flag, pas supprimé, au cas où il revienne dessus plus tard.
-// La répétition espacée (au-dessus) ne dépend pas de ce flag : elle continue de
-// faire revenir les mêmes matières, seule l'anonymisation est coupée.
+// Correction 09/08 : c'était faux — la répétition espacée par `.due` (au-dessus)
+// dépend ENTIÈREMENT de submitParfumGuess, jamais appelée tant que ce flag est
+// faux, donc `.due` ne se pose plus du tout pendant que le blind est coupé. Le
+// filet est pickItemsLRU, qui trie maintenant sur `it.sessions` directement (pas
+// sur `.due`) — voir sa note. Si l'aveugle revient un jour, `.due` recommencera
+// à se poser et à shorter-circuiter ce filet via `echues`, sans rien à retoucher.
 const PARFUM_BLIND = false;
 function parfumNextInterval(prev, hit) {
   // 1re fois : nommer juste une matière jamais sentie, à l'aveugle, veut dire qu'elle
@@ -426,16 +430,18 @@ function parfumNextInterval(prev, hit) {
 function pickItemsLRU(a, log, n) {
   const doing = (a.items || []).filter((it) => it.status === "doing");
   const today = todayKey();
-  // `due` n'existe que sur une matière dont un cycle est allé jusqu'au bout (posé
-  // par submitParfumGuess) — son absence vaut donc "jamais sentie", y compris pour
-  // un cycle abandonné en route, qui repart proprement de zéro.
-  const jamais = doing.filter((it) => !it.due).map((it) => ({ it, w: Math.random() })).sort((x, y) => y.w - x.w).map((s) => s.it);
   const echues = doing.filter((it) => it.due && it.due <= today).sort((x, y) => (x.due < y.due ? -1 : x.due > y.due ? 1 : 0));
   const picks = echues.slice(0, PARFUM_REVIEW_SLOTS);
-  const reste = [...jamais, ...echues.slice(PARFUM_REVIEW_SLOTS),
-    // filet : plus rien d'échu ni d'inconnu (pool entièrement vu et à jour) →
-    // on reprend les plus proches de leur échéance plutôt que de rendre moins de 3.
-    ...doing.filter((it) => it.due && it.due > today).sort((x, y) => (x.due < y.due ? -1 : 1))];
+  // `due` ne se pose que via submitParfumGuess, sautée tant que PARFUM_BLIND est
+  // faux (08/08) — donc `due` n'existe plus sur AUCUNE matière en ce moment, et
+  // l'ancien tirage traitait ça comme "jamais sentie" pour tout le monde (random
+  // pur), y compris des matières déjà sniffées plusieurs fois le jour même (bug
+  // remonté par Maxence le 09/08 : indole/opoponax/rhodinol retirées juste après
+  // leur propre cycle). Vrai LRU à la place, sur l'historique réel (`it.sessions`),
+  // indépendant de `due` : jamais sentie (aucune session) en tête, puis la
+  // dernière session la plus ancienne d'abord.
+  const lastSeen = (it) => { const s = it.sessions || []; return s.length ? Math.max(...s.map((x) => x.ts || 0)) : -1; };
+  const reste = doing.filter((it) => !picks.includes(it)).sort((x, y) => lastSeen(x) - lastSeen(y));
   for (const it of reste) { if (picks.length >= n) break; if (!picks.includes(it)) picks.push(it); }
   // sorted by permanent bottle number, not draw order — .num is what actually
   // gets read aloud/displayed, so its order is the only one that matters for
@@ -2309,8 +2315,15 @@ function Throughline() {
     // med reminder card: holding to reject it shouldn't cost the escalating
     // hold-time penalty below — that's meant for declining real activities.
     if (current?.medReminder) { propose(log, activities, false, null); return; }
-    // same for the parfum prep/reveal info cards — nothing to actually decline.
-    if (current?.action?.parfumPrep) { ackParfum("prepAcked"); return; }
+    // reveal/guess cards: nothing to actually decline, swap just acks through.
+    // The PREP card is different — bug found 09/08 (Maxence : a morning draw of
+    // indole/opoponax/rhodinol got swiped away like any other proposal, but this
+    // branch called ackParfum("prepAcked") — the same thing the ACCEPT button
+    // does — silently claiming mouillettes had been prepared when they hadn't,
+    // and locking the cycle in instead of letting it go). Swiping the prep card
+    // now actually discards the draw (see discardParfum), matching what swap
+    // means everywhere else in the app.
+    if (current?.action?.parfumPrep) { discardParfum(); return; }
     if (current?.action?.parfumReveal) { ackParfum("revealed"); return; }
     // la carte "avant de savoir" non plus : la tenir = sécher, ce qui est une
     // réponse valable — on soumet ce qu'il y a (souvent rien) et on révèle.
@@ -2817,6 +2830,17 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
       setActivities((arr) => [...arr]);
     }
     propose();
+  };
+  // discard un tirage pas encore préparé (09/08, voir swap ci-dessus) — rien n'a
+  // été fait dans la vraie vie (pas de mouillette), donc rien à défaire côté
+  // matières : juste effacer pf3 pour qu'un prochain forçage retire proprement
+  // via pickItemsLRU (qui, depuis le fix du même jour, ne remontrera pas ces
+  // 3-là tout de suite puisqu'elles viennent d'être vues). avoidId évite que ce
+  // même forçage revienne à l'instant sur le tour suivant.
+  const discardParfum = () => {
+    const pf = activities.find((a) => a.id === "a_parfum_explo");
+    if (pf) { pf.pf3 = null; setActivities((arr) => [...arr]); }
+    propose(log, activities, false, "a_parfum_explo");
   };
   // parfum — soumission des 3 réponses (carte "avant de savoir"). Ce n'est pas une
   // session : rien dans le log, aucun clic compté, exactement comme prep/reveal.
