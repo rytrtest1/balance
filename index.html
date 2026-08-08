@@ -102,7 +102,7 @@ const WHERES = ["home", "anywhere", "out", "work"];
 const KINDS = ["practice", "task", "pipeline", "recommandeur"];
 // Default funnel for a new pipeline activity — the locked erasure model.
 // Erasure = a pipeline: the app serves the stage that's starving the funnel.
-const ERASURE_STAGES = ["Accroches", "Mots favoris", "Groupes", "Poème", "Forme"];
+const ERASURE_STAGES = ["accroches", "mots favoris", "groupes", "poème", "forme"];
 const mkStages = (labels) => labels.map((t) => ({ id: uid(), text: t }));
 
 // ---------- seed (everything editable) ----------
@@ -117,15 +117,15 @@ const A = (name, domain, where, perWeek, actions, kind = "practice", items = [],
 // Activities tab to make the app your own. Your real setup lives in your
 // own saved data / backup file, not here.
 const SEED = [
-  A("Move your body", "physical", "home", 5, [["Do a short workout", 20], ["Go for a walk", 30]]),
-  A("Get outside", "physical", "out", 2, [["Go for a longer walk or activity", 60]]),
-  A("Make something", "creative", "anywhere", 3, [["Spend a focused block creating", 25], ["Sketch a quick idea", 15]]),
-  A("Practice a skill", "learning", "home", 3, [["Practice your current thing", 25]]),
-  A("Learn a little", "learning", "anywhere", 3, [["Study for a short block", 15]]),
-  A("Read", "rest", "anywhere", 4, [["Read for a while", 20]]),
-  A("Rest on purpose", "rest", "home", 2, [["Do something restful and intentional", 30]]),
-  A("Reach out", "social", "anywhere", 2, [["Message or call someone", 10]]),
-  A("Tidy / chore", "chore", "home", 1, [["Knock out one chore", 20]]),
+  A("move your body", "physical", "home", 5, [["do a short workout", 20], ["go for a walk", 30]]),
+  A("get outside", "physical", "out", 2, [["go for a longer walk or activity", 60]]),
+  A("make something", "creative", "anywhere", 3, [["spend a focused block creating", 25], ["sketch a quick idea", 15]]),
+  A("practice a skill", "learning", "home", 3, [["practice your current thing", 25]]),
+  A("learn a little", "learning", "anywhere", 3, [["study for a short block", 15]]),
+  A("read", "rest", "anywhere", 4, [["read for a while", 20]]),
+  A("rest on purpose", "rest", "home", 2, [["do something restful and intentional", 30]]),
+  A("reach out", "social", "anywhere", 2, [["message or call someone", 10]]),
+  A("tidy / chore", "chore", "home", 1, [["knock out one chore", 20]]),
 ];
 
 // ---------- engine (loterie proportionnelle) ----------
@@ -387,17 +387,71 @@ function itemStep(a, log) {
 // sur un changement de date calendaire (un cycle complet peut déborder sur plusieurs
 // jours à cause des gates +6h/résiduel) — seulement une fois `revealed` repassé à
 // true.
+// --- répétition espacée (08/08). L'ancienne version pondérait « jamais senti »
+// à 999 contre « nombre de jours » pour les autres : les inconnues gagnaient
+// TOUJOURS. Sur 164 matières à 3 par cycle (et un cycle qui déborde sur 2 jours à
+// cause du résiduel), aucune matière ne serait revenue avant ~4 mois — un défilé,
+// pas un apprentissage, alors que le fichier d'observations demandait déjà
+// l'inverse ("re-tester des matières déjà senties, la mémoire olfactive est
+// fragile sans réactivation"). Toutes les méthodes documentées reposent sur la
+// répétition de la MÊME matière : Carles/Roure fait sentir à l'aveugle jour après
+// jour jusqu'à identification sans hésitation, la formation Firmenich est un test
+// à l'aveugle QUOTIDIEN sur le même stock. D'où : au plus PARFUM_REVIEW_SLOTS des
+// 3 places va à une matière déjà sentie dont l'échéance est passée (la plus en
+// retard d'abord), le reste à des inconnues tirées au hasard. Les 3 restent
+// affichées triées par num, donc rien ne dit laquelle est la revenante —
+// l'aveugle est intact, et l'échéance elle-même dépend de la reconnaissance
+// (voir parfumNextInterval / submitParfumGuess).
+const PARFUM_REVIEW_SLOTS = 1;
+const PARFUM_REVIEW_BASE_DAYS = 4;
+const PARFUM_REVIEW_GROW = 2.5;    // reconnue → on espace
+const PARFUM_REVIEW_SHRINK = 0.5;  // pas reconnue → on rapproche
+const PARFUM_REVIEW_MIN_DAYS = 3;
+const PARFUM_REVIEW_MAX_DAYS = 120;
+function parfumNextInterval(prev, hit) {
+  // 1re fois : nommer juste une matière jamais sentie, à l'aveugle, veut dire qu'elle
+  // était déjà connue — pas la peine de la revoir dans 4 jours comme les autres.
+  if (!prev) return hit ? Math.round(PARFUM_REVIEW_BASE_DAYS * PARFUM_REVIEW_GROW) : PARFUM_REVIEW_BASE_DAYS;
+  const f = hit ? PARFUM_REVIEW_GROW : PARFUM_REVIEW_SHRINK;
+  return Math.max(PARFUM_REVIEW_MIN_DAYS, Math.min(PARFUM_REVIEW_MAX_DAYS, Math.round(prev * f)));
+}
 function pickItemsLRU(a, log, n) {
   const doing = (a.items || []).filter((it) => it.status === "doing");
-  const scored = doing.map((it) => {
-    let last = null;
-    for (const e of log) if (e.activityId === a.id && isDone(e) && e.itemId === it.id && (!last || e.date > last)) last = e.date;
-    return { it, w: (last ? daysBetween(last, todayKey()) : 999) * (0.7 + Math.random() * 0.6) };
-  });
+  const today = todayKey();
+  // `due` n'existe que sur une matière dont un cycle est allé jusqu'au bout (posé
+  // par submitParfumGuess) — son absence vaut donc "jamais sentie", y compris pour
+  // un cycle abandonné en route, qui repart proprement de zéro.
+  const jamais = doing.filter((it) => !it.due).map((it) => ({ it, w: Math.random() })).sort((x, y) => y.w - x.w).map((s) => s.it);
+  const echues = doing.filter((it) => it.due && it.due <= today).sort((x, y) => (x.due < y.due ? -1 : x.due > y.due ? 1 : 0));
+  const picks = echues.slice(0, PARFUM_REVIEW_SLOTS);
+  const reste = [...jamais, ...echues.slice(PARFUM_REVIEW_SLOTS),
+    // filet : plus rien d'échu ni d'inconnu (pool entièrement vu et à jour) →
+    // on reprend les plus proches de leur échéance plutôt que de rendre moins de 3.
+    ...doing.filter((it) => it.due && it.due > today).sort((x, y) => (x.due < y.due ? -1 : 1))];
+  for (const it of reste) { if (picks.length >= n) break; if (!picks.includes(it)) picks.push(it); }
   // sorted by permanent bottle number, not draw order — .num is what actually
   // gets read aloud/displayed, so its order is the only one that matters for
   // display; draw-recency order would leak nothing useful and read worse.
-  return scored.sort((x, y) => y.w - x.w).slice(0, n).map((s) => s.it).sort((x, y) => (x.num || 0) - (y.num || 0));
+  return picks.slice(0, n).sort((x, y) => (x.num || 0) - (y.num || 0));
+}
+// la reconnaissance elle-même : comparaison souple entre ce qu'il a écrit et le vrai
+// nom (« opoponax » vs « black opoponax », « iso e » vs « iso e super® »). Sert
+// UNIQUEMENT à choisir le prochain intervalle — jamais affiché, jamais un verdict :
+// l'écran de révélation met sa réponse et la vraie côte à côte, il juge lui-même.
+const parfumNorm = (s) => (s || "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^a-z0-9]+/g, " ").trim();
+function parfumHit(guess, name) {
+  const g = parfumNorm(guess), nm = parfumNorm(name);
+  if (!g || !nm) return false;
+  if (nm.includes(g) || g.includes(nm)) return true;
+  const nt = nm.split(" ").filter((w) => w.length >= 4);
+  return g.split(" ").filter((w) => w.length >= 4).some((w) => nt.includes(w));
+}
+// le mot gardé au cycle précédent — c'est la note du round « résiduel » (voir
+// PARFUM_AIDE_FINAL : une distillation en un mot), donc la seule des 4 qui se
+// relise telle quelle. Bornée aux sessions ANTÉRIEURES au cycle en cours.
+function parfumDernierMot(it, beforeTs) {
+  const s = (it.sessions || []).filter((x) => x.round === "final" && (!beforeTs || !x.ts || x.ts < beforeTs));
+  return s.length ? s[s.length - 1].note || "" : "";
 }
 
 // --- vaisselle: derived straight from the log (cooked − washed, whole history), not
@@ -557,6 +611,16 @@ function ParfumNotePicker({ chips, setChips, intensity, setIntensity }) {
 // dans les chips/curseur (voir PARFUM_FAMILLES) — ce texte ne garde donc que ce
 // qu'aucun chip ne peut couvrir : les dimensions qui demandent une phrase.
 const PARFUM_AIDE = "aide, facultatif — à dire en mots (le reste est dans les chips) — « sent comme X + Y » · naturel/synthétique · couleur ressentie · texture au toucher · température · lieu évoqué · identité du porteur imaginé";
+// distillation finale (ajouté 07/08 — Maxence : "les techniques de Jean-Claude
+// Ellena", lu en parallèle dans Le Parfum). Sa méthode va à l'inverse de
+// l'accumulation des 3 checkpoints précédents (chips + facettes qui s'empilent) :
+// un mot juste plutôt que dix adjectifs, et une matière jugée par son usage dans
+// une composition (tient-elle seule ? a-t-elle besoin d'un cortège ?) plutôt que
+// par sa seule description. Le résiduel — dernier round, toute la vie de la
+// mouillette déjà connue — est le seul moment logique pour réduire au lieu
+// d'explorer ; les 3 rounds précédents gardent PARFUM_AIDE tel quel.
+const PARFUM_AIDE_FINAL = "distillation — de tout ce qui a été senti sur cette mouillette, garde UN mot ou une image courte, celle qui reste (le reste s'oublie, c'est normal, c'est le signe que ce n'était pas l'essentiel) · les associations qui te viennent telles quelles, sans les justifier (une matière, un souvenir, un endroit, une personne)";
+function parfumAide(roundId) { return roundId === "final" ? PARFUM_AIDE_FINAL : PARFUM_AIDE; }
 // checkpoints temporels par mouillette (revu 07/08, round 2 — Maxence voulait garder
 // la comparaison à l'aveugle des 3 matières ET l'évolution dans le temps d'une même
 // mouillette, pas l'un ou l'autre ; round 3, corrigé même jour : le résiduel n'est
@@ -564,10 +628,20 @@ const PARFUM_AIDE = "aide, facultatif — à dire en mots (le reste est dans les
 // prochaines matières — pas un 4e round collé au fond le jour même). minHoursSincePrep=
 // "nextDay" pour "final" : prêt dès que le jour LOGIQUE (voir logicalNow/
 // DAY_PIVOT_HOUR, pas minuit) a changé depuis prepTs, quelle que soit l'heure.
+// Fenêtres, pas juste des seuils (08/08, Maxence — l'usage normal, c'est l'app ouverte
+// plusieurs fois par jour ; le cas raté est l'exception qu'on gère, pas la norme qu'on
+// conçoit). Avant, `minHoursSincePrep` n'était qu'un PLANCHER : une fois passé il
+// restait valable indéfiniment, donc une note prise à +26h se faisait quand même
+// appeler "cœur" — plus du tout ce que le protocole (0-5min/+1-2h/+5h/+24h, méthode
+// Arctander) est censé capturer. `maxHoursSincePrep` ferme chaque fenêtre : passée,
+// ce round n'est plus proposé pour les matières pas encore notées — pas rattrapé plus
+// tard, gardé "non évaluée" (voir la boucle d'expiration dans pickAging). Résiduel
+// reste daté (pas en heures) : sa fenêtre est LE jour logique suivant — expiré dès
+// qu'un 2e passage de pivot (9h) survient sans qu'il ait noté.
 const PARFUM_ROUNDS = [
-  { id: "direct", label: "ouverture", minHoursSincePrep: 0 },
-  { id: "h2", label: "cœur", minHoursSincePrep: 2 },
-  { id: "h6", label: "fond", minHoursSincePrep: 6 },
+  { id: "direct", label: "ouverture", minHoursSincePrep: 0, maxHoursSincePrep: 1 },
+  { id: "h2", label: "cœur", minHoursSincePrep: 1, maxHoursSincePrep: 3 },
+  { id: "h6", label: "fond", minHoursSincePrep: 5, maxHoursSincePrep: 9 },
   { id: "final", label: "résiduel", minHoursSincePrep: "nextDay" },
 ];
 // which cook created the OLDEST still-open dish debt (Maxence 11/07: "l'app
@@ -900,11 +974,18 @@ function pickAging(activities, log, place, options = {}) {
     const pf = activities.find((x) => x.id === "a_parfum_explo");
     if (pf && placeOk(pf, place)) {
       const matAction = (pf.actions || []).find((x) => x.id === "x_pf_matiere");
-      if (matAction && hasDoingItems(pf)) {
+      // garde-fou numéros (08/08) : le protocole entier repose sur `.num`, le numéro
+      // écrit à la main sur la bouteille. Un pool chargé depuis un catalogue antérieur
+      // à leur ajout n'en a pas — sans ce garde-fou l'app afficherait « #undefined »
+      // sur les 4×3 écrans. Dans ce cas on ne force rien : x_pf_matiere reste tirable
+      // normalement (comportement d'avant le protocole), et un rechargement du
+      // catalogue rétablit le tout.
+      const numbered = (pf.items || []).some((it) => it.status === "doing" && it.num);
+      if (matAction && numbered && hasDoingItems(pf)) {
         if (!pf.pf3 || pf.pf3.revealed) {
           const picks = pickItemsLRU(pf, log, 3);
           pf.pf3 = { order: picks.map((p) => p.id), nums: picks.map((p) => p.num), names: picks.map((p) => p.text),
-            prepAcked: false, prepTs: null, round: 0, doneInRound: 0, revealed: false };
+            prepAcked: false, prepTs: null, round: 0, doneInRound: 0, guessed: false, guesses: [], revealed: false };
           if (options.seeded) options.seeded.push(pf);
         }
         const numList = pf.pf3.nums.map((n) => `#${n}`).join(" · ");
@@ -914,24 +995,59 @@ function pickAging(activities, log, place, options = {}) {
             parfumPrep: true, desc: "prépare une mouillette pour chacune de ces 3 bouteilles, puis reviens noter à l'aveugle." } }, log);
         }
         if (pf.pf3.round >= PARFUM_ROUNDS.length) {
-          if (!pf.pf3.revealed) {
-            const revealList = pf.pf3.nums.map((n, i) => `#${n} = ${pf.pf3.names[i]}`).join(" · ");
+          // le test (08/08). Avant, la fin d'un cycle était une révélation passive :
+          // l'app affichait la réponse, il la lisait. C'est de l'encodage sans
+          // récupération — or c'est la récupération qui fixe (testing effect), et
+          // c'est exactement ce qu'il s'est inventé tout seul le 03/08 hors protocole
+          // (« je pense que c'est l'opoponax… c'est bien le black opoponax »). Une
+          // carte s'intercale donc avant la révélation : il pose un nom sur chaque
+          // numéro. Facultatif, jamais bloquant — laisser vide passe, et rien n'est
+          // noté ni jugé (voir submitParfumGuess). Même pour une matière jamais
+          // sentie, se forcer à une hypothèse fait mieux retenir la vraie réponse.
+          if (!pf.pf3.guessed) {
             return resolveDraw({ activity: pf, action: { ...matAction,
-              text: `révélé — ${revealList}`,
-              parfumReveal: true } }, log);
+              text: `avant de savoir — ${numList}`, pf3nums: pf.pf3.nums,
+              parfumGuess: true, desc: "un nom, une famille, ou rien — ce qui te vient. la réponse arrive juste après." } }, log);
+          }
+          if (!pf.pf3.revealed) {
+            // texte volontairement court : les 3 lignes (réponse / vraie matière /
+            // mot gardé la dernière fois) se lisent sous la ligne, pas dedans.
+            const rows = pf.pf3.nums.map((n, i) => {
+              const it = (pf.items || []).find((x) => x.id === pf.pf3.order[i]);
+              return { num: n, name: pf.pf3.names[i], guess: (pf.pf3.guesses || [])[i] || "",
+                prev: it ? parfumDernierMot(it, pf.pf3.prepTs) : "" };
+            });
+            return resolveDraw({ activity: pf, action: { ...matAction,
+              text: "révélé", pf3rows: rows, parfumReveal: true } }, log);
           }
         } else {
-          const roundDef = PARFUM_ROUNDS[pf.pf3.round];
-          const roundReady = roundDef.minHoursSincePrep === "nextDay"
-            ? keyOf(logicalNow(new Date(pf.pf3.prepTs))) !== todayKey()
-            : (realNow().getTime() - pf.pf3.prepTs) / 3600000 >= roundDef.minHoursSincePrep;
-          if (roundReady) {
-            return resolveDraw({ activity: pf, action: { ...matAction,
-              text: `sentir matières premières — ${roundDef.label} — #${pf.pf3.nums[pf.pf3.doneInRound]} (${pf.pf3.doneInRound + 1}/3)`,
-              itemId: pf.pf3.order[pf.pf3.doneInRound], parfumRound: roundDef.id, desc: PARFUM_AIDE } }, log);
+          // Boucle d'expiration (08/08, voir la note sur PARFUM_ROUNDS) : avant de
+          // proposer le round courant, on saute en silence ceux dont la fenêtre est
+          // fermée — plusieurs à la fois si l'app est restée fermée un moment.
+          // L'usage normal, c'est l'app ouverte plusieurs fois par jour ; ce cas est
+          // l'EXCEPTION qu'on gère proprement, pas la norme qu'on conçoit. Rien
+          // n'est rattrapé : les matières pas notées à temps restent "non évaluées"
+          // (aucune entrée sessions[] pour ce round), pf.pf3.round avance quand même.
+          // En sortie de boucle : soit une fenêtre est OUVERTE (carte proposée ici),
+          // soit les 4 rounds sont dépassés — ce tirage-ci retombe sur le tirage
+          // normal sans carte parfum (coûte un tour au pire), le PROCHAIN tirage
+          // retombera dans le bloc guess/reveal au-dessus puisque round >= length.
+          while (pf.pf3.round < PARFUM_ROUNDS.length) {
+            const roundDef = PARFUM_ROUNDS[pf.pf3.round];
+            const isNextDay = roundDef.minHoursSincePrep === "nextDay";
+            const hoursSince = (realNow().getTime() - pf.pf3.prepTs) / 3600000;
+            const daysSince = isNextDay ? daysBetween(keyOf(logicalNow(new Date(pf.pf3.prepTs))), todayKey()) : null;
+            const floorOk = isNextDay ? daysSince >= 1 : hoursSince >= roundDef.minHoursSincePrep;
+            if (!floorOk) break; // pas encore l'heure — retombe sur le tirage normal.
+            const stillOpen = isNextDay ? daysSince < 2 : hoursSince < roundDef.maxHoursSincePrep;
+            if (stillOpen) {
+              return resolveDraw({ activity: pf, action: { ...matAction,
+                text: `sentir matières premières — ${roundDef.label} — #${pf.pf3.nums[pf.pf3.doneInRound]} (${pf.pf3.doneInRound + 1}/3)`,
+                itemId: pf.pf3.order[pf.pf3.doneInRound], parfumRound: roundDef.id, desc: parfumAide(roundDef.id) } }, log);
+            }
+            // fenêtre fermée (ratée) : round suivant, sans carte pour celui-ci.
+            pf.pf3.round += 1; pf.pf3.doneInRound = 0;
           }
-          // pas encore l'heure du prochain checkpoint (+2h/+6h) — retombe sur le
-          // tirage normal pour ce tour-ci, comme un rejet (avoidId) des autres forçages.
         }
       }
     }
@@ -1437,6 +1553,10 @@ function Throughline() {
   // déjà existant par submitComment() — brut, pas de synthèse Claude.
   const [parfumChips, setParfumChips] = useState([]);
   const [parfumIntensity, setParfumIntensity] = useState(null);
+  // parfum — les 3 réponses posées sur la carte "avant de savoir", juste avant la
+  // révélation (voir pickAging). Éphémère comme itemNameInput : rien de tapé ici
+  // n'est une session, pas de timer, pas de clic compté.
+  const [parfumGuesses, setParfumGuesses] = useState(["", "", ""]);
   // vocabulaire caché (Maxence 02/08) : le picker de chips restait toujours visible,
   // ce qui ancre la description sur les mots déjà là avant même d'avoir essayé de
   // décrire avec les siens. Replié par défaut, révélé à la demande — comme une aide,
@@ -2156,6 +2276,9 @@ function Throughline() {
     // same for the parfum prep/reveal info cards — nothing to actually decline.
     if (current?.action?.parfumPrep) { ackParfum("prepAcked"); return; }
     if (current?.action?.parfumReveal) { ackParfum("revealed"); return; }
+    // la carte "avant de savoir" non plus : la tenir = sécher, ce qui est une
+    // réponse valable — on soumet ce qu'il y a (souvent rien) et on révèle.
+    if (current?.action?.parfumGuess) { submitParfumGuess(); return; }
     const today = todayKey();
     const cur = holdDate === today ? holdMs : BASE_HOLD_MS; // fresh day → start from 10s
     const next = cur * 2; // every skip doubles the next hold
@@ -2553,7 +2676,11 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
         ...a,
         items: (a.items || []).map((it) => (it.id !== itemId ? it : {
           ...it,
-          sessions: [...(it.sessions || []), { date: todayKey(), round: roundId, chips: parfumChips, intensity: parfumIntensity, note: text }],
+          // ts (08/08) : `date` seul ne sépare pas deux cycles d'une même matière
+          // revenue en révision — parfumDernierMot a besoin de borner sur le cycle
+          // en cours (prepTs), donc d'un horodatage réel. realNow(), jamais
+          // Date.now() : le sandbox décale l'horloge.
+          sessions: [...(it.sessions || []), { date: todayKey(), ts: realNow().getTime(), round: roundId, chips: parfumChips, intensity: parfumIntensity, note: text }],
         })),
         // avance le curseur checkpoint × matière (voir PARFUM_ROUNDS/pickAging) — la
         // 3e note d'un round fait passer au round suivant, doneInRound repart à 0.
@@ -2654,6 +2781,44 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
     }
     propose();
   };
+  // parfum — soumission des 3 réponses (carte "avant de savoir"). Ce n'est pas une
+  // session : rien dans le log, aucun clic compté, exactement comme prep/reveal.
+  // Deux effets, tous les deux invisibles pour lui sur le moment :
+  //  - la réponse est gardée sur l'item (`trials`), à côté du brut des 4 checkpoints ;
+  //  - elle fixe la PROCHAINE échéance de cette matière (voir parfumNextInterval) :
+  //    reconnue → on espace, ratée → on rapproche. C'est ça qui fait de la révision
+  //    un vrai apprentissage et pas un défilé.
+  // Laisser une case vide est un cas normal, pas une erreur : aucune réponse = aucun
+  // signal, l'échéance ne change pas (ou part de la base si c'est la 1re fois) —
+  // il n'est jamais puni d'avoir séché. Rien de tout ça n'est affiché : l'écran
+  // suivant met sa réponse et la vraie côte à côte, il juge lui-même.
+  const submitParfumGuess = () => {
+    const pf = activities.find((a) => a.id === "a_parfum_explo");
+    if (!pf || !pf.pf3) return;
+    const guesses = [0, 1, 2].map((i) => (parfumGuesses[i] || "").trim());
+    const ts = realNow().getTime();
+    setActivities((arr) => arr.map((a) => (a.id !== "a_parfum_explo" ? a : {
+      ...a,
+      items: (a.items || []).map((it) => {
+        const i = pf.pf3.order.indexOf(it.id);
+        if (i < 0) return it;
+        const g = guesses[i];
+        const hit = g ? parfumHit(g, it.text) : null;
+        const interval = hit === null ? (it.interval || PARFUM_REVIEW_BASE_DAYS) : parfumNextInterval(it.interval, hit);
+        return { ...it,
+          trials: [...(it.trials || []), { ts, guess: g, hit }],
+          interval,
+          due: daysAgoKey(-interval) };
+      }),
+    })));
+    // même mutation en place que ackParfum : le propose() qui suit doit voir le flag
+    // avant que le re-render de setActivities n'ait atterri.
+    pf.pf3.guesses = guesses;
+    pf.pf3.guessed = true;
+    setParfumGuesses(["", "", ""]);
+    propose();
+  };
+
   // tap to begin — for timed activities the line pre-fills with already-done minutes this period
   const begin = () => {
     // med reminder card (see start()): never a real session — move straight to
@@ -2669,6 +2834,9 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
     // running/finish, donc jamais de clic compté.
     if (current?.action?.parfumPrep) { ackParfum("prepAcked"); return; }
     if (current?.action?.parfumReveal) { ackParfum("revealed"); return; }
+    // "avant de savoir" : même logique que l'étape "choisir" ci-dessus — le tap et
+    // l'auto-start ne font rien, ce sont les champs sous la ligne qui avancent.
+    if (current?.action?.parfumGuess) return;
     lastStartDelayRef.current = proposedAtRef.current ? Date.now() - proposedAtRef.current : null;
     let preMs = 0;
     if (current?.activity?.timed) {
@@ -2721,6 +2889,17 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
   const AUTO_START_MS = 2200;
   useEffect(() => {
     if (stage !== "proposal" || holding) return;
+    // exception parfum (08/08, trouvé en jouant le cycle complet dans le bac à
+    // sable) : prep / "avant de savoir" / révélé ne sont pas des propositions de
+    // séance mais des consignes à exécuter physiquement et un retour à lire.
+    // L'auto-start les escamotait en 2,2s — la carte de prépa posait prepTs et
+    // programmait les rappels +2h/+6h avant même qu'il ait sorti les flacons, et
+    // la révélation (sa réponse, la vraie matière, son mot du cycle précédent)
+    // disparaissait sans être lue. Elles attendent donc un vrai tap. `fresh`
+    // (l'étape "choisir") est déjà un no-op dans begin(), listée ici pour ne plus
+    // armer un timer pour rien.
+    const act = current && current.action;
+    if (act && (act.parfumPrep || act.parfumGuess || act.parfumReveal || act.fresh)) return;
     const t = setTimeout(() => { begin(); }, AUTO_START_MS);
     return () => clearTimeout(t);
   }, [stage, current, holding]);
@@ -3311,7 +3490,7 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
     setMsg("annulé"); setTimeout(() => setMsg(""), 1500);
   };
   const resetAll = () => {
-    if (typeof window !== "undefined" && !window.confirm("Wipe all activities and history?")) return;
+    if (typeof window !== "undefined" && !window.confirm("wipe all activities and history?")) return;
     // a real reset means real zero — a debug date left jumped ahead used to survive
     // this, so post-reset taps kept logging under a stale simulated clock, making
     // it look like old data hadn't actually gone away (Maxence 11/07).
@@ -3332,6 +3511,7 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
       begin, finish, tapAction, submitComment, start, resetFlow,
       setManualMin, setComment, setTab, applyDebugTime, simReseed, runSimBatch,
       parfumChips, setParfumChips, parfumIntensity, setParfumIntensity, ackParfum,
+      parfumGuesses, setParfumGuesses, submitParfumGuess,
       readReminders, scheduleReminder, cancelReminder, checkDueReminder,
       setLog, setActivities, setStage, setCurrent,
       albumTitles, albumIdx, setAlbumTitles, setAlbumIdx, advanceAlbumTitle,
@@ -3937,6 +4117,43 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                   </div>
                 )}
 
+                {/* parfum — "avant de savoir" (08/08) : un nom par numéro, avant la
+                    révélation. Même idiome éphémère que "choisir" ci-dessus (tap et
+                    auto-start no-op, Entrée valide) — sauf qu'ici le vide passe :
+                    sécher est une réponse, pas une erreur. Aucun retour immédiat,
+                    aucune couleur, aucun score : la carte suivante met sa réponse et
+                    la vraie côte à côte et il juge lui-même (voir submitParfumGuess). */}
+                {stage === "proposal" && current?.action?.parfumGuess && (
+                  <div className="fade" style={{ maxWidth: 300, margin: "24px auto 0" }}>
+                    {(current.action.pf3nums || []).map((n, i) => (
+                      <div key={n} style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 10 }}>
+                        <span className="mono" style={{ fontSize: 12, color: C.mut, width: 34, textAlign: "right" }}>#{n}</span>
+                        <input className="in" value={parfumGuesses[i] || ""}
+                          autoComplete="off" name={`pf-guess-${i}`}
+                          onChange={(e) => setParfumGuesses((g) => g.map((v, j) => (j === i ? e.target.value : v)))}
+                          onKeyDown={(e) => { if (e.key === "Enter") submitParfumGuess(); }}
+                          style={{ fontFamily: "var(--mono)", fontSize: 13, flex: 1, color: C.text, borderBottom: `1px solid ${C.line}` }} />
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* parfum — la révélation, sortie de la ligne (08/08) : trois lignes
+                    trop longues pour y tenir. Pour une matière revue, le mot gardé au
+                    cycle précédent s'affiche à côté — c'est là que se voit ce qui a
+                    tenu et ce qui s'est déformé, le vrai retour du protocole. */}
+                {stage === "proposal" && current?.action?.parfumReveal && (
+                  <div className="fade" style={{ maxWidth: 320, margin: "22px auto 0", textAlign: "left" }}>
+                    {(current.action.pf3rows || []).map((r) => (
+                      <div key={r.num} style={{ marginBottom: 12 }}>
+                        <div className="mono" style={{ fontSize: 12, color: C.text }}>#{r.num} — {r.name}</div>
+                        {r.guess && <div className="mono" style={{ fontSize: 11, color: C.mut, marginTop: 2 }}>tu as dit « {r.guess} »</div>}
+                        {r.prev && <div className="mono" style={{ fontSize: 11, color: C.faint, marginTop: 2 }}>la dernière fois « {r.prev} »</div>}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
 
                 {/* running: a quiet pause, for when something outside interrupts the session
                     (a call, someone at the door) — for stopping the clock without abandoning
@@ -4171,7 +4388,7 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                       ))}
                     </div>
                     <button className="link" style={{ color: C.line, fontSize: 10 }}
-                      onClick={() => { if (window.confirm(`Supprimer "${r.activity.name}" ?`)) { delActivity(r.activity.id); setParamEdit(null); } }}>
+                      onClick={() => { if (window.confirm(`supprimer "${r.activity.name}" ?`)) { delActivity(r.activity.id); setParamEdit(null); } }}>
                       supprimer l'activité
                     </button>
                   </div>
