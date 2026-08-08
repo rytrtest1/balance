@@ -1808,13 +1808,19 @@ function Throughline() {
   // but begin()/swap() special-case it below to move straight to a real
   // propose() instead of running a session, so nothing ever touches `log`.
   const medReminderShownRef = useRef(null);
-  // load-once-per-day (18/07, Maxence: "sinon je peux tricher pour skip") — load
-  // restores a whole activities/log snapshot, so an unlimited load is a way to
-  // undo today's state (dodge a debt, re-roll a draw he didn't like) by reaching
-  // for an older backup. One load per calendar day closes that without touching
-  // the legitimate use (recovering a lost session) — same "date ref persisted
-  // to store" shape as medReminderShownRef just above.
-  const lastLoadDateRef = useRef(null);
+  // anti-retour-arrière, pas anti-nombre (08/08, Maxence: le vrai risque n'est pas
+  // de charger plusieurs fois — c'est de charger une save PASSÉE qui écraserait la
+  // progression posée sur `activities` depuis (pf3, stage de pipeline, items
+  // "done" — le log lui-même est déjà protégé plus bas, jamais remplacé si non
+  // vide). Le "1x/jour" (18/07) bloquait ça en bloquant tout rechargement après
+  // le premier, y compris légitime (recharger la même save corrigée, ou une save
+  // plus récente). Remplacé par une comparaison sur `exportedAt` : chaque
+  // rechargement ne peut qu'avancer dans le temps par rapport au dernier chargé
+  // AUJOURD'HUI — remis à zéro chaque jour calendaire, donc une save ancienne
+  // (ex. le reset catalogue) reste chargeable tant que rien de plus récent n'a
+  // encore été chargé aujourd'hui. Même "ref persisté au store" shape que
+  // medReminderShownRef juste au-dessus.
+  const lastLoadRef = useRef(null);
   // the domain-balance swing (see domainBalance()) stays completely hidden —
   // no tilt, no class, line looks exactly as if the feature didn't exist —
   // until a shake reveals it. Changed 16/07: no longer a manual on/off toggle —
@@ -2171,7 +2177,7 @@ function Throughline() {
       const doneHintSeen = await store.get(NS("tlx_doneHintSeen"));
       if (!doneHintSeen) { setShowDoneHint(true); store.set(NS("tlx_doneHintSeen"), "1"); }
       medReminderShownRef.current = await store.get(NS("tlx_medReminderDate"));
-      lastLoadDateRef.current = await store.get(NS("tlx_lastLoadDate"));
+      try { const raw = await store.get(NS("tlx_lastLoadRef")); lastLoadRef.current = raw ? JSON.parse(raw) : null; } catch { lastLoadRef.current = null; }
       if (!alive) return;
       setActivities(migrateSingleItemActivities(migratePickerActions(a ?? SEED)));
       setLog(l ?? []);
@@ -2589,7 +2595,7 @@ ${act.observations || "(vide)"}
 Commentaire laissé après cette session :
 « ${text} »
 
-Réécris les observations en y intégrant ce qu'apporte ce commentaire — garde tout ce qui reste pertinent, ne raccourcis pas artificiellement pour économiser de la place. Ne retire que ce qui est vraiment obsolète ou remplacé par une observation plus récente. updated_observations = les observations complètes réécrites.${curItem ? `\n\nDétermine aussi si le commentaire indique que « ${curItem.text} » est fini/terminé (la prochaine session en proposera un nouveau ${label}) : item_done = true si oui, false s'il reste en cours.\n\nSi le commentaire mentionne un repère de progression (page, épisode, chapitre, minute…), donne-le dans progress — court (ex: "p.22/117", "ép.6"), JAMAIS intégré au titre lui-même qui reste stable. progress = null si aucun repère n'est mentionné cette fois (garde alors l'ancien tel quel, ne l'efface pas).${titleCleanupCtx}` : ""}`;
+Réécris les observations en y intégrant ce qu'apporte ce commentaire — garde tout ce qui reste pertinent, ne raccourcis pas artificiellement pour économiser de la place. Ne retire que ce qui est vraiment obsolète ou remplacé par une observation plus récente. updated_observations = les observations complètes réécrites.${curItem ? `\n\nDétermine aussi si « ${curItem.text} » est ENTIÈREMENT fini — le ${label} dans son ensemble, pas juste cette séance ni un épisode/chapitre particulier (la prochaine session en proposera un nouveau ${label}) : item_done = true UNIQUEMENT si le commentaire dit clairement que la totalité du ${label} est terminée (ex: "fini le podcast", "dernier épisode de la série", "j'ai fini le livre"). Un commentaire qui parle juste de cette séance ou d'un épisode/chapitre précis SANS dire que l'ensemble est fini ne compte PAS comme terminé : item_done = false par défaut dans le doute.\n\nSi le commentaire mentionne un repère de progression (page, épisode, chapitre, minute…), donne-le dans progress — court (ex: "p.22/117", "ép.6"), JAMAIS intégré au titre lui-même qui reste stable. progress = null si aucun repère n'est mentionné cette fois (garde alors l'ancien tel quel, ne l'efface pas).${titleCleanupCtx}` : ""}`;
     setSyncing(true); setSyncMsg("lecture du commentaire…");
     try {
       // maxTokens generous here (found 10/07: the default 400 truncates mid-JSON
@@ -3494,6 +3500,21 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
     try {
       const o = JSON.parse(text);
       if (!o.activities) throw new Error("no activities");
+      // anti-retour-arrière (08/08, remplace le 1x/jour — voir la note sur
+      // lastLoadRef) : bloque seulement si ce fichier est plus VIEUX que le
+      // dernier déjà chargé aujourd'hui — comparé sur exportedAt. Pas de
+      // référence encore aujourd'hui (jour changé, ou aucun load) → toujours
+      // permis, exportedAt absent du fichier → impossible à vérifier, permis
+      // aussi (fail open plutôt que bloquer une save légitime sans le champ).
+      if (!SIM) {
+        const ref = lastLoadRef.current;
+        if (ref && ref.date === todayKey() && o.exportedAt && ref.exportedAt &&
+            new Date(o.exportedAt).getTime() < new Date(ref.exportedAt).getTime()) {
+          setMsg("ce fichier est plus ancien que le dernier chargé aujourd'hui");
+          setTimeout(() => setMsg(""), 2400);
+          return;
+        }
+      }
       // Loading mid-session (log already has entries) must never touch the log —
       // a catalogue file always carries a "log" key (even if just []), and blindly
       // importing it used to silently wipe or reintroduce stale dated history into
@@ -3504,21 +3525,16 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
       // can never actually restore history (Maxence 13/07).
       setActivities(o.activities);
       if (log.length === 0 && Array.isArray(o.log) && o.log.length > 0) setLog(o.log);
-      lastLoadDateRef.current = todayKey();
-      store.set(NS("tlx_lastLoadDate"), todayKey());
+      if (o.exportedAt) {
+        lastLoadRef.current = { date: todayKey(), exportedAt: o.exportedAt };
+        store.set(NS("tlx_lastLoadRef"), JSON.stringify(lastLoadRef.current));
+      }
       setMsg("loaded ✓"); setTab("now"); setStage("entry");
     } catch { setMsg("couldn't read that — check the file/text"); }
     setTimeout(() => setMsg(""), 2200);
   };
   const onFile = (ev) => {
     const f = ev.target.files?.[0]; if (!f) return;
-    // 1x/jour calendaire = anti-triche pour l'usage réel (Maxence 18/07). Sans objet
-    // dans le bac à sable — pas de "jour" à tricher là, juste des recharges répétées
-    // pendant les tests (Maxence 03/08) — donc le gate ne s'applique qu'en prod.
-    if (!SIM && lastLoadDateRef.current === todayKey()) {
-      setMsg("déjà chargé aujourd'hui"); setTimeout(() => setMsg(""), 2200);
-      ev.target.value = ""; return;
-    }
     const r = new FileReader(); r.onload = () => applyImport(String(r.result)); r.readAsText(f); ev.target.value = "";
   };
   // undo a bad tap (Maxence 25/07: logged Erasure as done, hadn't actually written
