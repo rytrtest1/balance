@@ -989,7 +989,7 @@ function pickAging(activities, log, place, options = {}) {
   // tirage normal pour ce tour-là, comme les autres forçages ci-dessus.
   if (avoidId !== "a_parfum_explo") {
     const pf = activities.find((x) => x.id === "a_parfum_explo");
-    if (pf && placeOk(pf, place)) {
+    if (pf) {
       const matAction = (pf.actions || []).find((x) => x.id === "x_pf_matiere");
       // garde-fou numéros (08/08) : le protocole entier repose sur `.num`, le numéro
       // écrit à la main sur la bouteille. Un pool chargé depuis un catalogue antérieur
@@ -998,21 +998,29 @@ function pickAging(activities, log, place, options = {}) {
       // normalement (comportement d'avant le protocole), et un rechargement du
       // catalogue rétablit le tout.
       const numbered = (pf.items || []).some((it) => it.status === "doing" && it.num);
+      // home requis seulement pour tirer 3 nouvelles bouteilles et faire la
+      // mouillette (08/08, Maxence : "j'ai emporté les touches avec moi" — une fois
+      // faite, la mouillette voyage avec lui). Les checkpoints (cœur/fond/résiduel)
+      // et la révélation ne touchent plus aux bouteilles, donc forcent partout ;
+      // seuls le tirage et la prépa restent gatés par placeOk ci-dessous.
+      const atHome = placeOk(pf, place);
       if (matAction && numbered && hasDoingItems(pf)) {
-        if (!pf.pf3 || pf.pf3.revealed) {
+        if ((!pf.pf3 || pf.pf3.revealed) && atHome) {
           const picks = pickItemsLRU(pf, log, 3);
           pf.pf3 = { order: picks.map((p) => p.id), nums: picks.map((p) => p.num), names: picks.map((p) => p.text),
             prepAcked: false, prepTs: null, round: 0, doneInRound: 0, guessed: false, guesses: [], revealed: false };
           if (options.seeded) options.seeded.push(pf);
         }
+        if (pf.pf3 && !pf.pf3.revealed) {
         const numList = pf.pf3.nums.map((n) => `#${n}`).join(" · ");
         const nameList = pf.pf3.names.join(" · ");
         if (!pf.pf3.prepAcked) {
-          return resolveDraw({ activity: pf, action: { ...matAction,
-            text: `aujourd'hui : ${PARFUM_BLIND ? numList : nameList}`,
-            parfumPrep: true, desc: "prépare une mouillette pour chacune de ces 3 bouteilles, puis reviens noter." } }, log);
-        }
-        if (pf.pf3.round >= PARFUM_ROUNDS.length) {
+          if (atHome) {
+            return resolveDraw({ activity: pf, action: { ...matAction,
+              text: `aujourd'hui : ${PARFUM_BLIND ? numList : nameList}`,
+              parfumPrep: true, desc: "prépare une mouillette pour chacune de ces 3 bouteilles, puis reviens noter." } }, log);
+          }
+        } else if (pf.pf3.round >= PARFUM_ROUNDS.length) {
           // le test (08/08). Avant, la fin d'un cycle était une révélation passive :
           // l'app affichait la réponse, il la lisait. C'est de l'encodage sans
           // récupération — or c'est la récupération qui fixe (testing effect), et
@@ -1069,6 +1077,7 @@ function pickAging(activities, log, place, options = {}) {
             // fenêtre fermée (ratée) : round suivant, sans carte pour celui-ci.
             pf.pf3.round += 1; pf.pf3.doneInRound = 0;
           }
+        }
         }
       }
     }
