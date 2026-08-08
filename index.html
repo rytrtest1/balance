@@ -652,6 +652,15 @@ const PARFUM_ROUNDS = [
   { id: "h6", label: "fond", minHoursSincePrep: 5, maxHoursSincePrep: 9 },
   { id: "final", label: "résiduel", minHoursSincePrep: "nextDay" },
 ];
+// battement (08/08, Maxence) : sans marge, rouvrir l'app à peine après la fin
+// d'une fenêtre (ex. +1h05 sur ouverture, fenêtre 0-1h) marquait direct la
+// matière "non évaluée" — trop strict pour un usage réel où l'app n'est pas
+// ouverte à la seconde près. Ajoute une marge de rattrapage APRÈS
+// maxHoursSincePrep avant d'abandonner le round ; ne touche pas minHoursSincePrep
+// donc ne crée pas de chevauchement avec la fenêtre suivante (le round courant
+// est toujours vérifié en premier dans la boucle). Ne s'applique pas au résiduel
+// (pas de maxHoursSincePrep, déjà sa propre fenêtre en jours).
+const PARFUM_ROUND_GRACE_HOURS = 1;
 // which cook created the OLDEST still-open dish debt (Maxence 11/07: "l'app
 // propose peu de temps après l'action qui ramène à 0" — eligible ≠ prioritized;
 // pickAging's weight() ages a row off when THAT ROW was last done, so a vaisselle
@@ -1050,7 +1059,7 @@ function pickAging(activities, log, place, options = {}) {
             const daysSince = isNextDay ? daysBetween(keyOf(logicalNow(new Date(pf.pf3.prepTs))), todayKey()) : null;
             const floorOk = isNextDay ? daysSince >= 1 : hoursSince >= roundDef.minHoursSincePrep;
             if (!floorOk) break; // pas encore l'heure — retombe sur le tirage normal.
-            const stillOpen = isNextDay ? daysSince < 2 : hoursSince < roundDef.maxHoursSincePrep;
+            const stillOpen = isNextDay ? daysSince < 2 : hoursSince < roundDef.maxHoursSincePrep + PARFUM_ROUND_GRACE_HOURS;
             if (stillOpen) {
               const label = PARFUM_BLIND ? `#${pf.pf3.nums[pf.pf3.doneInRound]}` : pf.pf3.names[pf.pf3.doneInRound];
               return resolveDraw({ activity: pf, action: { ...matAction,
@@ -2785,9 +2794,10 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
         // read-modify-write sur le même tableau (tlx_reminder) — deux appels non
         // séquentiels se marchent dessus et le second écrase le premier (piège
         // déjà documenté au-dessus, sur readReminders).
-        const numList = pf.pf3.nums.map((n) => `#${n}`).join(" · ");
-        await scheduleReminder(`parfum — cœur : reviens noter ${numList} à l'aveugle`, 120, "parfum_h2");
-        await scheduleReminder(`parfum — fond : reviens noter ${numList} à l'aveugle`, 360, "parfum_h6");
+        const label = PARFUM_BLIND ? pf.pf3.nums.map((n) => `#${n}`).join(" · ") : pf.pf3.names.join(" · ");
+        const blindSuffix = PARFUM_BLIND ? " à l'aveugle" : "";
+        await scheduleReminder(`parfum — cœur : reviens noter ${label}${blindSuffix}`, 120, "parfum_h2");
+        await scheduleReminder(`parfum — fond : reviens noter ${label}${blindSuffix}`, 360, "parfum_h6");
       }
       setActivities((arr) => [...arr]);
     }
@@ -4186,7 +4196,7 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                   <div className="fade" style={{ maxWidth: 320, margin: "22px auto 0", textAlign: "left" }}>
                     {(current.action.pf3rows || []).map((r) => (
                       <div key={r.num} style={{ marginBottom: 12 }}>
-                        <div className="mono" style={{ fontSize: 12, color: C.text }}>#{r.num} — {r.name}</div>
+                        <div className="mono" style={{ fontSize: 12, color: C.text }}>{PARFUM_BLIND ? `#${r.num} — ${r.name}` : r.name}</div>
                         {r.guess && <div className="mono" style={{ fontSize: 11, color: C.mut, marginTop: 2 }}>tu as dit « {r.guess} »</div>}
                         {r.prev && <div className="mono" style={{ fontSize: 11, color: C.faint, marginTop: 2 }}>la dernière fois « {r.prev} »</div>}
                       </div>
