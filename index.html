@@ -408,6 +408,14 @@ const PARFUM_REVIEW_GROW = 2.5;    // reconnue → on espace
 const PARFUM_REVIEW_SHRINK = 0.5;  // pas reconnue → on rapproche
 const PARFUM_REVIEW_MIN_DAYS = 3;
 const PARFUM_REVIEW_MAX_DAYS = 120;
+// Aveugle désactivé (08/08, même jour que le protocole initial) : Maxence préfère
+// fonctionner avec les noms des matières pour l'instant. Le mécanisme (numéro
+// anonyme sur les écrans de prépa/round, carte "avant de savoir" pour deviner,
+// révélation du nom en dernier) reste écrit et intact plus bas — juste gardé de
+// côté derrière ce flag, pas supprimé, au cas où il revienne dessus plus tard.
+// La répétition espacée (au-dessus) ne dépend pas de ce flag : elle continue de
+// faire revenir les mêmes matières, seule l'anonymisation est coupée.
+const PARFUM_BLIND = false;
 function parfumNextInterval(prev, hit) {
   // 1re fois : nommer juste une matière jamais sentie, à l'aveugle, veut dire qu'elle
   // était déjà connue — pas la peine de la revoir dans 4 jours comme les autres.
@@ -956,20 +964,20 @@ function pickAging(activities, log, place, options = {}) {
     const grille = su && (su.actions || []).find((x) => x.id === "x_su_grille");
     if (su && grille && placeOkW(grille.where || su.where, place)) return resolveDraw({ activity: su, action: grille }, log);
   }
-  // parfum — 3 matières/jour à l'aveugle par numéro de bouteille : forcé jusqu'à
-  // résolution des 3, même idée que vaisselle/anki/sudoku ci-dessus mais sur un
-  // état (pas juste "dernier logué") — sinon le tirage pondéré pourrait ne jamais
-  // le proposer avant que Maxence sorte de chez lui (retour du 01/08 sur la 1ère
-  // version qui laissait ça au hasard). `pf.pf3` porte le tirage du jour (voir
-  // pickItemsLRU ci-dessus) ; deux acquittements l'encadrent — prepAcked (a vu la
-  // liste des 3 numéros à préparer) et revealed (a vu la correspondance finale) —
-  // sans quoi le forçage boirait à l'infini sur la même carte (rien ne progresse
-  // "count" tant qu'on n'a pas vraiment noté une matière). L'app ne dit JAMAIS un
-  // nom avant la révélation finale (07/08, Maxence : le numéro doit être celui
-  // écrit sur la bouteille, sinon ça ne marche pas) — seul `.num` apparaît sur les
-  // écrans de prépa/évaluation, `.text` (le nom) n'est lu qu'au reveal. Un rejet
-  // (avoidId) fait retomber sur le tirage normal pour ce tour-là, comme les autres
-  // forçages ci-dessus.
+  // parfum — 3 matières/jour : forcé jusqu'à résolution des 3, même idée que
+  // vaisselle/anki/sudoku ci-dessus mais sur un état (pas juste "dernier logué") —
+  // sinon le tirage pondéré pourrait ne jamais le proposer avant que Maxence sorte
+  // de chez lui (retour du 01/08 sur la 1ère version qui laissait ça au hasard).
+  // `pf.pf3` porte le tirage du jour (voir pickItemsLRU ci-dessus) ; deux
+  // acquittements l'encadrent — prepAcked (a vu la liste des 3 à préparer) et
+  // revealed (a vu la correspondance finale) — sans quoi le forçage boirait à
+  // l'infini sur la même carte (rien ne progresse "count" tant qu'on n'a pas
+  // vraiment noté une matière). Le nom (`.text`) s'affiche directement sur les
+  // écrans de prépa/évaluation depuis que PARFUM_BLIND est à faux (08/08, Maxence :
+  // on fonctionne avec les noms pour l'instant) — le mode numéro-anonyme d'origine
+  // (07/08 : "le numéro doit être celui écrit sur la bouteille") reste codé plus
+  // bas derrière ce flag, gardé de côté. Un rejet (avoidId) fait retomber sur le
+  // tirage normal pour ce tour-là, comme les autres forçages ci-dessus.
   if (avoidId !== "a_parfum_explo") {
     const pf = activities.find((x) => x.id === "a_parfum_explo");
     if (pf && placeOk(pf, place)) {
@@ -989,10 +997,11 @@ function pickAging(activities, log, place, options = {}) {
           if (options.seeded) options.seeded.push(pf);
         }
         const numList = pf.pf3.nums.map((n) => `#${n}`).join(" · ");
+        const nameList = pf.pf3.names.join(" · ");
         if (!pf.pf3.prepAcked) {
           return resolveDraw({ activity: pf, action: { ...matAction,
-            text: `aujourd'hui : ${numList}`,
-            parfumPrep: true, desc: "prépare une mouillette pour chacune de ces 3 bouteilles, puis reviens noter à l'aveugle." } }, log);
+            text: `aujourd'hui : ${PARFUM_BLIND ? numList : nameList}`,
+            parfumPrep: true, desc: "prépare une mouillette pour chacune de ces 3 bouteilles, puis reviens noter." } }, log);
         }
         if (pf.pf3.round >= PARFUM_ROUNDS.length) {
           // le test (08/08). Avant, la fin d'un cycle était une révélation passive :
@@ -1004,7 +1013,9 @@ function pickAging(activities, log, place, options = {}) {
           // numéro. Facultatif, jamais bloquant — laisser vide passe, et rien n'est
           // noté ni jugé (voir submitParfumGuess). Même pour une matière jamais
           // sentie, se forcer à une hypothèse fait mieux retenir la vraie réponse.
-          if (!pf.pf3.guessed) {
+          // Sautée tant que PARFUM_BLIND est faux (08/08) : deviner un nom n'a plus
+          // de sens quand le nom est déjà affiché depuis le premier écran.
+          if (PARFUM_BLIND && !pf.pf3.guessed) {
             return resolveDraw({ activity: pf, action: { ...matAction,
               text: `avant de savoir — ${numList}`, pf3nums: pf.pf3.nums,
               parfumGuess: true, desc: "un nom, une famille, ou rien — ce qui te vient. la réponse arrive juste après." } }, log);
@@ -1041,8 +1052,9 @@ function pickAging(activities, log, place, options = {}) {
             if (!floorOk) break; // pas encore l'heure — retombe sur le tirage normal.
             const stillOpen = isNextDay ? daysSince < 2 : hoursSince < roundDef.maxHoursSincePrep;
             if (stillOpen) {
+              const label = PARFUM_BLIND ? `#${pf.pf3.nums[pf.pf3.doneInRound]}` : pf.pf3.names[pf.pf3.doneInRound];
               return resolveDraw({ activity: pf, action: { ...matAction,
-                text: `sentir matières premières — ${roundDef.label} — #${pf.pf3.nums[pf.pf3.doneInRound]} (${pf.pf3.doneInRound + 1}/3)`,
+                text: `sentir matières premières — ${roundDef.label} — ${label} (${pf.pf3.doneInRound + 1}/3)`,
                 itemId: pf.pf3.order[pf.pf3.doneInRound], parfumRound: roundDef.id, desc: parfumAide(roundDef.id) } }, log);
             }
             // fenêtre fermée (ratée) : round suivant, sans carte pour celui-ci.
