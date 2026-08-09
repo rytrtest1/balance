@@ -17,7 +17,7 @@
 <body>
 <div id="root"></div>
 <script type="text/babel" data-presets="react">
-const { useState, useEffect, useRef } = React;
+const { useState, useEffect, useRef, useMemo } = React;
 
 /* ============================================================
  * BALANCE (née throughline) — the daily engine
@@ -553,54 +553,270 @@ const WORK_LISTEN_GATE_IDS = new Set(["a_film", "a_podcast", "a_ecoute_titre", "
 // La donnée stockée reste un simple string[] (voir parfumChips) — vocabulaire
 // beaucoup plus large que les 8 chips plates du round 3 (familles ET facettes
 // mêlées), même forme de stockage.
-const PARFUM_TEXTURE_CHIPS = ["rond", "sec", "linéaire", "évolutif", "plat", "texturé", "fondu", "tranchant", "transparent", "massif", "projection", "collé-peau"];
+// Révisé 09/08 (rapport RAPPORT_CHIPS_PARFUM_2026-08-09.md, réunion à 3 agents —
+// nez/Ellena/Arctander/Carles, lexiques scientifiques Dravnieks/DREAM/roues
+// sensorielles, design) : +3 familles (aromatique, musqué, chimique — les trous
+// les plus consensuels des deux recherches indépendantes) + facettes manquantes
+// + 3 chips trigéminales sur "forme". Les DOUBLONS INTER-FAMILLES sont volontaires
+// (ex. "fumé" dans boisé ET animal, "camphré" dans aromatique ET balsamique) : même
+// chaîne, `chips.includes` l'allume aux deux endroits, zéro changement de données —
+// ça règle le "mauvais tiroir" (chercher un mot rangé ailleurs) sans dupliquer le
+// stockage. Rien de l'existant renommé ni retiré : les chips déjà dans les sessions
+// passées restent valides telles quelles.
+const PARFUM_TEXTURE_CHIPS = ["rond", "sec", "linéaire", "évolutif", "plat", "texturé", "fondu", "tranchant", "transparent", "massif", "projection", "collé-peau", "piquant", "chauffant", "gras/huileux"];
 const PARFUM_FAMILLES = [
   { key: "agrumes", facets: ["zesté", "amer", "citronné", "orangé", "pamplemousse", "pétillant", "terpénique", "cireux"] },
+  { key: "aromatique", facets: ["lavande", "romarin", "thym", "sauge", "armoise/absinthe", "mentholé", "eucalyptus", "camphré", "anisé", "foin"] },
   { key: "vert", facets: ["feuille froissée", "tige", "gazon coupé", "galbanum", "concombre", "sève", "foin", "herbacé"] },
   { key: "floral", facets: ["rosé", "jasminé", "indolique", "fleur d'oranger", "muguet", "violette", "iris", "tubéreuse", "poudré", "miellé"] },
-  { key: "fruité", facets: ["pêche/lactone", "baie rouge", "poire", "pomme", "tropical", "confituré", "vineux", "raisin sec"] },
+  { key: "fruité", facets: ["pêche/lactone", "baie rouge", "poire", "pomme", "tropical", "confituré", "vineux", "raisin sec", "coco", "cassis"] },
   { key: "épicé", facets: ["poivré", "girofle", "cannelle", "cardamome", "cumin", "safran", "anisé", "gingembre"] },
-  { key: "boisé", facets: ["santalé", "cédré", "vétiver", "patchouli", "oud", "crayon", "poussiéreux", "crémeux"] },
+  { key: "boisé", facets: ["santalé", "cédré", "vétiver", "patchouli", "oud", "crayon", "poussiéreux", "crémeux", "fumé"] },
   { key: "balsamique", facets: ["encens", "ambré", "vanillé", "benjoin", "labdanum", "baume de tolu", "coumarine", "camphré"] },
-  { key: "animal", facets: ["musqué", "cuiré", "fumé", "goudron/phénolique", "tabac", "castoréum", "civette", "urineux", "fécal", "fromagé"] },
-  { key: "terreux", facets: ["mousse", "humus", "champignon", "betterave", "pierre/silex", "iodé/marin", "métallique", "poussière"] },
+  { key: "musqué", facets: ["musc blanc", "linge propre", "cotonneux", "poudré", "irisé", "ambrette", "peau"] },
+  { key: "animal", facets: ["musqué", "cuiré", "fumé", "goudron/phénolique", "tabac", "castoréum", "civette", "urineux", "fécal", "fromagé", "rance"] },
+  { key: "terreux", facets: ["mousse", "humus", "champignon", "betterave", "pierre/silex", "iodé/marin", "métallique", "poussière", "moisi"] },
   { key: "gourmand", facets: ["caramel", "chocolat", "amande", "noisette", "beurré/lacté", "miel", "malté", "grillé"] },
-  { key: "frais", facets: ["ozonique", "aldéhydé", "savonneux", "mentholé", "eucalyptus", "aqueux", "glacé", "ferreux"] },
-  // seule entrée non olfactive : « forme » est un axe orthogonal (un boisé peut être
-  // rond ou tranchant), pas une famille. `head: false` — la taper ouvre seulement,
-  // sans s'ajouter aux descripteurs : « boisé » se dit d'une matière, « forme » non.
-  { key: "forme", head: false, facets: PARFUM_TEXTURE_CHIPS },
+  { key: "frais", facets: ["ozonique", "aldéhydé", "savonneux", "mentholé", "eucalyptus", "aqueux", "glacé", "ferreux", "iodé/marin"] },
+  { key: "chimique", facets: ["dissolvant/vernis", "éthéré/alcool", "essence/solvant", "médicinal", "plastique", "caoutchouc", "encre", "soufré/alliacé"] },
 ];
+// R4 sensible (09/08, catalogue olfactif §R4) — la grille qu'Ellena emprunte aux
+// autres sens, au complet : « texture » (l'ex-"forme", inchangée) + les axes
+// laissés de côté au premier passage. Chaque famille ici est un AXE, pas un
+// descripteur — head:false partout, même logique que "forme" avant elle :
+// « température » ne se dit pas d'une matière, « chaud » oui.
+const PARFUM_SENSIBLE = [
+  { key: "texture", head: false, facets: PARFUM_TEXTURE_CHIPS },
+  { key: "température", head: false, facets: ["glacé", "froid", "frais", "tiède", "chaud", "brûlant"] },
+  { key: "poids", head: false, facets: ["léger", "aérien", "ténu", "mince", "creux", "dense", "épais", "lourd", "plein"] },
+  { key: "lumière", head: false, facets: ["clair", "sombre", "lumineux", "éclatant", "mat", "transparent", "opaque", "laiteux", "doré"] },
+  { key: "goût", head: false, facets: ["sucré", "amer", "acide", "salé", "âpre", "astringent"] },
+  { key: "son", head: false, facets: ["sourd", "aigu", "grave", "vibrant", "criard", "tenu"] },
+  { key: "mouvement", head: false, facets: ["statique", "pétillant", "fusant", "montant", "rampant", "vif", "lent"] },
+];
+// R3 sources (09/08, catalogue olfactif §R3) — « ça sent comme quoi », le registre
+// le plus négligé des systèmes formels alors qu'Ellena le met au même rang que les
+// familles : « savon » décrit l'odeur, pas l'objet. Catégories head:false — même
+// logique que sensible.
+const PARFUM_SOURCES = [
+  { key: "corps", head: false, facets: ["savon", "shampooing", "lessive", "linge propre", "talc", "crème solaire", "pansement"] },
+  { key: "cuisine", head: false, facets: ["bonbon", "caramel", "guimauve", "amande amère", "pâtisserie chaude", "thé", "café", "cacao", "miel"] },
+  { key: "boissons", head: false, facets: ["vin", "rhum", "cognac", "bière", "cidre", "sirop"] },
+  { key: "fumées", head: false, facets: ["cigare", "tabac froid", "feu de bois", "cendre froide", "encens d'église", "bougie soufflée"] },
+  { key: "matériaux", head: false, facets: ["encre", "colle", "plastique neuf", "essence", "vernis", "cuir neuf", "carton mouillé", "craie", "métal", "monnaie"] },
+  { key: "lieux", head: false, facets: ["cave", "grenier", "église", "pharmacie", "garage", "bord de mer", "forêt après pluie", "boulangerie", "marché"] },
+  { key: "nature", head: false, facets: ["terre battue", "foin coupé", "mousse", "champignon", "pétrichor", "algues", "écorce", "sève"] },
+];
+// registre — sélecteur au-dessus des familles (09/08, catalogue olfactif : 3 des 9
+// registres codés ici ; R8 personnel reste le champ libre, R9 compositionnel =
+// "cortège" plus bas, R1/R7 pas encore attaqués). Un registre = quelle question on
+// pose (ça sent quoi / si c'était tangible / ça sent comme quoi) — en onglets,
+// pas empilé dans la même rangée que les familles : Hick's law frapperait deux
+// fois sinon (choix du registre ET choix de la famille mélangés).
+const PARFUM_REGISTRES = [
+  { key: "olfactif", label: "sent", familles: PARFUM_FAMILLES },
+  { key: "sensible", label: "comme si", familles: PARFUM_SENSIBLE },
+  { key: "sources", label: "comme quoi", familles: PARFUM_SOURCES },
+];
+// R1 identité — famille de référence par numéro, 164/164 (09/08). Recherchée par 4
+// agents en parallèle puis fusionnée/validée dans parfum-fiches-reference.json, qui
+// RESTE de mon côté (molécule, dilution, confiance... jamais affiché en séance —
+// Maxence : "R1 c'est plutôt ton rôle... à garder on the side"). Seule la clé de
+// classement traverse ici, pas le contenu de la fiche : elle ne décrit rien de
+// perceptible, elle sert juste à GROUPER — même statut que le numéro sur la
+// bouteille, pas une donnée de jugement. Remplace l'ancien tally de sessions comme
+// source principale de dominantFamille ci-dessous (celui-ci reste en repli pour une
+// matière hors de ces 164, ex. catalogue rechargé/étendu plus tard).
+const PARFUM_FAMILLE_REF = {
+  1:"floral", 2:"boisé", 3:"floral", 4:"boisé", 5:"terreux", 6:"boisé", 7:"épicé", 8:"boisé",
+  9:"épicé", 10:"balsamique", 11:"boisé", 12:"balsamique", 13:"animal", 14:"balsamique", 15:"balsamique", 16:"balsamique",
+  17:"boisé", 18:"balsamique", 19:"gourmand", 20:"boisé", 21:"boisé", 22:"frais", 23:"floral", 24:"balsamique",
+  25:"épicé", 26:"fruité", 27:"terreux", 28:"boisé", 29:"frais", 30:"boisé", 31:"boisé", 32:"gourmand",
+  33:"gourmand", 34:"balsamique", 35:"floral", 36:"floral", 37:"musqué", 38:"musqué", 39:"animal", 40:"musqué",
+  41:"agrumes", 42:"gourmand", 43:"boisé", 44:"musqué", 45:"floral", 46:"balsamique", 47:"balsamique", 48:"balsamique",
+  49:"balsamique", 50:"boisé", 51:"balsamique", 52:"boisé", 53:"boisé", 54:"gourmand", 55:"boisé", 56:"boisé",
+  57:"boisé", 58:"floral", 59:"gourmand", 60:"gourmand", 61:"floral", 62:"floral", 63:"terreux", 64:"boisé",
+  65:"terreux", 66:"terreux", 67:"chimique", 68:"balsamique", 69:"balsamique", 70:"animal", 71:"balsamique", 72:"boisé",
+  73:"gourmand", 74:"aromatique", 75:"terreux", 76:"aromatique", 77:"balsamique", 78:"boisé", 79:"boisé", 80:"boisé",
+  81:"boisé", 82:"boisé", 83:"boisé", 84:"aromatique", 85:"boisé", 86:"frais", 87:"boisé", 88:"terreux",
+  89:"chimique", 90:"boisé", 91:"animal", 92:"musqué", 93:"animal", 94:"boisé", 95:"vert", 96:"balsamique",
+  97:"frais", 98:"boisé", 99:"frais", 100:"boisé", 101:"animal", 102:"fruité", 103:"musqué", 104:"boisé",
+  105:"boisé", 106:"épicé", 107:"boisé", 108:"gourmand", 109:"floral", 110:"frais", 111:"floral", 112:"boisé",
+  113:"animal", 114:"animal", 115:"frais", 116:"floral", 117:"floral", 118:"floral", 119:"floral", 120:"floral",
+  121:"floral", 122:"floral", 123:"fruité", 124:"floral", 125:"fruité", 126:"chimique", 127:"chimique", 128:"chimique",
+  129:"floral", 130:"floral", 131:"floral", 132:"boisé", 133:"floral", 134:"floral", 135:"agrumes", 136:"agrumes",
+  137:"boisé", 138:"animal", 139:"floral", 140:"boisé", 141:"boisé", 142:"animal", 143:"animal", 144:"épicé",
+  145:"épicé", 146:"musqué", 147:"musqué", 148:"vert", 149:"boisé", 150:"animal", 151:"aromatique", 152:"floral",
+  153:"boisé", 154:"balsamique", 155:"épicé", 156:"vert", 157:"animal", 158:"balsamique", 159:"animal", 160:"boisé",
+  161:"floral", 162:"floral", 163:"fruité", 164:"balsamique",
+};
+// R7 évocations croisées — "voisine de" (09/08, catalogue olfactif §R7). Maxence :
+// "ça vit dans l'app, pas le vault" — donc un vrai lien structuré entre deux
+// matières du catalogue, pas une convention de texte. Regroupée par FAMILLE
+// DOMINANTE pour la lisibilité sur 164 matières (Maxence 09/08) — PARFUM_FAMILLE_REF
+// (R1) en premier, repli sur l'historique de sessions (le chip R2 le plus fréquent)
+// pour une matière hors des 164 référencées. Une matière jamais sentie ou jamais
+// taguée d'une famille tombe dans le seau "non sentie".
+function dominantFamille(item) {
+  if (item.num && PARFUM_FAMILLE_REF[item.num]) return PARFUM_FAMILLE_REF[item.num];
+  const famKeys = new Set(PARFUM_FAMILLES.map((f) => f.key));
+  const tally = {};
+  for (const s of item.sessions || []) {
+    for (const c of s.chips || []) { if (famKeys.has(c)) tally[c] = (tally[c] || 0) + 1; }
+  }
+  let best = null, bestN = 0;
+  for (const k in tally) { if (tally[k] > bestN) { best = k; bestN = tally[k]; } }
+  return best || "non sentie";
+}
+// v1 volontairement simple : lien non dirigé "voisine de", pas encore le
+// différentiel "plus/moins tel trait" d'Arctander (poserait UNE facette de PLUS à
+// choisir par voisine sélectionnée — ajout possible plus tard si le lien seul se
+// montre trop pauvre à l'usage, pas anticipé sans retour réel).
+function VoisinePicker({ items, currentItemId, voisines, setVoisines }) {
+  const [famOpen, setFamOpen] = useState(null);
+  const groups = useMemo(() => {
+    const g = {};
+    for (const it of items || []) {
+      if (it.id === currentItemId) continue;
+      const fam = dominantFamille(it);
+      (g[fam] = g[fam] || []).push(it);
+    }
+    for (const k in g) g[k].sort((a, b) => (a.num || 0) - (b.num || 0));
+    return g;
+  }, [items, currentItemId]);
+  const famOrder = [...PARFUM_FAMILLES.map((f) => f.key), "non sentie"].filter((k) => groups[k] && groups[k].length);
+  const isPicked = (id) => voisines.some((v) => v.itemId === id);
+  const toggle = (it) => setVoisines((arr) => (arr.some((v) => v.itemId === it.id)
+    ? arr.filter((v) => v.itemId !== it.id)
+    : [...arr, { itemId: it.id, num: it.num, name: it.text }]));
+  const row = { display: "flex", flexWrap: "wrap", justifyContent: "center", gap: 6, maxWidth: 320, margin: "0 auto" };
+  return (
+    <div style={{ marginTop: 14 }}>
+      {voisines.length > 0 && (
+        <div style={{ ...row, marginBottom: 8 }}>
+          {voisines.map((v) => (
+            <button key={v.itemId} className="chip on" onClick={() => setVoisines((arr) => arr.filter((x) => x.itemId !== v.itemId))}
+              style={{ fontSize: 11, padding: "3px 9px" }}>{v.num ? `#${v.num} ` : ""}{v.name}</button>
+          ))}
+        </div>
+      )}
+      <div style={row}>
+        {famOrder.map((k) => (
+          <button key={k} className={`chip ${famOpen === k ? "on" : ""}`} onClick={() => setFamOpen((o) => (o === k ? null : k))}
+            style={{ fontSize: 10, padding: "3px 8px", opacity: famOpen && famOpen !== k ? 0.45 : 1 }}>{k} ({groups[k].length})</button>
+        ))}
+      </div>
+      {famOpen && (
+        <div style={{ ...row, marginTop: 8, maxHeight: 180, overflowY: "auto" }}>
+          {groups[famOpen].map((it) => (
+            <button key={it.id} className={`chip ${isPicked(it.id) ? "on" : ""}`} onClick={() => toggle(it)}
+              style={{ fontSize: 11, padding: "3px 9px", color: isPicked(it.id) ? undefined : C.mut }}>
+              {it.num ? `#${it.num} ` : ""}{it.text}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+// différentiel d'Arctander — x_pf_famille (09/08). Une paire, une famille, le
+// vocabulaire DÉJÀ connu de cette famille (mêmes facettes que la grille de
+// x_pf_matiere — aucun nouveau mot à apprendre). Pas d'échelle absolue : le point
+// d'Arctander est justement relatif ("plus fumé QUE", pas "fumé = 7/10"), donc 2
+// états par facette (A ou B), pas 3 — un "égal" explicite n'ajoute rien qu'un
+// silence sur cette facette ne dit déjà. Retaper le même bouton l'efface (même
+// idiome que le reste de l'app : rien de forcé, une case vide est une réponse valide).
+function VoisinesComparePicker({ pair, familyKey, cmp, setCmp }) {
+  const fam = PARFUM_FAMILLES.find((f) => f.key === familyKey);
+  const facets = (fam && fam.facets) || [];
+  const [a, b] = pair;
+  const set = (facet, side) => setCmp((c) => {
+    if (c[facet] === side) { const { [facet]: _drop, ...rest } = c; return rest; }
+    return { ...c, [facet]: side };
+  });
+  const row = { display: "flex", alignItems: "center", justifyContent: "center", gap: 10, marginTop: 8 };
+  return (
+    <div style={{ marginTop: 4 }}>
+      <div className="mono" style={{ fontSize: 11, color: C.faint, textAlign: "center", marginBottom: 12, letterSpacing: ".02em" }}>
+        #{a.num} {a.name} <span style={{ color: C.mut }}>vs</span> #{b.num} {b.name}
+      </div>
+      {facets.map((f) => (
+        <div key={f} style={row}>
+          <button className={`chip ${cmp[f] === "a" ? "on" : ""}`} onClick={() => set(f, "a")}
+            style={{ fontSize: 11, padding: "3px 9px", minWidth: 40 }}>#{a.num}</button>
+          <span className="mono" style={{ fontSize: 10, color: C.faint, minWidth: 76, textAlign: "center" }}>{f}</span>
+          <button className={`chip ${cmp[f] === "b" ? "on" : ""}`} onClick={() => set(f, "b")}
+            style={{ fontSize: 11, padding: "3px 9px", minWidth: 40 }}>#{b.num}</button>
+        </div>
+      ))}
+    </div>
+  );
+}
 // Le sélecteur lui-même — monté sur l'écran "done" de chacune des 3 évaluations
 // à l'aveugle (voir plus bas). Une seule famille ouverte à la fois ; les
 // facettes choisies d'une famille refermée resteraient invisibles, d'où la ligne de
 // rappel en haut — qui n'apparaît que s'il y a quelque chose (rien à l'écran tant
 // qu'on n'a rien dit), et où retaper un mot le retire.
-function ParfumNotePicker({ chips, setChips, intensity, setIntensity }) {
+function ParfumNotePicker({ chips, setChips, grades, setGrades, intensity, setIntensity, hedo, setHedo, cortege, setCortege, items, currentItemId, voisines, setVoisines }) {
+  // registre actif (olfactif par défaut — c'est le réflexe déjà acquis) + famille
+  // ouverte DANS ce registre ; changer de registre referme la famille ouverte
+  // (sinon un "open" resté sur une clé d'un autre registre pointerait dans le vide).
+  const [registre, setRegistre] = useState("olfactif");
   const [open, setOpen] = useState(null);
-  const toggle = (w) => setChips((arr) => (arr.includes(w) ? arr.filter((x) => x !== w) : [...arr, w]));
+  const [voisineOpen, setVoisineOpen] = useState(false);
+  const familles = (PARFUM_REGISTRES.find((r) => r.key === registre) || PARFUM_REGISTRES[0]).familles;
+  const addChip = (w) => setChips((arr) => (arr.includes(w) ? arr : [...arr, w]));
+  // retrait — TOUJOURS direct en 1 tap, quel que soit le grade en cours. C'est la
+  // rangée de rappel qui l'utilise : le cycle de la grille (tap ci-dessous) ne coûte
+  // donc rien au cas d'erreur (rapport chips 09/08, §3).
+  const removeChip = (w) => {
+    setChips((arr) => arr.filter((x) => x !== w));
+    setGrades((g) => { if (!(w in g)) return g; const { [w]: _drop, ...rest } = g; return rest; });
+  };
+  // grille — re-taper une chip déjà sélectionnée la fait monter d'un cran : présent
+  // (implicite, pas de clé dans `grades`) → fort (2) → dominant (3) → off. Strictement
+  // optionnel : le 1er tap est identique à avant, qui ne grade jamais ne voit jamais
+  // plus de 1 tap par chip.
+  const tap = (w) => {
+    if (!chips.includes(w)) { addChip(w); return; }
+    const cur = grades[w] || 1;
+    if (cur >= 3) { removeChip(w); return; }
+    setGrades((g) => ({ ...g, [w]: cur + 1 }));
+  };
+  const dots = (w) => (grades[w] > 1 ? ` ${"·".repeat(grades[w])}` : "");
   const row = { display: "flex", flexWrap: "wrap", justifyContent: "center", gap: 6, maxWidth: 320, margin: "0 auto" };
   return (
     <div>
       {chips.length > 0 && (
         <div style={{ ...row, marginTop: 18 }}>
           {chips.map((w) => (
-            <button key={w} className="chip on" onClick={() => toggle(w)} style={{ fontSize: 11, padding: "3px 9px" }}>{w}</button>
+            <button key={w} className="chip on" onClick={() => removeChip(w)} style={{ fontSize: 11, padding: "3px 9px" }}>{w}{dots(w)}</button>
           ))}
         </div>
       )}
-      <div style={{ ...row, marginTop: 16 }}>
-        {PARFUM_FAMILLES.map((f) => (
+      {/* registre — 3 onglets au-dessus des familles (09/08, catalogue olfactif) :
+          quelle QUESTION on pose, avant quelle famille dans cette question. Séparé
+          de la rangée de familles pour ne pas doubler le coût de décision de la
+          même rangée (Hick's law). */}
+      <div style={{ ...row, marginTop: 18, gap: 8 }}>
+        {PARFUM_REGISTRES.map((r) => (
+          <button key={r.key} className={`chip ${registre === r.key ? "on" : ""}`}
+            onClick={() => { setRegistre(r.key); setOpen(null); }}
+            style={{ fontSize: 10, padding: "3px 10px", letterSpacing: ".04em" }}>{r.label}</button>
+        ))}
+      </div>
+      <div style={{ ...row, marginTop: 12 }}>
+        {familles.map((f) => (
           <button key={f.key} className={`chip ${chips.includes(f.key) ? "on" : ""}`}
-            onClick={() => { setOpen((o) => (o === f.key ? null : f.key)); if (f.head !== false && open !== f.key && !chips.includes(f.key)) toggle(f.key); }}
+            onClick={() => { setOpen((o) => (o === f.key ? null : f.key)); if (f.head !== false && open !== f.key && !chips.includes(f.key)) addChip(f.key); }}
             style={{ fontSize: 11, padding: "3px 9px", opacity: open && open !== f.key ? 0.45 : 1 }}>{f.key}</button>
         ))}
       </div>
       {open && (
         <div style={{ ...row, marginTop: 8 }}>
-          {(PARFUM_FAMILLES.find((f) => f.key === open) || { facets: [] }).facets.map((w) => (
-            <button key={w} className={`chip ${chips.includes(w) ? "on" : ""}`} onClick={() => toggle(w)}
-              style={{ fontSize: 11, padding: "3px 9px", color: chips.includes(w) ? undefined : C.mut }}>{w}</button>
+          {(familles.find((f) => f.key === open) || { facets: [] }).facets.map((w) => (
+            <button key={w} className={`chip ${chips.includes(w) ? "on" : ""}`} onClick={() => tap(w)}
+              style={{ fontSize: 11, padding: "3px 9px", color: chips.includes(w) ? undefined : C.mut }}>{w}{dots(w)}</button>
           ))}
         </div>
       )}
@@ -613,26 +829,53 @@ function ParfumNotePicker({ chips, setChips, intensity, setIntensity }) {
           {intensity ?? "—"}
         </span>
       </div>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 18, marginTop: 10 }}>
+        {/* agrément — chip unique en tap-cycle neutre → + → − → neutre (rapport
+            chips 09/08, §5). */}
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span className="mono" style={{ fontSize: 10, color: C.faint, letterSpacing: ".08em" }}>agrément</span>
+          <button className={`chip ${hedo != null ? "on" : ""}`}
+            onClick={() => setHedo((h) => (h == null ? 1 : h === 1 ? -1 : null))}
+            style={{ fontSize: 11, padding: "3px 9px", minWidth: 24 }}>
+            {hedo === 1 ? "+" : hedo === -1 ? "−" : "·"}
+          </button>
+        </div>
+        {/* cortège — R9 compositionnel (09/08, catalogue olfactif) : le jugement
+            d'Ellena par l'usage, tient-elle seule ou a besoin d'un cortège ? Même
+            tap-cycle, même statut d'addition non demandée que l'agrément. */}
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span className="mono" style={{ fontSize: 10, color: C.faint, letterSpacing: ".08em" }}>cortège</span>
+          <button className={`chip ${cortege != null ? "on" : ""}`}
+            onClick={() => setCortege((c) => (c == null ? "seule" : c === "seule" ? "cortège" : null))}
+            style={{ fontSize: 11, padding: "3px 9px", minWidth: 24 }}>
+            {cortege === "seule" ? "seule" : cortege === "cortège" ? "cortège" : "·"}
+          </button>
+        </div>
+      </div>
+      {/* voisine — repliée par défaut, même geste que le toggle "vocabulaire" qui
+          enveloppe tout ce composant : 164 matières d'un coup serait trop, même
+          groupées. */}
+      <div style={{ textAlign: "center", marginTop: 14 }}>
+        <button className="link" onClick={() => setVoisineOpen((o) => !o)}>{voisineOpen ? "cacher les voisines" : "voisine"}</button>
+      </div>
+      {voisineOpen && <VoisinePicker items={items} currentItemId={currentItemId} voisines={voisines} setVoisines={setVoisines} />}
     </div>
   );
 }
 // aide facultative (toggle "détails" déjà existant, réutilisé tel quel — voir
-// current.action.desc dans le JSX) — guide de dimensions, pas un formulaire.
-// Deux familles de dimensions : classique (déjà validé), sensoriel/imaginaire
-// (technique synesthésique — décrire en couleur/texture au toucher/température/
-// lieu/porteur imaginé plutôt qu'en ingrédients, demandé par Maxence 01/08 après
-// une vidéo vue sur le sujet). Famille · facettes · forme · intensité sont passées
-// dans les chips/curseur (voir PARFUM_FAMILLES) — ce texte ne garde donc que ce
-// qu'aucun chip ne peut couvrir : les dimensions qui demandent une phrase.
-const PARFUM_AIDE = "aide, facultatif — à dire en mots (le reste est dans les chips) — « sent comme X + Y » · naturel/synthétique · couleur ressentie · texture au toucher · température · lieu évoqué · identité du porteur imaginé";
+// current.action.desc dans le JSX). Recadré 09/08 (Maxence : "dans le champ libre
+// je vais juste noter mes idées persos, tout le reste doit être codé in app") —
+// ce texte ne garde QUE ce qu'aucune chip ne pourra jamais coder : le personnel
+// (registre R8 du catalogue olfactif), pas une liste de dimensions à décrire en
+// mots. Sources/sensible/voisines/compositionnel sont des chips maintenant (voir
+// PARFUM_REGISTRES ci-dessous), plus des hints de texte à retenir de taper.
+const PARFUM_AIDE = "aide, facultatif — ce qu'aucune chip ne capture : ce que ça te rappelle, à toi (souvenir, lieu, personne, scène)";
 // distillation finale (ajouté 07/08 — Maxence : "les techniques de Jean-Claude
 // Ellena", lu en parallèle dans Le Parfum). Sa méthode va à l'inverse de
 // l'accumulation des 3 checkpoints précédents (chips + facettes qui s'empilent) :
-// un mot juste plutôt que dix adjectifs, et une matière jugée par son usage dans
-// une composition (tient-elle seule ? a-t-elle besoin d'un cortège ?) plutôt que
-// par sa seule description. Le résiduel — dernier round, toute la vie de la
-// mouillette déjà connue — est le seul moment logique pour réduire au lieu
-// d'explorer ; les 3 rounds précédents gardent PARFUM_AIDE tel quel.
+// un mot juste plutôt que dix adjectifs. Le jugement compositionnel (tient-elle
+// seule ? a-t-elle besoin d'un cortège ?) est une chip maintenant (voir "cortège"
+// dans ParfumNotePicker), pas une ligne de texte.
 const PARFUM_AIDE_FINAL = "distillation — de tout ce qui a été senti sur cette mouillette, garde UN mot ou une image courte, celle qui reste (le reste s'oublie, c'est normal, c'est le signe que ce n'était pas l'essentiel) · les associations qui te viennent telles quelles, sans les justifier (une matière, un souvenir, un endroit, une personne)";
 function parfumAide(roundId) { return roundId === "final" ? PARFUM_AIDE_FINAL : PARFUM_AIDE; }
 // checkpoints temporels par mouillette (revu 07/08, round 2 — Maxence voulait garder
@@ -853,6 +1096,37 @@ function eligibleDaysSince(a, action, lastTs, nowTs) {
   }
   return total;
 }
+// voisines olfactives — x_pf_famille (09/08, Maxence : "pour arctander on code ça
+// mais on réserve pour l'activité famille olfactive" — le différentiel d'Arctander,
+// "plus fumé, moins terreux", réservé jusqu'ici faute d'un vrai regroupement par
+// famille ; PARFUM_FAMILLE_REF (R1) le débloque). Choisit une famille où au moins 2
+// matières déjà senties (sessions.length>0 — comparer à l'aveugle total n'aurait pas
+// de sens, le point est de confronter un souvenir/re-sentir à un autre), puis 2
+// matières dedans. Biaisé (pas tiré uniforme) vers celles le moins comparées jusqu'ici
+// (pfamCompares le plus court) pour étaler la couverture sur 164 matières plutôt que
+// retomber toujours sur les mêmes paires — pas un vrai LRU, juste un tri + un tirage
+// dans les moins servies pour garder un peu de hasard. Retourne null si aucune famille
+// n'a encore 2 matières senties (début du protocole) — resolveDraw gère ce cas.
+function pickVoisinesFamille(pf) {
+  const groups = {};
+  for (const it of pf.items || []) {
+    if (it.status !== "doing") continue;
+    if (!(it.sessions && it.sessions.length)) continue;
+    const fam = dominantFamille(it);
+    if (fam === "non sentie") continue;
+    (groups[fam] = groups[fam] || []).push(it);
+  }
+  const famKeys = Object.keys(groups).filter((k) => groups[k].length >= 2);
+  if (!famKeys.length) return null;
+  const famKey = famKeys[Math.floor(Math.random() * famKeys.length)];
+  const pool = [...groups[famKey]].sort((a, b) => ((a.pfamCompares || []).length - (b.pfamCompares || []).length));
+  const shortlist = pool.slice(0, Math.max(2, Math.min(6, pool.length)));
+  let i = Math.floor(Math.random() * shortlist.length);
+  let j = Math.floor(Math.random() * shortlist.length);
+  while (j === i && shortlist.length > 1) j = Math.floor(Math.random() * shortlist.length);
+  const [ia, ib] = [shortlist[i], shortlist[j]];
+  return { familyKey: famKey, pair: [{ id: ia.id, num: ia.num, name: ia.text }, { id: ib.id, num: ib.num, name: ib.text }] };
+}
 // shared draw→action resolution (extracted 11/07 so the force paths below can
 // return through the exact same LRU-substitution step as the normal weighted
 // draw — garniture's action text carries "(LRU)" and needs pickItemLRU to fill
@@ -866,6 +1140,20 @@ function resolveDraw(drawn, log) {
       : hasDoingItems(a)
         ? itemStep(a, log)
         : a.actions[Math.floor(Math.random() * a.actions.length)];
+  // voisines olfactives — le tirage de la paire arrive ici (pas plus tôt dans
+  // pickAging) : resolveDraw est le SEUL point de passage garanti quel que soit le
+  // chemin qui a mené jusqu'à x_pf_famille (tirage pondéré normal aujourd'hui, un
+  // futur forçage éventuel demain). La paire atterrit directement sur l'action —
+  // elle traverse tlx_flow (current est sauvegardé tel quel) donc survit à une
+  // fermeture/réouverture de l'app avant qu'il ait répondu, sans state séparé à
+  // faire persister sur l'activité comme pf.pf3 (pas besoin : rien ici n'a de
+  // fenêtre temporelle à tenir entre plusieurs cartes).
+  if (action && action.id === "x_pf_famille" && a.id === "a_parfum_explo") {
+    const pick = pickVoisinesFamille(a);
+    action = pick
+      ? { ...action, pfamFamily: pick.familyKey, pfamPair: pick.pair }
+      : { ...action, desc: "pas encore 2 matières senties dans une même famille — reviens après quelques rounds de plus sur « sentir matières premières »." };
+  }
   // singleItem applies regardless of which path produced the action — a real
   // per-action row from buildLotteryRows (Sudoku's "vidéo", Parfum's "livre"/
   // "vidéo") just as much as the single-action whole-activity case (Livre, Podcast).
@@ -1588,7 +1876,20 @@ function Throughline() {
   // de chacune des 3 évaluations à l'aveugle du jour, soumis avec le `comment`
   // déjà existant par submitComment() — brut, pas de synthèse Claude.
   const [parfumChips, setParfumChips] = useState([]);
+  // grades{} et hedo — ajoutés 09/08 (rapport chips) en parallèle de chips/intensity,
+  // même durée de vie (éphémère, réinitialisés par resetFlow, écrits sur le log/la
+  // session au submit). grades: {facette: 2|3} — absence de clé = niveau 1 implicite.
+  const [parfumGrades, setParfumGrades] = useState({});
   const [parfumIntensity, setParfumIntensity] = useState(null);
+  const [parfumHedo, setParfumHedo] = useState(null);
+  // cortège — R9 compositionnel, même plomberie que hedo (voir ParfumNotePicker).
+  const [parfumCortege, setParfumCortege] = useState(null);
+  // voisines — R7, liens vers d'autres matières du catalogue (voir VoisinePicker).
+  const [parfumVoisines, setParfumVoisines] = useState([]);
+  // différentiel d'Arctander — x_pf_famille (09/08, voir VoisinesComparePicker).
+  // {facette: "a"|"b"} — la paire elle-même vit sur current.action.pfamPair
+  // (tirée dans resolveDraw), pas ici : seule la RÉPONSE est un state de flow.
+  const [parfumCmp, setParfumCmp] = useState({});
   // parfum — les 3 réponses posées sur la carte "avant de savoir", juste avant la
   // révélation (voir pickAging). Éphémère comme itemNameInput : rien de tapé ici
   // n'est une session, pas de timer, pas de clic compté.
@@ -2337,7 +2638,7 @@ function Throughline() {
     setAlbumTitles([]); setAlbumIdx(0); setDescOpen(false); setRating(50);
     propose(log, activities, false, current ? current.activity.id : null);
   };
-  const resetFlow = (nextStage = "entry") => { setStage(nextStage); setCurrent(null); setRunning(false); setElapsedMs(0); setPaused(false); setComment(""); setItemNameInput(""); setParfumChips([]); setParfumIntensity(null); setDescOpen(false); setVocabOpen(false); setSyncMsg(""); setSyncing(false); setAlbumTitles([]); setAlbumIdx(0); setRating(50); };
+  const resetFlow = (nextStage = "entry") => { setStage(nextStage); setCurrent(null); setRunning(false); setElapsedMs(0); setPaused(false); setComment(""); setItemNameInput(""); setParfumChips([]); setParfumGrades({}); setParfumIntensity(null); setParfumHedo(null); setParfumCortege(null); setParfumVoisines([]); setParfumCmp({}); setDescOpen(false); setVocabOpen(false); setSyncMsg(""); setSyncing(false); setAlbumTitles([]); setAlbumIdx(0); setRating(50); };
   // Album de la semaine title-by-title appreciation (Maxence 16/07, item 4/5) —
   // isAlbumActivity gates the extra running-stage UI to that one activity only.
   const isAlbumActivity = !!(current && current.activity.id === "a_ecoute_album");
@@ -2682,6 +2983,9 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
     // l'item (voir plus bas) pour retrouver l'historique d'une matière sans rescanner
     // tout le log.
     const isParfumMatiere = act && act.id === "a_parfum_explo" && action.id === "x_pf_matiere" && !!action.itemId;
+    // voisines olfactives — différentiel d'Arctander (09/08, voir pickVoisinesFamille/
+    // VoisinesComparePicker). pfamPair posé par resolveDraw au tirage, pas ici.
+    const isParfumFamille = act && act.id === "a_parfum_explo" && action.id === "x_pf_famille" && !!action.pfamPair;
     if (doneEntryId) {
       setLog((L) => L.map((en) => {
         if (en.id !== doneEntryId) return en;
@@ -2689,7 +2993,8 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
         if (parsedManual > 0) { patch.min = parsedManual; patch.sec = parsedManual * 60; }
         if (text) patch.note = text;
         if (isRecoWithItem) patch.rating = rating;
-        if (isParfumMatiere) { patch.chips = parfumChips; patch.intensity = parfumIntensity; }
+        if (isParfumMatiere) { patch.chips = parfumChips; patch.grades = parfumGrades; patch.intensity = parfumIntensity; patch.hedo = parfumHedo; patch.cortege = parfumCortege; patch.voisines = parfumVoisines; }
+        if (isParfumFamille) { patch.pfamFamily = action.pfamFamily; patch.pfamPair = action.pfamPair; patch.cmp = parfumCmp; }
         return { ...en, ...patch };
       }));
     }
@@ -2729,13 +3034,36 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
           // revenue en révision — parfumDernierMot a besoin de borner sur le cycle
           // en cours (prepTs), donc d'un horodatage réel. realNow(), jamais
           // Date.now() : le sandbox décale l'horloge.
-          sessions: [...(it.sessions || []), { date: todayKey(), ts: realNow().getTime(), round: roundId, chips: parfumChips, intensity: parfumIntensity, note: text }],
+          sessions: [...(it.sessions || []), { date: todayKey(), ts: realNow().getTime(), round: roundId, chips: parfumChips, grades: parfumGrades, intensity: parfumIntensity, hedo: parfumHedo, cortege: parfumCortege, voisines: parfumVoisines, note: text }],
         })),
         // avance le curseur checkpoint × matière (voir PARFUM_ROUNDS/pickAging) — la
         // 3e note d'un round fait passer au round suivant, doneInRound repart à 0.
         pf3: a.pf3 ? (a.pf3.doneInRound + 1 >= 3
           ? { ...a.pf3, round: a.pf3.round + 1, doneInRound: 0 }
           : { ...a.pf3, doneInRound: a.pf3.doneInRound + 1 }) : a.pf3,
+      })));
+    }
+    if (isParfumFamille) {
+      // écrit sur LES DEUX matières, symétrique — le différentiel n'a de sens que
+      // rapporté à l'autre, donc chaque fiche garde SA moitié du jugement ("plus
+      // fumé" côté A implique "moins fumé" côté B, jamais l'inverse posé deux fois).
+      // pfamCompares alimente pickVoisinesFamille (biais vers le moins comparé) et,
+      // plus tard, une vraie fiche par matière au-delà des sessions déjà notées.
+      const [pa, pb] = action.pfamPair;
+      const dirA = {}, dirB = {};
+      for (const f in parfumCmp) {
+        const v = parfumCmp[f];
+        if (v === "a") { dirA[f] = "plus"; dirB[f] = "moins"; }
+        else if (v === "b") { dirA[f] = "moins"; dirB[f] = "plus"; }
+      }
+      const stamp = { date: todayKey(), ts: realNow().getTime(), family: action.pfamFamily };
+      setActivities((arr) => arr.map((a) => (a.id !== "a_parfum_explo" ? a : {
+        ...a,
+        items: (a.items || []).map((it) => {
+          if (it.id === pa.id) return { ...it, pfamCompares: [...(it.pfamCompares || []), { ...stamp, against: pb.id, otherNum: pb.num, otherName: pb.name, cmp: dirA }] };
+          if (it.id === pb.id) return { ...it, pfamCompares: [...(it.pfamCompares || []), { ...stamp, against: pa.id, otherNum: pa.num, otherName: pa.name, cmp: dirB }] };
+          return it;
+        }),
       })));
     }
     // pipeline advances the piece, practice grows observations — recommandeur (with a
@@ -3609,7 +3937,7 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
       stage, tab, current, activities, log, holdMs, holdDate, place,
       begin, finish, tapAction, submitComment, start, resetFlow,
       setManualMin, setComment, setTab, applyDebugTime, simReseed, runSimBatch,
-      parfumChips, setParfumChips, parfumIntensity, setParfumIntensity, ackParfum,
+      parfumChips, setParfumChips, parfumGrades, setParfumGrades, parfumIntensity, setParfumIntensity, parfumHedo, setParfumHedo, parfumCortege, setParfumCortege, parfumVoisines, setParfumVoisines, parfumCmp, setParfumCmp, ackParfum,
       parfumGuesses, setParfumGuesses, submitParfumGuess,
       readReminders, scheduleReminder, cancelReminder, checkDueReminder,
       setLog, setActivities, setStage, setCurrent,
@@ -4391,7 +4719,15 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                             <div style={{ textAlign: "center", marginBottom: vocabOpen ? 0 : 8 }}>
                               <button className="link" onClick={() => setVocabOpen((o) => !o)}>{vocabOpen ? "cacher le vocabulaire" : "vocabulaire"}</button>
                             </div>
-                            {vocabOpen && <ParfumNotePicker chips={parfumChips} setChips={setParfumChips} intensity={parfumIntensity} setIntensity={setParfumIntensity} />}
+                            {vocabOpen && <ParfumNotePicker chips={parfumChips} setChips={setParfumChips} grades={parfumGrades} setGrades={setParfumGrades} intensity={parfumIntensity} setIntensity={setParfumIntensity} hedo={parfumHedo} setHedo={setParfumHedo} cortege={parfumCortege} setCortege={setParfumCortege} items={current.activity.items} currentItemId={current.action.itemId} voisines={parfumVoisines} setVoisines={setParfumVoisines} />}
+                          </div>
+                        )}
+                        {/* voisines olfactives — différentiel d'Arctander (09/08) : contrairement
+                            au vocabulaire de x_pf_matiere ci-dessus, pas de toggle — la comparaison
+                            EST le contenu de cette carte, la cacher par défaut n'aurait aucun sens. */}
+                        {current && current.action.id === "x_pf_famille" && current.action.pfamPair && (
+                          <div style={{ marginBottom: 18 }}>
+                            <VoisinesComparePicker pair={current.action.pfamPair} familyKey={current.action.pfamFamily} cmp={parfumCmp} setCmp={setParfumCmp} />
                           </div>
                         )}
                         {/* same "« … »" idea as the running field (Maxence 16/07, round 6): a

@@ -1,2 +1,5 @@
 # sandbox seed — private catalogue copy, never publish
 balance-catalogue.json
+# R1 reference fiches — derived from the private catalogue above (164 real
+# material names/nums), same privacy boundary, never publish
+parfum-fiches-reference.json
