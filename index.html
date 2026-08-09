@@ -4376,23 +4376,16 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
             content (the line) sat ~26px low. Bottom controls (log/save/reset) stay in the
             footer after this block, i.e. below the fold, out of the centred zone.
             Round 2 (Maxence 09/08, PWA install, Android — "la ligne un peu en dessous
-            du centre, le logo du splash lui est bien centré"). Two env()-based attempts
-            (safe-area-inset-top alone, then top-minus-bottom) both turned out to be
-            no-ops: per Chrome's own edge-to-edge docs, a non-opted-in PWA's viewport is
-            "clamped between the top status bar and bottom gesture navigation bar" — both
-            bars are reserved/excluded from 100dvh already, which is exactly why
-            safe-area-inset-top/bottom read ~0 here (nothing left inside the viewport to
-            avoid — see developer.chrome.com/docs/css-ui/edge-to-edge). That reserved
-            space is real but its top/bottom split isn't exposed to web JS/CSS at all on
-            this device/Chrome version, so it can't be measured from inside the page.
-            What CAN be measured: Maxence with a ruler, phone screen off — 8.8cm from the
-            true top edge to the line, 7.15cm from the line to the true bottom edge
-            (15.95cm total). That asymmetry (top bar taller than bottom) is the actual
-            cause, and its magnitude — (8.8−7.15)/2 = 0.825cm, 5.17% of the screen — is
-            the nudge, expressed in dvh so it scales with the viewport instead of being
-            pinned to his exact screen size in cm. */}
+            du centre, le logo du splash lui est bien centré"). Three follow-up attempts
+            (env(safe-area-inset-top) alone, top-minus-bottom, then a ruler-measured
+            5.17dvh nudge) all reverted — the first two were no-ops (Chrome clamps a
+            non-edge-to-edge PWA's viewport between the status bar and gesture-nav bar,
+            both already excluded from 100dvh, which is why the insets read ~0 with
+            nothing left to avoid), and the third overshot the other way (line landed
+            above centre instead of below). Left at the 24/07 baseline — see that comment
+            above — until there's a next measurement to calibrate from. */}
         {tab === "now" && (
-          <div style={{ display: "flex", flexDirection: "column", minHeight: "100dvh", marginTop: "calc(-26px - 5.17dvh)" }}>
+          <div style={{ display: "flex", flexDirection: "column", minHeight: "100dvh", marginTop: -26 }}>
 
             {/* the stage: instruction above, the living line as hero, controls below — vertically centered.
                 No paddingBottom here (removed 24/07, bug #1): the above/below blocks are already symmetric
