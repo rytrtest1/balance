@@ -433,13 +433,19 @@ function parfumNextInterval(prev, hit) {
 // calcul retombe toujours pareil au reload, ancré sur un lundi arbitraire (l'epoch
 // ne veut rien dire en soi, il sert juste à compter les semaines écoulées). Utilise
 // logicalNow (pivot 9h, pas minuit) pour rester cohérent avec todayKey ailleurs.
-const PARFUM_WEEK_EPOCH = new Date("2024-01-01T00:00:00");
+// Compté en JOURS CALENDAIRES UTC (Date.UTC sur les mêmes Y/M/D), pas en ms bruts
+// entre deux Date locales : sinon les changements d'heure d'été/hiver décalent le
+// nombre de semaines écoulées de ±1h autour de fin mars/fin octobre, et le cycle de
+// 14 semaines n'est plus exact (repéré en vérifiant plusieurs semaines d'affilée en
+// sandbox le 15/08 — deux familles sautaient/se répétaient juste après un DST).
+const PARFUM_WEEK_EPOCH_DAYS = Math.floor(Date.UTC(2024, 0, 1) / 86400000); // lundi
 function parfumWeekFamille(now) {
   const d = logicalNow(now);
   const dow = (d.getDay() + 6) % 7; // 0=lundi..6=dimanche
   d.setHours(0, 0, 0, 0);
   d.setDate(d.getDate() - dow);
-  const weeks = Math.floor((d - PARFUM_WEEK_EPOCH) / (7 * 86400000));
+  const dayIdx = Math.floor(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) / 86400000);
+  const weeks = Math.floor((dayIdx - PARFUM_WEEK_EPOCH_DAYS) / 7);
   const idx = ((weeks % PARFUM_FAMILLES.length) + PARFUM_FAMILLES.length) % PARFUM_FAMILLES.length;
   return PARFUM_FAMILLES[idx].key;
 }
