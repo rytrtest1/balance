@@ -472,6 +472,33 @@ function pickItemsLRU(a, log, n) {
   const lastSeen = (it) => { const s = it.sessions || []; return s.length ? Math.max(...s.map((x) => x.ts || 0)) : -1; };
   const reste = doing.filter((it) => !picks.includes(it)).sort((x, y) => lastSeen(x) - lastSeen(y));
   for (const it of reste) { if (picks.length >= n) break; if (!picks.includes(it)) picks.push(it); }
+  // 15/08-b (Maxence : "les plus proches d'abord, et si pas possible voisines") —
+  // la 1re place reste la couverture pure (l'item le plus en retard/jamais senti,
+  // ci-dessus) : rien ne doit pouvoir rester non-senti indéfiniment. La 2e cherche,
+  // PARMI les candidats encore assez en retard (fenêtre des WINDOW suivants en LRU,
+  // pas tout le pool — sinon la proximité écraserait complètement la couverture),
+  // celui qui partage le plus de profil avec le 1er — même score de recouvrement
+  // que pickVoisinesFamille (Math.min par facette commune, voir itemFacetTally).
+  // Sans recouvrement trouvé (typiquement : la 1re matière n'a encore aucune
+  // session, ou personne dans la fenêtre ne partage rien) ça retombe tel quel sur
+  // l'ordre LRU déjà posé au-dessus — "voisines" au sens le plus simple qui reste
+  // disponible : la famille de la semaine, sans rien de plus fin à offrir.
+  if (n === 2 && picks.length === 2) {
+    const [first] = picks;
+    const firstTally = itemFacetTally(first);
+    if (Object.keys(firstTally).length) {
+      const WINDOW = 8;
+      const window = doing.filter((it) => it.id !== first.id).sort((x, y) => lastSeen(x) - lastSeen(y)).slice(0, WINDOW);
+      let best = null, bestScore = 0;
+      for (const it of window) {
+        const tally = itemFacetTally(it);
+        const shared = Object.keys(firstTally).filter((f) => tally[f]);
+        const score = shared.reduce((sum, f) => sum + Math.min(firstTally[f], tally[f]), 0);
+        if (score > bestScore) { bestScore = score; best = it; }
+      }
+      if (best) picks[1] = best;
+    }
+  }
   // sorted by permanent bottle number, not draw order — .num is what actually
   // gets read aloud/displayed, so its order is the only one that matters for
   // display; draw-recency order would leak nothing useful and read worse.
