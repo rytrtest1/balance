@@ -454,8 +454,16 @@ const PARFUM_WEEK_EPOCH_DAYS = Math.floor(Date.UTC(2024, 0, 1) / 86400000); // l
 // d'un mécanisme séparé ici. Décompte dynamique sur PARFUM_FAMILLE_REF (pas un
 // chiffre en dur) : s'auto-ajuste si le catalogue change un jour.
 const PARFUM_FAMILY_BUFFER_DAYS = 3;
+// 15/08-d : compte sur les ESSENTIELLES de la famille (PARFUM_ESSENTIEL), pas sur
+// l'effectif complet — puisque le tirage lui-même se limite maintenant aux
+// essentielles (voir pickItemsLRU), la durée de séjour doit suivre la même base,
+// sinon elle resterait calée sur un total (43 pour boisé) qu'on ne cherche plus à
+// couvrir. Repli sur l'effectif complet si une famille n'a aucune essentielle
+// marquée (ne devrait pas arriver, chaque famille en a au moins une).
 function parfumFamilyWeeks(famille) {
-  const n = Object.values(PARFUM_FAMILLE_REF).filter((f) => f === famille).length;
+  const inFam = Object.keys(PARFUM_FAMILLE_REF).filter((num) => PARFUM_FAMILLE_REF[num] === famille);
+  const essentiels = inFam.filter((num) => PARFUM_ESSENTIEL.has(Number(num)));
+  const n = essentiels.length || inFam.length;
   const passDays = Math.ceil(n / 2);
   return Math.max(1, Math.ceil((passDays + PARFUM_FAMILY_BUFFER_DAYS) / 7));
 }
@@ -491,7 +499,13 @@ function pickItemsLRU(a, log, n) {
   // une préférence d'apprentissage, pas un verrou.
   const famille = parfumWeekFamille();
   const inFamille = all.filter((it) => dominantFamille(it) === famille);
-  const doing = inFamille.length >= n ? inFamille : all;
+  const famPool = inFamille.length >= n ? inFamille : all;
+  // matières essentielles (15/08-d) — même repli en cascade que la famille juste
+  // au-dessus : si le sous-pool essentiel de la famille n'a plus assez de "doing"
+  // (déjà toutes passées "done", ou pas encore tagué essentiel), on remonte au pool
+  // famille entier plutôt que de bloquer. Jamais de verrou dur sur un forçage.
+  const essentielPool = famPool.filter((it) => it.num && PARFUM_ESSENTIEL.has(it.num));
+  const doing = essentielPool.length >= n ? essentielPool : famPool;
   const today = todayKey();
   const echues = doing.filter((it) => it.due && it.due <= today).sort((x, y) => (x.due < y.due ? -1 : x.due > y.due ? 1 : 0));
   const picks = echues.slice(0, PARFUM_REVIEW_SLOTS);
@@ -755,6 +769,27 @@ const PARFUM_FAMILLE_REF = {
   153:"boisé", 154:"balsamique", 155:"épicé", 156:"vert", 157:"animal", 158:"balsamique", 159:"animal", 160:"boisé",
   161:"floral", 162:"floral", 163:"fruité", 164:"balsamique",
 };
+// matières essentielles (15/08-d, Maxence : "réduire aux plus importantes plutôt que
+// tout couvrir" — les écoles de parfumerie ne font pas grossir le temps d'étude avec
+// la taille de la famille, elles réduisent la famille à ses références canoniques).
+// 82/164 (~la moitié), un passage de jugement réel croisé contre les notes déjà
+// vérifiées de R1 (pas un mot-clé automatique seul — un premier essai purement par
+// marqueurs texte ratait des piliers évidents comme Iso E Super, faute du bon mot
+// dans sa fiche). Reste HORS séance comme R1 (même statut, même raison) : sert
+// uniquement à filtrer le pool de tirage dans pickItemsLRU, jamais affiché. Critère :
+// gardé si référence historique/canonique documentée (pilier, référentiel Arctander,
+// molécule fondatrice d'une famille, un des 4 grands animaliques...) OU seul
+// représentant naturel/classique d'un concept dans sa famille ; écarté si variante
+// propriétaire proche d'un concept déjà couvert (2e/3e santal de synthèse, base
+// "alternative à"/"substitut de"), doublon de forme (huile vs absolue de la même
+// matière), ou confiance basse/non vérifiable. Révisable — c'est un jugement, pas un
+// fait comme PARFUM_FAMILLE_REF ; Maxence peut corriger n'importe quelle entrée.
+const PARFUM_ESSENTIEL = new Set([
+  1,4,5,6,9,11,12,13,15,16,19,21,22,24,25,26,28,29,31,32,33,34,36,37,38,39,40,41,43,44,
+  45,46,54,56,57,59,62,63,64,66,67,72,74,77,78,83,84,95,97,99,100,113,114,115,116,117,
+  118,119,122,123,125,126,127,128,130,131,135,136,138,139,140,144,145,146,149,150,151,
+  152,155,158,162,164,
+]);
 // R7 évocations croisées — "voisine de" (09/08, catalogue olfactif §R7). Maxence :
 // "ça vit dans l'app, pas le vault" — donc un vrai lien structuré entre deux
 // matières du catalogue, pas une convention de texte. Regroupée par FAMILLE
