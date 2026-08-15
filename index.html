@@ -439,15 +439,49 @@ function parfumNextInterval(prev, hit) {
 // 14 semaines n'est plus exact (repéré en vérifiant plusieurs semaines d'affilée en
 // sandbox le 15/08 — deux familles sautaient/se répétaient juste après un DST).
 const PARFUM_WEEK_EPOCH_DAYS = Math.floor(Date.UTC(2024, 0, 1) / 86400000); // lundi
+// durée de séjour PROPORTIONNELLE à la taille de la famille (15/08-c, Maxence : une
+// semaine fixe ne colle pas à la vraie taille des familles — agrumes (3) tourne en
+// rond en 2 jours puis répète le même trio 5 jours de plus, boisé (43) ne verrait
+// qu'un tiers de ses matières en une semaine et mettrait ~3 cycles complets (~10
+// mois) à être vu une seule fois en entier). Règle : assez de jours pour voir CHAQUE
+// matière de la famille au moins une fois (paire/jour, donc ceil(taille/2) jours),
+// plus PARFUM_FAMILY_BUFFER_DAYS de renfort/répétition, arrondi à la semaine pleine
+// (le "changée le lundi" de la fiche reste vrai, juste pas toujours 1 semaine pile).
+// Le renfort ne peut tomber qu'APRÈS que tout le monde soit passé une fois : dans
+// pickItemsLRU, jamais-sentie (lastSeen=-1) prime TOUJOURS sur déjà-sentie, donc
+// aucune répétition n'est possible tant qu'une matière de la famille n'a pas encore
+// été sentie — "nouveau avant répétition" est déjà garanti par ce tri, pas besoin
+// d'un mécanisme séparé ici. Décompte dynamique sur PARFUM_FAMILLE_REF (pas un
+// chiffre en dur) : s'auto-ajuste si le catalogue change un jour.
+const PARFUM_FAMILY_BUFFER_DAYS = 3;
+function parfumFamilyWeeks(famille) {
+  const n = Object.values(PARFUM_FAMILLE_REF).filter((f) => f === famille).length;
+  const passDays = Math.ceil(n / 2);
+  return Math.max(1, Math.ceil((passDays + PARFUM_FAMILY_BUFFER_DAYS) / 7));
+}
+// recalculé à chaque appel plutôt que mis en cache — 14 familles, coût négligeable,
+// et ça reste correct si PARFUM_FAMILLE_REF change en cours de route.
+function parfumFamilySchedule() {
+  let cum = 0;
+  return PARFUM_FAMILLES.map((f) => {
+    const weeks = parfumFamilyWeeks(f.key);
+    const start = cum;
+    cum += weeks;
+    return { key: f.key, weeks, start };
+  });
+}
 function parfumWeekFamille(now) {
   const d = logicalNow(now);
   const dow = (d.getDay() + 6) % 7; // 0=lundi..6=dimanche
   d.setHours(0, 0, 0, 0);
   d.setDate(d.getDate() - dow);
   const dayIdx = Math.floor(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) / 86400000);
-  const weeks = Math.floor((dayIdx - PARFUM_WEEK_EPOCH_DAYS) / 7);
-  const idx = ((weeks % PARFUM_FAMILLES.length) + PARFUM_FAMILLES.length) % PARFUM_FAMILLES.length;
-  return PARFUM_FAMILLES[idx].key;
+  const weeksSinceEpoch = Math.floor((dayIdx - PARFUM_WEEK_EPOCH_DAYS) / 7);
+  const schedule = parfumFamilySchedule();
+  const total = schedule.reduce((s, e) => s + e.weeks, 0);
+  const w = ((weeksSinceEpoch % total) + total) % total;
+  const entry = schedule.find((e) => w >= e.start && w < e.start + e.weeks) || schedule[0];
+  return entry.key;
 }
 function pickItemsLRU(a, log, n) {
   const all = (a.items || []).filter((it) => it.status === "doing");
