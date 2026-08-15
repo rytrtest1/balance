@@ -445,27 +445,32 @@ const PARFUM_WEEK_EPOCH_DAYS = Math.floor(Date.UTC(2024, 0, 1) / 86400000); // l
 // qu'un tiers de ses matières en une semaine et mettrait ~3 cycles complets (~10
 // mois) à être vu une seule fois en entier). Règle : assez de jours pour voir CHAQUE
 // matière de la famille au moins une fois (paire/jour, donc ceil(taille/2) jours),
-// plus PARFUM_FAMILY_BUFFER_DAYS de renfort/répétition, arrondi à la semaine pleine
-// (le "changée le lundi" de la fiche reste vrai, juste pas toujours 1 semaine pile).
-// Le renfort ne peut tomber qu'APRÈS que tout le monde soit passé une fois : dans
+// arrondi à la semaine pleine (le "changée le lundi" de la fiche reste vrai, juste
+// pas toujours 1 semaine pile). L'arrondi lui-même EST la marge de renfort — une
+// famille de 2 jours de passage obtient déjà 5 jours gratuits en arrondissant à la
+// semaine, inutile d'en rajouter par-dessus. Correction 15/08-e (Maxence, à raison :
+// "absurde que 164 prennent 23 semaines et 82 en prennent 17") — une marge fixe de
+// +3 jours AVANT l'arrondi avait été ajoutée en plus de l'arrondi lui-même, une
+// double marge qui poussait plusieurs familles moyennes dans une semaine
+// supplémentaire à chaque fois ; cumulée sur 14 familles, ça cassait complètement la
+// proportionnalité attendue (2/jour × 7j = 14/semaine). Retirée. Le renfort ne peut
+// de toute façon tomber qu'APRÈS que tout le monde soit passé une fois : dans
 // pickItemsLRU, jamais-sentie (lastSeen=-1) prime TOUJOURS sur déjà-sentie, donc
 // aucune répétition n'est possible tant qu'une matière de la famille n'a pas encore
 // été sentie — "nouveau avant répétition" est déjà garanti par ce tri, pas besoin
-// d'un mécanisme séparé ici. Décompte dynamique sur PARFUM_FAMILLE_REF (pas un
-// chiffre en dur) : s'auto-ajuste si le catalogue change un jour.
-const PARFUM_FAMILY_BUFFER_DAYS = 3;
-// 15/08-d : compte sur les ESSENTIELLES de la famille (PARFUM_ESSENTIEL), pas sur
-// l'effectif complet — puisque le tirage lui-même se limite maintenant aux
-// essentielles (voir pickItemsLRU), la durée de séjour doit suivre la même base,
-// sinon elle resterait calée sur un total (43 pour boisé) qu'on ne cherche plus à
-// couvrir. Repli sur l'effectif complet si une famille n'a aucune essentielle
-// marquée (ne devrait pas arriver, chaque famille en a au moins une).
+// d'un mécanisme séparé ici. Compte sur les ESSENTIELLES de la famille
+// (PARFUM_ESSENTIEL, 15/08-d), pas sur l'effectif complet — le tirage lui-même se
+// limite aux essentielles (voir pickItemsLRU), la durée de séjour doit suivre la
+// même base. Repli sur l'effectif complet si une famille n'a aucune essentielle
+// marquée (ne devrait pas arriver, chaque famille en a au moins une). Décompte
+// dynamique sur PARFUM_FAMILLE_REF (pas un chiffre en dur) : s'auto-ajuste si le
+// catalogue change un jour.
 function parfumFamilyWeeks(famille) {
   const inFam = Object.keys(PARFUM_FAMILLE_REF).filter((num) => PARFUM_FAMILLE_REF[num] === famille);
   const essentiels = inFam.filter((num) => PARFUM_ESSENTIEL.has(Number(num)));
   const n = essentiels.length || inFam.length;
   const passDays = Math.ceil(n / 2);
-  return Math.max(1, Math.ceil((passDays + PARFUM_FAMILY_BUFFER_DAYS) / 7));
+  return Math.max(1, Math.ceil(passDays / 7));
 }
 // recalculé à chaque appel plutôt que mis en cache — 14 familles, coût négligeable,
 // et ça reste correct si PARFUM_FAMILLE_REF change en cours de route.
