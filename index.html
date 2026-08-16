@@ -525,8 +525,8 @@ function pickItemsLRU(a, log, n) {
   // ci-dessus) : rien ne doit pouvoir rester non-senti indéfiniment. La 2e cherche,
   // PARMI les candidats encore assez en retard (fenêtre des WINDOW suivants en LRU,
   // pas tout le pool — sinon la proximité écraserait complètement la couverture),
-  // celui qui partage le plus de profil avec le 1er — même score de recouvrement
-  // que pickVoisinesFamille (Math.min par facette commune, voir itemFacetTally).
+  // celui qui partage le plus de profil avec le 1er — score de recouvrement par
+  // Math.min par facette commune (voir itemFacetTally).
   // Sans recouvrement trouvé (typiquement : la 1re matière n'a encore aucune
   // session, ou personne dans la fenêtre ne partage rien) ça retombe tel quel sur
   // l'ordre LRU déjà posé au-dessus — "voisines" au sens le plus simple qui reste
@@ -808,14 +808,13 @@ function dominantFamille(item) {
   for (const k in tally) { if (tally[k] > bestN) { best = k; bestN = tally[k]; } }
   return best || "non sentie";
 }
-const PARFUM_FACET_TO_FAMILLE = {};
-for (const f of PARFUM_FAMILLES) { for (const fa of f.facets) { if (!(fa in PARFUM_FACET_TO_FAMILLE)) PARFUM_FACET_TO_FAMILLE[fa] = f.key; } }
-const PARFUM_FACET_SET = new Set(Object.keys(PARFUM_FACET_TO_FAMILLE));
+const PARFUM_FACET_SET = new Set(PARFUM_FAMILLES.flatMap((f) => f.facets));
 // tally de facettes réellement senties (pas juste LA dominante — testé en sandbox
 // 09/08 : réduire une matière à une seule facette perd des vraies voisines quand
 // deux facettes sont à égalité, ex. Isobutyl Quinoline oud:2/cuiré:2 aurait raté
 // Fleur de Cuir, cuiré:2, sur un simple argmax). Le tally complet sert à
-// pickVoisinesFamille pour comparer deux matières par CHEVAUCHEMENT réel.
+// pickItemsLRU (choix de la 2e matière du jour) et pickAging (facettes affichées
+// au différentiel x_pf_direct_cmp) pour comparer deux matières par CHEVAUCHEMENT réel.
 function itemFacetTally(item) {
   const tally = {};
   for (const s of item.sessions || []) {
@@ -874,42 +873,36 @@ function VoisinePicker({ items, currentItemId, voisines, setVoisines }) {
     </div>
   );
 }
-// différentiel d'Arctander — x_pf_famille (09/08). Une paire, une famille, le
-// vocabulaire DÉJÀ connu de cette famille (mêmes facettes que la grille de
-// x_pf_matiere — aucun nouveau mot à apprendre). Pas d'échelle absolue : le point
-// d'Arctander est justement relatif ("plus fumé QUE", pas "fumé = 7/10"), donc 2
-// états par facette (A ou B), pas 3 — un "égal" explicite n'ajoute rien qu'un
-// silence sur cette facette ne dit déjà. Retaper le même bouton l'efface (même
-// idiome que le reste de l'app : rien de forcé, une case vide est une réponse valide).
-// généralisé pair->set (16/08, voir pickVoisinesFamille) : 2 ou 3 matières, un
-// bouton par matière et par facette au lieu du binaire A/B fixe. `cmp[facette]`
-// vaut l'id de la matière désignée "la montre le plus" — plus de +/- symétrique
-// possible à 3 (désigner la plus X parmi 3 ne dit rien de l'ordre entre les deux
-// autres), donc le signal reste "désignée" (silence = rien dit), même idiome que
-// le reste de l'app.
-function VoisinesComparePicker({ set, familyKey, facetKey, cmp, setCmp }) {
-  const fam = PARFUM_FAMILLES.find((f) => f.key === familyKey);
-  const facets = (fam && fam.facets) || [];
-  const pick = (facet, id) => setCmp((c) => {
-    if (c[facet] === id) { const { [facet]: _drop, ...rest } = c; return rest; }
-    return { ...c, [facet]: id };
+// différentiel d'Arctander — posé chaque jour sur la paire du jour (x_pf_direct_cmp,
+// voir pickAging). Pas d'échelle absolue : le point d'Arctander est justement
+// relatif ("plus fumé QUE", pas "fumé = 7/10"), donc 2 états par facette (A ou B),
+// pas 3 — un "égal" explicite n'ajoute rien qu'un silence sur cette facette ne dit
+// déjà. Retaper le même bouton l'efface (même idiome que le reste de l'app : rien
+// de forcé, une case vide est une réponse valide). Simplifié 16/08 (Maxence, après
+// coup sur x_pf_famille : "on peut simplifier là") — seulement une paire (jamais 3 :
+// l'activité famille séparée est retirée, voir pickAging) et seulement les facettes
+// que la paire a RÉELLEMENT montrées (`facets` vient de l'appelant, union des
+// tallies des deux matières) — pas les 9 facettes de la famille entière, la plupart
+// sans rapport avec ce qu'on vient de sentir.
+function VoisinesComparePicker({ pair, facets, cmp, setCmp }) {
+  const [a, b] = pair;
+  const set = (facet, side) => setCmp((c) => {
+    if (c[facet] === side) { const { [facet]: _drop, ...rest } = c; return rest; }
+    return { ...c, [facet]: side };
   });
   const row = { display: "flex", alignItems: "center", justifyContent: "center", gap: 10, marginTop: 8 };
   return (
     <div style={{ marginTop: 4 }}>
       <div className="mono" style={{ fontSize: 11, color: C.faint, textAlign: "center", marginBottom: 12, letterSpacing: ".02em" }}>
-        {set.map((it) => `#${it.num} ${it.name}`).join(" · ")}
-        {facetKey && <div style={{ marginTop: 4, color: C.mut }}>voisines — {facetKey}</div>}
+        #{a.num} {a.name} <span style={{ color: C.mut }}>vs</span> #{b.num} {b.name}
       </div>
       {facets.map((f) => (
         <div key={f} style={row}>
-          <span className="mono" style={{ fontSize: 10, color: C.faint, minWidth: 76, textAlign: "right" }}>{f}</span>
-          <div style={{ display: "flex", gap: 6 }}>
-            {set.map((it) => (
-              <button key={it.id} className={`chip ${cmp[f] === it.id ? "on" : ""}`} onClick={() => pick(f, it.id)}
-                style={{ fontSize: 11, padding: "3px 9px", minWidth: 40 }}>#{it.num}</button>
-            ))}
-          </div>
+          <button className={`chip ${cmp[f] === "a" ? "on" : ""}`} onClick={() => set(f, "a")}
+            style={{ fontSize: 11, padding: "3px 9px", minWidth: 40 }}>#{a.num}</button>
+          <span className="mono" style={{ fontSize: 10, color: C.faint, minWidth: 76, textAlign: "center" }}>{f}</span>
+          <button className={`chip ${cmp[f] === "b" ? "on" : ""}`} onClick={() => set(f, "b")}
+            style={{ fontSize: 11, padding: "3px 9px", minWidth: 40 }}>#{b.num}</button>
         </div>
       ))}
     </div>
@@ -1309,103 +1302,18 @@ function eligibleDaysSince(a, action, lastTs, nowTs) {
   }
   return total;
 }
-// voisines olfactives — x_pf_famille (09/08, Maxence : "pour arctander on code ça
-// mais on réserve pour l'activité famille olfactive" — le différentiel d'Arctander,
-// "plus fumé, moins terreux", réservé jusqu'ici faute d'un vrai regroupement).
-// Appariement par CHEVAUCHEMENT DE FACETTES (revu 09/08, round 2 — Maxence :
-// "boisé c'est pas assez proche, santal et oud n'ont rien à voir") et non plus
-// par famille : deux matières qui partagent juste le seau "boisé" peuvent être
-// aussi loin que santalé et oud. Round 3, testé en sandbox le jour même : grouper
-// par UNE SEULE facette dominante par matière (argmax) perd des vraies voisines
-// dès qu'il y a égalité — Isobutyl Quinoline (oud:2/cuiré:2) serait tombée du
-// mauvais côté et aurait raté Fleur de Cuir (cuiré:2). Donc comparaison par
-// PAIRE : toutes les matières éligibles sont confrontées deux à deux via
-// itemFacetTally. Round 4 (09/08, Maxence : "il faut que le pick agisse comme
-// le cerveau humain, quand est-ce que le nez juge deux matières voisines ?") —
-// un partage isolé ne suffit plus à valider une paire à égalité avec une autre :
-// le nez juge deux matières voisines sur le RECOUVREMENT DE PROFIL (plusieurs
-// traits en commun, pondérés par leur consistance), pas sur un mot qui coïncide
-// une fois (cf. les cartographies d'espace olfactif façon Snitz/Khan/Ravia,
-// citées dans le doc d'architecture catalogue). `score` = somme, sur chaque
-// facette partagée, du min des deux comptes (Math.min(ta[f], tb[f])) — une
-// matière qui montre "cuiré" aux deux checkpoints ET dont l'autre le montre
-// aussi aux deux compte plus qu'un partage noté une seule fois de chaque côté ;
-// 3 facettes partagées pèsent plus qu'une seule. Le tri est score d'abord
-// (les plus proches passent en premier), pfamCompares en second (parmi des
-// paires à peu près aussi proches, encore favoriser celles jamais confrontées,
-// pour étaler la couverture sur 164 matières plutôt que retomber toujours sur
-// les mêmes). La facette la plus saillante de la paire (comptes cumulés les
-// plus hauts) détermine familyKey (PARFUM_FACET_TO_FAMILLE) pour la liste de
-// facettes affichée au différentiel (VoisinesComparePicker) — le vocabulaire
-// de comparaison reste celui, déjà connu, de la famille portant cette facette.
-// Éligible = sessions.length>0 (comparer à l'aveugle total n'aurait pas de sens,
-// le point est de confronter un souvenir/re-sentir à un autre). O(n²) sur les
-// matières éligibles, sans souci tant que peu de matières ont des sessions.
-// Sélection en LOTERIE PONDÉRÉE par score (fix le jour même, testé en sandbox :
-// un tri + shortlist top-6 + tirage uniforme dedans revient à ignorer le score
-// tant qu'il y a ≤6 paires — le cas normal pendant longtemps — donnant autant
-// de chances à une paire à 1 facette faible qu'à une paire à 3 facettes fortes.
-// Le poids = score amorti par pfamCompares (score/(1+compareCount)), même
-// logique que la loterie pondérée du moteur principal (target/période) : les
-// paires les plus proches dominent, celles déjà beaucoup confrontées cèdent
-// de la couverture aux autres sans jamais tomber à zéro de chance. Retourne null
-// si aucune paire ne partage de facette (début du protocole) — resolveDraw
-// gère ce cas.
-function pickVoisinesFamille(pf) {
-  const eligible = (pf.items || []).filter((it) => it.status === "doing" && it.sessions && it.sessions.length);
-  if (eligible.length < 2) return null;
-  const tallies = new Map(eligible.map((it) => [it.id, itemFacetTally(it)]));
-  const overlap = (x, y) => {
-    const [ta, tb] = [tallies.get(x.id), tallies.get(y.id)];
-    const shared = Object.keys(ta).filter((f) => tb[f]);
-    return shared.reduce((sum, f) => sum + Math.min(ta[f], tb[f]), 0);
-  };
-  const pairs = [];
-  for (let x = 0; x < eligible.length; x++) {
-    for (let y = x + 1; y < eligible.length; y++) {
-      const [a, b] = [eligible[x], eligible[y]];
-      const score = overlap(a, b);
-      if (!score) continue;
-      const compareCount = (a.pfamCompares || []).length + (b.pfamCompares || []).length;
-      pairs.push({ a, b, weight: score / (1 + compareCount) });
-    }
-  }
-  if (!pairs.length) return null;
-  let r = Math.random() * pairs.reduce((sum, p) => sum + p.weight, 0);
-  let chosen = pairs[pairs.length - 1];
-  for (const p of pairs) { r -= p.weight; if (r <= 0) { chosen = p; break; } }
-  const set = [chosen.a, chosen.b];
-  // 3e matière (16/08, Maxence : "l'activité famille doit se concentrer sur plus
-  // que deux matières pour être utile" — un vrai flight plutôt qu'une simple paire,
-  // plus proche de comment un nez cartographie une famille en vrai (comparaisons en
-  // lignée, pas juste deux à la fois). Extension GREEDY de la paire déjà tirée
-  // plutôt qu'un tirage à trois entièrement repensé : la paire garde exactement la
-  // même logique qu'avant (score de recouvrement, loterie pondérée), on cherche en
-  // plus le meilleur 3e candidat sur son CUMUL de recouvrement avec les deux déjà
-  // choisis, amorti par sa propre couverture (même damping que ci-dessus). Aucun
-  // candidat ne partageant rien avec la paire → on reste à 2, pas de 3e forcé sans
-  // lien réel (le protocole en tout début, ou une famille très éparse).
-  const rest = eligible.filter((it) => it.id !== chosen.a.id && it.id !== chosen.b.id);
-  let bestThird = null, bestWeight = 0;
-  for (const c of rest) {
-    const score = overlap(chosen.a, c) + overlap(chosen.b, c);
-    if (!score) continue;
-    const weight = score / (1 + (c.pfamCompares || []).length);
-    if (weight > bestWeight) { bestWeight = weight; bestThird = c; }
-  }
-  if (bestThird) set.push(bestThird);
-  // facette dominante = comptes cumulés les plus hauts sur TOUT le set retenu (2 ou
-  // 3) — détermine familyKey/le vocabulaire affiché, généralise l'ancien tri sur la
-  // seule paire de base.
-  const cum = {};
-  for (const it of set) { const t = tallies.get(it.id); for (const f in t) cum[f] = (cum[f] || 0) + t[f]; }
-  const facetKey = Object.keys(cum).sort((f1, f2) => cum[f2] - cum[f1])[0];
-  return {
-    familyKey: PARFUM_FACET_TO_FAMILLE[facetKey],
-    facetKey,
-    set: set.map((it) => ({ id: it.id, num: it.num, name: it.text })),
-  };
-}
+// x_pf_famille (activité hebdo dédiée) SUPPRIMÉE 16/08 (Maxence, après vérif sur la
+// vraie pédagogie parfum — voir NOW.md Aug 16 : le nez ne tient pas une famille
+// entière en une fois, l'adaptation olfactive dégrade la discrimination en
+// quelques minutes ; même les pros plafonnent à 3-4 matières par session avec repos
+// entre deux. Or x_pf_direct_cmp (voir pickAging) posait DÉJÀ le même différentiel
+// chaque jour sur la paire du jour, sans créneau de loterie séparé ni algo de
+// sélection dédié — x_pf_famille était devenue une deuxième machinerie qui faisait
+// la même chose que la première. pickVoisinesFamille (recouvrement de facettes,
+// extension greedy à 3, loterie pondérée par pfamCompares) est donc retiré en
+// entier ; itemFacetTally reste (toujours utilisé par pickItemsLRU ci-dessus pour
+// le choix de la 2e matière du jour). PARFUM_FACET_TO_FAMILLE, qui ne servait qu'à
+// ça, supprimé aussi (voir PARFUM_FACET_SET, construit directement).
 // shared draw→action resolution (extracted 11/07 so the force paths below can
 // return through the exact same LRU-substitution step as the normal weighted
 // draw — garniture's action text carries "(LRU)" and needs pickItemLRU to fill
@@ -1419,20 +1327,6 @@ function resolveDraw(drawn, log) {
       : hasDoingItems(a)
         ? itemStep(a, log)
         : a.actions[Math.floor(Math.random() * a.actions.length)];
-  // voisines olfactives — le tirage de la paire arrive ici (pas plus tôt dans
-  // pickAging) : resolveDraw est le SEUL point de passage garanti quel que soit le
-  // chemin qui a mené jusqu'à x_pf_famille (tirage pondéré normal aujourd'hui, un
-  // futur forçage éventuel demain). La paire atterrit directement sur l'action —
-  // elle traverse tlx_flow (current est sauvegardé tel quel) donc survit à une
-  // fermeture/réouverture de l'app avant qu'il ait répondu, sans state séparé à
-  // faire persister sur l'activité comme pf.pf3 (pas besoin : rien ici n'a de
-  // fenêtre temporelle à tenir entre plusieurs cartes).
-  if (action && action.id === "x_pf_famille" && a.id === "a_parfum_explo") {
-    const pick = pickVoisinesFamille(a);
-    action = pick
-      ? { ...action, pfamFamily: pick.familyKey, pfamFacet: pick.facetKey, pfamSet: pick.set }
-      : { ...action, desc: "pas encore 2 matières partageant une facette déjà sentie — reviens après quelques rounds de plus sur « sentir matières premières »." };
-  }
   // singleItem applies regardless of which path produced the action — a real
   // per-action row from buildLotteryRows (Sudoku's "vidéo", Parfum's "livre"/
   // "vidéo") just as much as the single-action whole-activity case (Livre, Podcast).
@@ -1595,20 +1489,26 @@ function pickAging(activities, log, place, options = {}) {
           }
         } else if (pf.pf3.round >= 1 && !pf.pf3.cmpDirectDone) {
           // comparer à froid (16/08, Maxence : "on peut réutiliser l'idée du 1v1 +
-          // ceci-cela pour les paires chaque jour ?") — même différentiel d'Arctander
-          // que x_pf_famille (VoisinesComparePicker), mais posé ici sans passer par un
-          // score d'algo : les 2 blottes du jour sont déjà en main, fraîches, l'une à
-          // côté de l'autre — c'est LE moment où le nez juge relativement, pas besoin
-          // d'historique de facettes pour le justifier (contrairement à x_pf_famille,
-          // qui compare à distance des matières déjà connues). Une seule fois par
-          // paire, juste après le round "direct" (round>=1 = les deux blottes notées),
-          // avant que m30/h2/... prennent le relais. Écrit dans le MÊME ledger
-          // pfamCompares que x_pf_famille (voir submitComment) — les deux nourrissent
-          // le même damping de couverture, pas deux systèmes séparés.
-          const set = pf.pf3.order.map((id, i) => ({ id, num: pf.pf3.nums[i], name: pf.pf3.names[i] }));
+          // ceci-cela pour les paires chaque jour ?") — différentiel d'Arctander posé
+          // sans passer par un score d'algo : les 2 blottes du jour sont déjà en main,
+          // fraîches, l'une à côté de l'autre — c'est LE moment où le nez juge
+          // relativement. Une seule fois par paire, juste après le round "direct"
+          // (round>=1 = les deux blottes notées), avant que m30/h2/... prennent le
+          // relais. Facettes affichées = seulement celles que la paire a RÉELLEMENT
+          // montrées ce cycle (union des tallies, pas les 9 de la famille — simplifié
+          // 16/08, la plupart des facettes de la famille ne s'appliquent jamais aux 2
+          // matières du jour). Écrit dans pfamCompares (voir submitComment) — seule
+          // source de ce ledger depuis le retrait de x_pf_famille.
+          const [idA, idB] = pf.pf3.order;
+          const [itemA, itemB] = [idA, idB].map((id) => (pf.items || []).find((it) => it.id === id));
+          const facets = Array.from(new Set([...Object.keys(itemFacetTally(itemA)), ...Object.keys(itemFacetTally(itemB))]));
+          const pair = [
+            { id: idA, num: pf.pf3.nums[0], name: pf.pf3.names[0] },
+            { id: idB, num: pf.pf3.nums[1], name: pf.pf3.names[1] },
+          ];
           return resolveDraw({ activity: pf, action: { ...matAction, id: "x_pf_direct_cmp",
             text: `comparer à froid — ${nameList}`,
-            pfamFamily: parfumWeekFamille(), pfamSet: set,
+            pfamFamily: parfumWeekFamille(), pfamPair: pair, pfamFacets: facets,
             desc: "les deux fraîches, côte à côte : laquelle montre le plus chaque trait ?" } }, log);
         } else if (pf.pf3.round >= PARFUM_ROUNDS.length) {
           // le test (08/08). Avant, la fin d'un cycle était une révélation passive :
@@ -2223,10 +2123,10 @@ function Throughline() {
   const [parfumRecall, setParfumRecall] = useState(null);
   // voisines — R7, liens vers d'autres matières du catalogue (voir VoisinePicker).
   const [parfumVoisines, setParfumVoisines] = useState([]);
-  // différentiel d'Arctander — x_pf_famille ET la comparaison quotidienne
-  // x_pf_direct_cmp (16/08, voir VoisinesComparePicker). {facette: itemId désigné}
-  // — le set lui-même vit sur current.action.pfamSet (posé dans resolveDraw/
-  // pickAging), pas ici : seule la RÉPONSE est un state de flow.
+  // différentiel d'Arctander — comparaison quotidienne x_pf_direct_cmp (16/08, voir
+  // VoisinesComparePicker). {facette: "a"|"b"} — la paire vit sur
+  // current.action.pfamPair (posée dans pickAging), pas ici : seule la RÉPONSE est
+  // un state de flow.
   const [parfumCmp, setParfumCmp] = useState({});
   // parfum — les 3 réponses posées sur la carte "avant de savoir", juste avant la
   // révélation (voir pickAging). Éphémère comme itemNameInput : rien de tapé ici
@@ -3321,12 +3221,10 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
     // l'item (voir plus bas) pour retrouver l'historique d'une matière sans rescanner
     // tout le log.
     const isParfumMatiere = act && act.id === "a_parfum_explo" && action.id === "x_pf_matiere" && !!action.itemId;
-    // voisines olfactives — différentiel d'Arctander (09/08, voir pickVoisinesFamille/
-    // VoisinesComparePicker). pfamSet posé par resolveDraw/pickAging au tirage, pas ici.
-    const isParfumFamille = act && act.id === "a_parfum_explo" && action.id === "x_pf_famille" && !!action.pfamSet;
-    // même différentiel, posé chaque jour juste après le round "direct" (16/08, voir
-    // pickAging) — écrit dans le même ledger pfamCompares, voir plus bas.
-    const isParfumDirectCmp = act && act.id === "a_parfum_explo" && action.id === "x_pf_direct_cmp" && !!action.pfamSet;
+    // voisines olfactives — différentiel d'Arctander posé chaque jour juste après le
+    // round "direct" (16/08, voir pickAging). pfamPair/pfamFacets posés par pickAging
+    // au tirage, pas ici.
+    const isParfumDirectCmp = act && act.id === "a_parfum_explo" && action.id === "x_pf_direct_cmp" && !!action.pfamPair;
     if (doneEntryId) {
       setLog((L) => L.map((en) => {
         if (en.id !== doneEntryId) return en;
@@ -3335,7 +3233,7 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
         if (text) patch.note = text;
         if (isRecoWithItem) patch.rating = rating;
         if (isParfumMatiere) { patch.chips = parfumChips; patch.grades = parfumGrades; patch.intensity = parfumIntensity; patch.hedo = parfumHedo; patch.cortege = parfumCortege; patch.voisines = parfumVoisines; patch.afroid = parfumAFroid; patch.diffusion = parfumDiffusion; patch.nettete = parfumNettete; patch.role = parfumRole; patch.dosage = parfumDosage; patch.recall = parfumRecall; }
-        if (isParfumFamille || isParfumDirectCmp) { patch.pfamFamily = action.pfamFamily; patch.pfamFacet = action.pfamFacet; patch.pfamSet = action.pfamSet; patch.cmp = parfumCmp; }
+        if (isParfumDirectCmp) { patch.pfamFamily = action.pfamFamily; patch.pfamPair = action.pfamPair; patch.cmp = parfumCmp; }
         return { ...en, ...patch };
       }));
     }
@@ -3385,31 +3283,29 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
           : { ...a.pf3, doneInRound: a.pf3.doneInRound + 1 }) : a.pf3,
       })));
     }
-    if (isParfumFamille || isParfumDirectCmp) {
-      // écrit sur CHAQUE matière du set (2 ou 3, 16/08 — voir pickVoisinesFamille et
-      // la carte quotidienne x_pf_direct_cmp dans pickAging) : le différentiel n'a
-      // de sens que rapporté aux autres, donc chaque fiche garde SA part du
-      // jugement. À N>2 la relation n'est plus symétrique +/- comme au format pair
-      // d'origine (A plus, B moins) — désigner "la plus X" parmi 3 ne dit rien de
-      // l'ordre entre les deux autres, donc le signal devient "j'ai été désignée la
-      // plus X sur cette facette" (présent) ou silence (rien dit), même idiome que
-      // le reste de l'app. Un seul ledger pfamCompares pour les deux sources
-      // (activité famille dédiée ET comparaison quotidienne) : elles nourrissent le
-      // même damping de couverture dans pickVoisinesFamille, pas deux comptes
-      // séparés à recouper.
-      const set = action.pfamSet;
-      const stamp = { date: todayKey(), ts: realNow().getTime(), family: action.pfamFamily, facet: action.pfamFacet || null, via: isParfumDirectCmp ? "direct" : "famille" };
+    if (isParfumDirectCmp) {
+      // écrit sur LES DEUX matières, symétrique — le différentiel n'a de sens que
+      // rapporté à l'autre, donc chaque fiche garde SA moitié du jugement ("plus
+      // fumé" côté A implique "moins fumé" côté B, jamais l'inverse posé deux fois).
+      // pfamCompares garde un usage futur (biais éventuel vers une paire moins
+      // confrontée) même sans sélection algorithmique dédiée aujourd'hui (16/08,
+      // x_pf_famille retiré — voir pickAging).
+      const [pa, pb] = action.pfamPair;
+      const dirA = {}, dirB = {};
+      for (const f in parfumCmp) {
+        const v = parfumCmp[f];
+        if (v === "a") { dirA[f] = "plus"; dirB[f] = "moins"; }
+        else if (v === "b") { dirA[f] = "moins"; dirB[f] = "plus"; }
+      }
+      const stamp = { date: todayKey(), ts: realNow().getTime(), family: action.pfamFamily };
       setActivities((arr) => arr.map((a) => (a.id !== "a_parfum_explo" ? a : {
         ...a,
         items: (a.items || []).map((it) => {
-          const mine = set.find((m) => m.id === it.id);
-          if (!mine) return it;
-          const others = set.filter((m) => m.id !== it.id);
-          const cmp = {};
-          for (const f in parfumCmp) { if (parfumCmp[f] === it.id) cmp[f] = "plus"; }
-          return { ...it, pfamCompares: [...(it.pfamCompares || []), { ...stamp, against: others.map((o) => ({ id: o.id, num: o.num, name: o.name })), cmp }] };
+          if (it.id === pa.id) return { ...it, pfamCompares: [...(it.pfamCompares || []), { ...stamp, against: pb.id, otherNum: pb.num, otherName: pb.name, cmp: dirA }] };
+          if (it.id === pb.id) return { ...it, pfamCompares: [...(it.pfamCompares || []), { ...stamp, against: pa.id, otherNum: pa.num, otherName: pa.name, cmp: dirB }] };
+          return it;
         }),
-        pf3: isParfumDirectCmp && a.pf3 ? { ...a.pf3, cmpDirectDone: true } : a.pf3,
+        pf3: a.pf3 ? { ...a.pf3, cmpDirectDone: true } : a.pf3,
       })));
     }
     // pipeline advances the piece, practice grows observations — recommandeur (with a
@@ -5119,13 +5015,13 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                             {vocabOpen && <ParfumNotePicker chips={parfumChips} setChips={setParfumChips} grades={parfumGrades} setGrades={setParfumGrades} intensity={parfumIntensity} setIntensity={setParfumIntensity} hedo={parfumHedo} setHedo={setParfumHedo} cortege={parfumCortege} setCortege={setParfumCortege} items={current.activity.items} currentItemId={current.action.itemId} voisines={parfumVoisines} setVoisines={setParfumVoisines} diffusion={parfumDiffusion} setDiffusion={setParfumDiffusion} nettete={parfumNettete} setNettete={setParfumNettete} role={parfumRole} setRole={setParfumRole} dosage={parfumDosage} setDosage={setParfumDosage} showMesures={current.action.parfumRound === "direct"} />}
                           </div>
                         )}
-                        {/* voisines olfactives — différentiel d'Arctander (09/08, généralisé
-                            16/08 à x_pf_direct_cmp) : contrairement au vocabulaire de x_pf_matiere
-                            ci-dessus, pas de toggle — la comparaison EST le contenu de cette carte,
-                            la cacher par défaut n'aurait aucun sens. */}
-                        {current && (current.action.id === "x_pf_famille" || current.action.id === "x_pf_direct_cmp") && current.action.pfamSet && (
+                        {/* voisines olfactives — différentiel d'Arctander posé chaque jour
+                            (x_pf_direct_cmp, 16/08) : contrairement au vocabulaire de
+                            x_pf_matiere ci-dessus, pas de toggle — la comparaison EST le
+                            contenu de cette carte, la cacher par défaut n'aurait aucun sens. */}
+                        {current && current.action.id === "x_pf_direct_cmp" && current.action.pfamPair && (
                           <div style={{ marginBottom: 18 }}>
-                            <VoisinesComparePicker set={current.action.pfamSet} familyKey={current.action.pfamFamily} facetKey={current.action.pfamFacet} cmp={parfumCmp} setCmp={setParfumCmp} />
+                            <VoisinesComparePicker pair={current.action.pfamPair} facets={current.action.pfamFacets || []} cmp={parfumCmp} setCmp={setParfumCmp} />
                           </div>
                         )}
                         {/* same "« … »" idea as the running field (Maxence 16/07, round 6): a
