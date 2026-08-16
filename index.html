@@ -5405,7 +5405,16 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                         (round 4) — a quiet cursor hint instead, rendered as its own overlay (not
                         the native placeholder). Same font/size/color as the activity text above
                         once you actually type — a different register there read as inconsistent. */}
-                    <div style={{ position: "relative", maxWidth: 320, margin: "54px auto 0" }}>
+                    {/* parfum — "commentaire libre" ici, PAS sur "done" (16/08-r, Maxence :
+                        "le commentaire libre apparaît quand l'activité commence, genre quand
+                        la ligne balance, au premier tap ensuite il disparaît pour laisser
+                        place à intensité etc") — "la ligne balance" = le tilt de "running" ;
+                        le "premier tap" qui finit la session (running → done) est ce qui la
+                        fait disparaître, remplacée par intensité/facettes sur "done". */}
+                    {current && current.activity.id === "a_parfum_explo" && (
+                      <div className="mono" style={{ fontSize: 10, letterSpacing: ".1em", textTransform: "uppercase", color: C.faint, textAlign: "center", marginTop: 54 }}>commentaire libre</div>
+                    )}
+                    <div style={{ position: "relative", maxWidth: 320, margin: current && current.activity.id === "a_parfum_explo" ? "8px auto 0" : "54px auto 0" }}>
                       <input className="in" value={comment}
                         autoComplete="off" name="comment-running"
                         onChange={(e) => setComment(e.target.value)}
@@ -5445,31 +5454,23 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                     {(syncing || syncMsg) ? (
                       <div className="mono" style={{ fontSize: 11, color: C.bone, letterSpacing: ".06em", lineHeight: 1.6 }}>{syncMsg || "…"}</div>
                     ) : (() => {
-                      // 16/08-p (Maxence, correction de -o) — "commentaire libre" c'est
-                      // AVANT l'intensité, à l'apparition de l'ACTION x_pf_matiere
-                      // seulement (parfumMIdx===0) : "non le commentaire libre c'est avant
-                      // l'intensité etc, c'est à l'apparition de l'action !". Comparer n'a
-                      // JAMAIS cette étiquette ("Pas de champ 'commentaire libre' surtout
-                      // pas, juste le curseur en bas comme d'hab") — le champ y reste
-                      // toujours tout en bas, sans promotion. Dès qu'on avance sur
-                      // x_pf_matiere, le champ redescend aussi "sous la dernière div de
-                      // l'activité en cours" — juste le curseur, plus d'étiquette. Les
-                      // activités non-parfum gardent leur place habituelle.
-                      const isParfum = current && current.activity.id === "a_parfum_explo";
-                      const isMatiere = isParfum && current.action.id === "x_pf_matiere";
-                      const pfFirstStep = !isParfum || (isMatiere ? parfumMIdx === 0 : false);
+                      // 16/08-r (Maxence, correction finale de -o/-p) — "commentaire libre"
+                      // n'a JAMAIS sa place sur "done" : "le commentaire libre apparaît quand
+                      // l'activité commence, genre quand la ligne balance [tilt de 'running'],
+                      // au premier tap ensuite il disparaît pour laisser place à intensité
+                      // etc" — l'étiquette vit sur "running" (voir plus bas, comment-running),
+                      // le tap qui finit la session (running → done) est ce "premier tap".
+                      // Sur "done", le commentaire est donc TOUJOURS tout en bas, jamais
+                      // promu, jamais étiqueté — juste le curseur, pour toutes les activités
+                      // (parfum ou non). Pause reste TOUJOURS présent juste au-dessus
+                      // (Maxence, en capitales : "IL DOIT TOUJOURS Y AVOIR LE BOUTON PAUSE
+                      // AUSSI").
                       const commentBlock = (
                         <React.Fragment key="comment">
-                          {/* pause — TOUJOURS présent, juste au-dessus du curseur, quelle que
-                              soit l'étape (Maxence, en capitales : "IL DOIT TOUJOURS Y AVOIR
-                              LE BOUTON PAUSE AUSSI") — même bouton/geste que sur "running". */}
-                          <div style={{ textAlign: "center", marginTop: pfFirstStep ? 0 : 18, marginBottom: 10 }}>
+                          <div style={{ textAlign: "center", marginTop: 18, marginBottom: 10 }}>
                             <button className="link" onClick={togglePause}>{paused ? "reprendre" : "pause"}</button>
                           </div>
-                          {isMatiere && pfFirstStep && (
-                            <div className="mono" style={{ fontSize: 10, letterSpacing: ".1em", textTransform: "uppercase", color: C.faint, marginBottom: 8 }}>commentaire libre</div>
-                          )}
-                          <div style={{ position: "relative", maxWidth: 360, margin: pfFirstStep ? "0 auto 18px" : "0 auto" }}>
+                          <div style={{ position: "relative", maxWidth: 360, margin: "0 auto" }}>
                             <input className="in" value={comment}
                               autoComplete="off" name="comment-done"
                               onChange={(e) => setComment(e.target.value)}
@@ -5486,11 +5487,6 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                       );
                       return (
                         <>
-                          {/* Enter ne valide plus rien (16/08, Maxence : "un commentaire ne
-                              valide jamais une activité, seulement toucher la ligne") — seule
-                              la ligne (tapAction → submitComment) reste la surface de
-                              validation. */}
-                          {pfFirstStep && commentBlock}
                           {/* parfum — une des 2 évaluations du jour : chips/curseur sur l'écran
                               "done", capturés sur le log entry par submitComment() en plus du
                               flux normal (log + coachViaClaude, inchangés). */}
@@ -5537,7 +5533,7 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                               </div>
                             );
                           })()}
-                          {!pfFirstStep && commentBlock}
+                          {commentBlock}
                           {/* the "what your word does" hint teaches once (showDoneHint, seen-once-
                               ever like the tap hint) then gets out of the way for good — an
                               instruction, not a standing affordance (Maxence 16/07). */}
