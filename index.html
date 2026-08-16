@@ -1024,11 +1024,14 @@ function ParfumVsPicker({ pair, sessA, sessB, active, setActive, vIdx, setVIdx }
   return (
     <div onTouchStart={onTouchStart} onTouchEnd={onTouchEnd} style={{ marginTop: 4, textAlign: "center" }}>
       <button className="link" onClick={() => setActive((st) => ({ ...st, [cur.key]: "b" }))} style={nameStyle}>{b.name}</button>
-      {/* la facette EN COURS de comparaison — bloc 3, séparé de la matière B/bloc 2
-          par un espacement plus large (16/08-s, "quatre blocs en espacement") — 16/08-q
-          (Maxence : "on met intensité ou autre sous la seconde matière, avec les points
-          de navigation en dessous"). */}
-      <div className="mono" style={{ fontSize: 10, letterSpacing: ".1em", textTransform: "uppercase", color: C.faint, marginTop: 22 }}>{cur.label}</div>
+      {/* la facette EN COURS de comparaison — bloc 3, séparé de la matière B/bloc 2 par
+          un espacement PLUS GRAND que la base (30) — 16/08-u (Maxence : "si un bloc est
+          pas assez clair espace les autres") : la matière B elle-même garde son écart de
+          base avec la ligne (marginTop du wrapper, inchangé), c'est CET écart-ci qui
+          marque la frontière bloc2→bloc3 en étant plus large qu'elle. 16/08-q (Maxence :
+          "on met intensité ou autre sous la seconde matière, avec les points de
+          navigation en dessous"). */}
+      <div className="mono" style={{ fontSize: 10, letterSpacing: ".1em", textTransform: "uppercase", color: C.faint, marginTop: 40 }}>{cur.label}</div>
       {seq.length > 1 && (
         <div style={{ display: "flex", justifyContent: "center", gap: 6, marginTop: 8 }}>
           {seq.map((s, i) => (
@@ -5025,39 +5028,41 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                   pointerEvents off while faded so a stray tap can't land on a hidden
                   button instead of just waking the screen. */}
               <div style={{ minHeight: 130, display: "flex", flexDirection: "column", justifyContent: "flex-end", textAlign: "center",
-                // comparer (16/08-q, affiné 16/08-t — Maxence : "je ne vois toujours pas
-                // assez la séparation... il faut sûrement rapprocher les deux matières de
-                // la ligne") — measuré au pixel (getBoundingClientRect) : le wrapper de la
-                // ligne fait 44px de haut mais le VRAI trait visible (2px) est centré
-                // dedans, avec ~21px de marge invisible (zone tactile) de chaque côté. Un
-                // marginBottom de 14 laissait donc un écart RÉEL de 14+21=35px jusqu'au
-                // trait, pas 14 — d'où l'impression de bloc pas assez serré malgré le
-                // changement. Négatif pour compenser cette zone invisible, viser un écart
-                // visuel réel d'environ 10-12px. Toujours scopé à pfVsHeroActive seul.
-                marginBottom: pfVsHeroActive ? -11 : 30,
+                // 16/08-u (Maxence, correction de -q/-t : "garde l'espacement de base
+                // restons uniformes sur l'app... si un bloc est pas assez clair espace les
+                // autres plutôt que de modifier l'espacement des éléments d'un même bloc")
+                // — cette marge (matière → ligne, intra-bloc2) reste la valeur de base
+                // partout, jamais retouchée par activité/étape. La séparation se fait
+                // ailleurs, en ESPAÇANT le voisinage (voir baseText plus bas), pas ici.
+                marginBottom: 30,
                 opacity: ambient ? 0 : 1, pointerEvents: ambient ? "none" : "auto",
                 transition: `opacity ${ambient ? AMBIENT_FADE_OUT_MS : AMBIENT_FADE_IN_MS}ms ease` }}>
 
                 {(stage === "proposal" || stage === "running" || stage === "done") && current && (
                   <div className="fade">
-                    {/* 4 blocs (16/08-s, Maxence : "il faut penser quatre blocs en
-                        espacement : PARFUM EXPLORATION avec COMPARER / la matière 1 et la
-                        ligne et la matière 2 / la mesure et les points de navigation / le
-                        bouton pause et le curseur") — scopé à pfVsHeroActive (comparer
-                        seulement) pour ne pas changer le rythme des autres écrans/activités,
-                        qui partagent ces mêmes divs. Intra-bloc serré (name↔"comparer"),
-                        inter-bloc plus large (bloc1↔bloc2, porté par le marginBottom de
-                        "comparer" juste en dessous). */}
-                    <div className="mono" style={{ fontSize: 10, letterSpacing: ".22em", textTransform: "uppercase", color: C.faint, marginBottom: pfVsHeroActive ? 8 : 18 }}>
+                    {/* 4 blocs (16/08-s, affiné 16/08-u — Maxence : "il faut penser quatre
+                        blocs en espacement : PARFUM EXPLORATION avec COMPARER / la matière
+                        1 et la ligne et la matière 2 / la mesure et les points de
+                        navigation / le bouton pause et le curseur... applique cette
+                        logique partout pour parfum") — correction de -t : ON NE TOUCHE PLUS
+                        à l'espacement DANS un bloc (name↔"comparer" reste la valeur de base
+                        18, jamais resserrée) — "si un bloc est pas assez clair, espace les
+                        autres". La séparation bloc1→bloc2 se fait UNIQUEMENT en espaçant
+                        DAVANTAGE le dessous de "comparer"/du round (voir juste en dessous),
+                        pour toutes les cartes parfum (mesures ET comparer), pas seulement
+                        comparer. */}
+                    <div className="mono" style={{ fontSize: 10, letterSpacing: ".22em", textTransform: "uppercase", color: C.faint, marginBottom: 18 }}>
                       {current.activity.name}
                     </div>
                     {/* sub-activity: shown whenever the main line no longer carries it — a
                         Claude-generated title (musique/film) replaces the underlying action
                         entirely (titre vs album, etc.), so surface the original alongside it.
                         Comparer : "comparer" REVENU ici (16/08-q, après un aller-retour en
-                        -n/-o avec la facette dynamique) — statique, posé par pickAging. */}
+                        -n/-o avec la facette dynamique) — statique, posé par pickAging.
+                        marginBottom élargi pour TOUTE carte parfum (16/08-u) — c'est la
+                        frontière bloc1→bloc2, pas un écart à l'intérieur d'un bloc. */}
                     {current.action.baseText && current.action.baseText !== current.action.text && (
-                      <div className="mono" style={{ fontSize: 10, letterSpacing: ".1em", textTransform: "uppercase", color: C.faint, marginBottom: pfVsHeroActive ? 20 : 8 }}>{current.action.baseText}</div>
+                      <div className="mono" style={{ fontSize: 10, letterSpacing: ".1em", textTransform: "uppercase", color: C.faint, marginBottom: current.activity.id === "a_parfum_explo" ? 40 : 8 }}>{current.action.baseText}</div>
                     )}
                     {/* the item shows immediately — for a recommandeur it's the real curated
                         library entry (already meaningful). If the (non-blocking) embellisher
@@ -5280,8 +5285,11 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
 
               {/* ---------- below the line: controls ---------- */}
               {/* ambient: fades (slow out, quick back in) rather than unmounting — same
-                  reasoning as the block above the line. */}
-              <div style={{ minHeight: 130, marginTop: pfVsHeroActive ? -11 : 30, textAlign: "center",
+                  reasoning as the block above the line. 16/08-u: valeur de base (30),
+                  jamais retouchée — voir le commentaire au-dessus de la ligne. Pour
+                  comparer c'est aussi le bon écart intra-bloc2 (ligne → matière B), donc
+                  rien à changer ici pour ce cas non plus. */}
+              <div style={{ minHeight: 130, marginTop: 30, textAlign: "center",
                 opacity: ambient ? 0 : 1, pointerEvents: ambient ? "none" : "auto",
                 transition: `opacity ${ambient ? AMBIENT_FADE_OUT_MS : AMBIENT_FADE_IN_MS}ms ease` }}>
 
