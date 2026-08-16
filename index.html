@@ -218,6 +218,17 @@ const extractLocalProgress = (text) => {
   if (m) return `ch.${m[1]}`;
   return null;
 };
+// same "works without a call" spirit as extractLocalProgress above, applied to
+// naming a fresh Erasure piece (16/08 refonte) — a quoted title is unambiguous,
+// no need to wait on/spend an API call just to notice it. Only guillemets/quotes
+// count as an explicit name here; a bare mention without quotes is genuinely
+// ambiguous (is "sur la peau" the title, or just what he said about the poem?) —
+// that softer inference stays Claude's job (see namePieceViaClaude), this is only
+// the unambiguous case.
+const extractQuotedName = (text) => {
+  const m = (text || "").match(/[«"“]([^»"”]{2,80})[»"”]/);
+  return m ? m[1].trim() : null;
+};
 // affichage seulement (voir resolveSingleItem) — ép./chapitre sont des unités
 // finies : le repère utile à revoir est celui d'après, pas celui qu'on vient de
 // finir. La page reste un signet littéral (déjà la bonne page où reprendre).
@@ -342,6 +353,13 @@ function placeOk(a, place) { return placeOkW(a.where, place); }
 // the mastery/final-stage session ever actually being served (a_cover "rosalia
 // magnolia" case, 14/07).
 function pipelineStep(a) {
+  // continuous-position refonte (16/08, Erasure only for now — see NOW.md Queue
+  // "Refonte pipelines"): no more discrete stage[] index advanced by Claude, the
+  // hero line drives item.pos (0-100) directly via drag. Scoped by activity id,
+  // same precedent as isAlbumActivity/a_parfum_explo elsewhere in this file — a
+  // deliberately narrow carve-out, not a generic catalogue flag, until Piano/Cover
+  // prove the mechanism works and get ported too (order confirmed with Maxence).
+  if (a.id === "a_erasure") return pipelineStepContinuous(a);
   const stages = a.stages || [];
   if (!stages.length) return null;
   const last = stages.length - 1;
@@ -349,6 +367,26 @@ function pipelineStep(a) {
   const live = (a.items || []).find((it) => typeof it.stage === "number" && it.stage <= last);
   if (!live) return { id: uid(), text: `${label(0)} — nouvelle pièce`, min: 15, pieceId: null, pieceStage: 0, fresh: true };
   return { id: uid(), text: `${label(live.stage)} — « ${live.text} »`, min: 15, pieceId: live.id, pieceStage: live.stage, fresh: false };
+}
+// --- continuous-position pipeline (Erasure, 16/08 refonte) ---
+// Piece shape: { id, text, pos: 0-100, done }. No `stage` integer, no Claude call
+// to advance — the hero line drag sets `pos` directly (see pipelinePosActive).
+// a.stages[] is kept purely for its 5 labels (accroches/mots favoris/groupes/
+// poème/forme), read by band, never advanced by index anymore. "forme" (last
+// band, pos>=80) isn't a separate gesture — reaching it and confirming with a
+// plain tap on submit is what finishes the piece (Maxence 16/08: "remplir + tap
+// sur la ligne = fini, pas de geste séparé").
+function erasureStageLabel(a, pos) {
+  const stages = a.stages || [];
+  if (!stages.length) return "";
+  const n = stages.length;
+  const idx = Math.max(0, Math.min(n - 1, Math.floor(Math.max(0, Math.min(99.999, pos)) / (100 / n))));
+  return stages[idx].text;
+}
+function pipelineStepContinuous(a) {
+  const live = (a.items || []).find((it) => typeof it.pos === "number" && !it.done);
+  if (!live) return { id: uid(), text: "nouvelle pièce", min: 15, pieceId: null, piecePos: 0, fresh: true, continuous: true };
+  return { id: uid(), text: `« ${live.text || "sans titre"} »`, min: 15, pieceId: live.id, piecePos: live.pos, fresh: false, continuous: true };
 }
 
 // --- single persistent "current" item, per ACTION not per activity (Livre, Podcast,
@@ -2387,6 +2425,11 @@ function Throughline() {
   // la valeur du curseur sur 100 donnée aux titres, c'est beaucoup mieux"). Default
   // 50 (neutral) if never touched, mirroring albumTitles' own default.
   const [rating, setRating] = useState(50);
+  // Erasure continuous-position pipeline (16/08 refonte, see pipelineStepContinuous):
+  // 0-100, left→right like colorActive (a position, not a centre-out magnitude like
+  // rating). Seeded from the live piece's saved pos when a session starts (see the
+  // useEffect near the parfum rappel effect below), 0 for a fresh anonymous piece.
+  const [pipelinePos, setPipelinePos] = useState(0);
   const [doneEntryId, setDoneEntryId] = useState(null);
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState("");
@@ -3102,10 +3145,10 @@ function Throughline() {
     setHoldMs(next); setHoldDate(today);
     saveJSON(NS("tlx_hold"), { date: today, ms: next });
     setPaused(false); setComment(""); setManualMin(""); setDoneEntryId(null);
-    setAlbumTitles([]); setAlbumIdx(0); setDescOpen(false); setRating(50);
+    setAlbumTitles([]); setAlbumIdx(0); setDescOpen(false); setRating(50); setPipelinePos(0);
     propose(log, activities, false, current ? current.activity.id : null);
   };
-  const resetFlow = (nextStage = "entry") => { setStage(nextStage); setCurrent(null); setRunning(false); setElapsedMs(0); setPaused(false); setComment(""); setItemNameInput(""); setParfumChips([]); setParfumGrades({}); setParfumIntensity(null); setParfumHedo(null); setParfumCortege(null); setParfumVs({}); setParfumVsActive({}); setParfumColorH(null); setParfumColorS(null); setParfumColorPhase("hue"); setParfumDiffusion(null); setParfumNettete(null); setParfumDosage(null); setParfumRecall(null); setParfumMIdx(0); setParfumVIdx(0); setDescOpen(false); setSyncMsg(""); setSyncing(false); setAlbumTitles([]); setAlbumIdx(0); setRating(50); };
+  const resetFlow = (nextStage = "entry") => { setStage(nextStage); setCurrent(null); setRunning(false); setElapsedMs(0); setPaused(false); setComment(""); setItemNameInput(""); setParfumChips([]); setParfumGrades({}); setParfumIntensity(null); setParfumHedo(null); setParfumCortege(null); setParfumVs({}); setParfumVsActive({}); setParfumColorH(null); setParfumColorS(null); setParfumColorPhase("hue"); setParfumDiffusion(null); setParfumNettete(null); setParfumDosage(null); setParfumRecall(null); setParfumMIdx(0); setParfumVIdx(0); setDescOpen(false); setSyncMsg(""); setSyncing(false); setAlbumTitles([]); setAlbumIdx(0); setRating(50); setPipelinePos(0); };
   // Album de la semaine title-by-title appreciation (Maxence 16/07, item 4/5) —
   // isAlbumActivity gates the extra running-stage UI to that one activity only.
   const isAlbumActivity = !!(current && current.activity.id === "a_ecoute_album");
@@ -3278,6 +3321,60 @@ Détermine où en est la pièce APRÈS cette session. Par défaut new_stage = in
     }
   };
 
+  // ----- Erasure continuous pipeline (16/08 refonte) — replaces advanceViaClaude
+  // for this one activity. The hero line drag already wrote pipelinePos to the
+  // item synchronously in submitComment; nothing here ever touches `pos`. This
+  // call has exactly two jobs, both driven by the comment: (1) name a fresh/still-
+  // unnamed piece (extractQuotedName already handled the unambiguous quoted case
+  // locally, before any API round-trip — this is the softer "déduit par Claude"
+  // fallback for an unquoted mention), and (2) grow `observations`, same spirit as
+  // advanceViaClaude/coachViaClaude elsewhere. itemId is the fresh item just
+  // created (erasureFreshItemId) or the live piece being continued (action.pieceId).
+  // needsName comes from the caller (erasureNeedsName in submitComment), computed
+  // there BEFORE the fresh item's setActivities call lands — current.activity is a
+  // stale closure here and would never see a just-created fresh item's absence of
+  // a name, so this can't safely re-derive it from `act.items` itself.
+  const namePieceViaClaude = async (key, text, itemId, needsName) => {
+    const act = current.activity;
+    setSyncing(true); setSyncMsg("lecture du commentaire…");
+    const prompt = `Tu suis une pièce d'écriture (erasure poetry) qui avance sur une ligne continue 0-100 (accroches → mots favoris → groupes → poème → forme), pilotée par le geste, pas par ce commentaire — ne détermine PAS d'avancement ici.
+
+Le champ « observations » est une MÉMOIRE qui s'accumule séparément : patterns, ce qui marche, tendances repérées au fil des sessions.
+
+Observations actuelles :
+"""
+${act.observations || "(vide)"}
+"""
+
+Commentaire laissé après la session :
+« ${text} »
+${needsName ? `\nCette pièce n'a pas encore de nom. Si le commentaire nomme ou laisse deviner un titre pour cette pièce (même sans guillemets), donne-le dans piece_name (court). Sinon piece_name = null — ne force jamais un nom, une pièce reste sans titre tant qu'aucun n'est clair.` : ""}
+
+updated_observations = les observations réécrites en y intégrant ce qu'apporte ce commentaire — garde tout ce qui reste pertinent, ne raccourcis pas artificiellement, ne retire que ce qui est vraiment obsolète ou remplacé.`;
+    try {
+      const out = await claudeJSON(key, prompt, {
+        type: "object",
+        properties: { updated_observations: { type: "string" }, ...(needsName ? { piece_name: { type: ["string", "null"] } } : {}) },
+        required: needsName ? ["updated_observations", "piece_name"] : ["updated_observations"],
+        additionalProperties: false,
+      }, 2000);
+      const aid = act.id;
+      setActivities((arr) => arr.map((a) => (a.id !== aid ? a : {
+        ...a,
+        observations: out.updated_observations,
+        items: needsName && out.piece_name
+          ? (a.items || []).map((it) => (it.id === itemId && !it.text ? { ...it, text: out.piece_name } : it))
+          : a.items,
+      })));
+      setSyncMsg(needsName && out.piece_name ? `« ${out.piece_name} »` : "observations mises à jour ✓");
+    } catch (err) {
+      setSyncMsg("lecture impossible (" + (err.message || "erreur") + ") — commentaire gardé");
+    } finally {
+      setSyncing(false);
+      setTimeout(() => setSyncMsg(""), 2400);
+    }
+  };
+
   // ----- same stage-advance as advanceViaClaude, but reachable from the free-log
   // box (submitFreeLog) instead of a live session. There's no `current.action` to
   // read pieceId/pieceStage/fresh from, so the piece is resolved the same way
@@ -3328,6 +3425,71 @@ Détermine où en est la pièce APRÈS ce qui est décrit. Par défaut new_stage
     } catch (err) {
       // the "done" entry is already logged (min/note) regardless — only the funnel
       // position fails to update this time, same fail-safe spirit as advanceViaClaude.
+    }
+  };
+
+  // ----- Erasure continuous pipeline (16/08 refonte) from the free-log box — fills
+  // the gap left when advancePipelineFromLog was excluded for a_erasure (no live
+  // drag to read a position from here, so it needs its own inference). Same
+  // "explicit correction primes over default" contract as advancePipelineFromLog
+  // above, just in band terms (0-4, 5 = terminé) instead of a discrete stage index
+  // that happens to already be the funnel's real shape — Claude reasons in bands
+  // because that's what the text can actually convey ("à l'étape poème"), the
+  // hero-line drag remains the only source of a PRECISE pos during a real session.
+  // A resolved band writes the midpoint of that band (band*20+10) so the live
+  // label reads unambiguously inside it, not sitting right on a threshold.
+  const advanceErasureFromLog = async (key, act, text, entryId) => {
+    const live = (act.items || []).find((it) => typeof it.pos === "number" && !it.done);
+    const stages = act.stages || [];
+    const currentBand = live ? Math.min(4, Math.floor(live.pos / 20)) : 0;
+    const quotedName = extractQuotedName(text);
+    const ctx = live
+      ? `Pièce existante : « ${live.text || "sans titre"} », à l'étape ${currentBand} (${(stages[currentBand] || {}).text || "?"}).`
+      : `Aucune pièce en cours — ce texte démarre potentiellement une pièce FRAÎCHE (pas encore de nom).`;
+    const needsName = !live || !live.text;
+    const prompt = `Tu suis l'avancement d'une pièce d'écriture (erasure poetry) dans un funnel à 5 étapes, à partir d'un log libre (pas de session minutée en cours, juste un texte tapé après coup). La pièce avance normalement sur une ligne continue pilotée au geste — ce texte ne donne qu'une lecture approximative en bande, pas une position précise.
+Étapes (index: nom) :
+${stages.map((s, i) => `${i}: ${s.text}`).join("\n")}
+
+${ctx}
+
+Ce qu'il a tapé :
+« ${text} »
+
+Détermine à quelle étape (bande, 0 à 4) la pièce en est APRÈS ce qui est décrit. Par défaut new_band = étape courante (${currentBand}) : si le texte ne décrit pas d'avancée claire, ne bouge rien. Mais si le texte indique EXPLICITEMENT à quelle étape la pièce en est réellement — nomme une étape du funnel, dit qu'elle est plus ou moins avancée que prévu, ou dit qu'elle est finie/terminée — prends new_band directement à cette étape précise (5 pour terminée), peu importe l'écart : une correction explicite prime toujours sur le statu quo par défaut.${needsName ? ` piece_name = nom court si le texte le nomme ou le laisse deviner (même sans guillemets), sinon null — ne force jamais un nom.` : ""}`;
+    try {
+      const out = await claudeJSON(key, prompt, {
+        type: "object",
+        properties: { new_band: { type: "integer" }, ...(needsName ? { piece_name: { type: ["string", "null"] } } : {}) },
+        required: needsName ? ["new_band", "piece_name"] : ["new_band"],
+        additionalProperties: false,
+      });
+      const band = Math.max(0, Math.min(5, parseInt(out.new_band)));
+      const pos = Math.min(100, band * 20 + 10);
+      const done = band >= 4;
+      const name = quotedName || (needsName ? out.piece_name : null);
+      setActivities((arr) => arr.map((a2) => {
+        if (a2.id !== act.id) return a2;
+        let items = a2.items || [];
+        items = live
+          ? items.map((it) => (it.id === live.id ? { ...it, pos, done, text: (!it.text && name) ? name : it.text } : it))
+          : [...items, { id: uid(), text: name || "", pos, done }];
+        return { ...a2, items };
+      }));
+      if (entryId) setLog((L) => L.map((en) => (en.id === entryId ? { ...en, pipelinePos: pos } : en)));
+    } catch (err) {
+      // the "done" entry is already logged (min/note) regardless — only the band
+      // reasoning fails this time, same fail-safe spirit as advancePipelineFromLog.
+      // A quoted name can still be applied to an EXISTING live piece without the
+      // API (same guaranteed-locally precedent as extractQuotedName elsewhere) —
+      // but a fresh piece has nothing to attach it to yet, it simply isn't created
+      // this time (same degradation as advancePipelineFromLog's own catch).
+      if (quotedName && live) {
+        setActivities((arr) => arr.map((a2) => (a2.id !== act.id ? a2 : {
+          ...a2,
+          items: (a2.items || []).map((it) => (it.id === live.id && !it.text ? { ...it, text: quotedName } : it)),
+        })));
+      }
     }
   };
 
@@ -3476,6 +3638,11 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
     // vs — comparaison répétée à chaque round (16/08 v2, voir pickAging).
     // pfamPair/pfamRoundId posés par pickAging au tirage, pas ici.
     const isParfumDirectCmp = act && act.id === "a_parfum_explo" && action.id === "x_pf_direct_cmp" && !!action.pfamPair;
+    // Erasure continuous pipeline (16/08 refonte) — position already lives in
+    // pipelinePos (set live by the drag on the hero line), this just confirms it.
+    // Unlike the legacy pipeline branch below, this never depends on `text`: the
+    // position moved via drag regardless of whether a comment was left.
+    const isErasureContinuous = act && act.id === "a_erasure" && !!action.continuous;
     if (doneEntryId) {
       setLog((L) => L.map((en) => {
         if (en.id !== doneEntryId) return en;
@@ -3485,6 +3652,7 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
         if (isRecoWithItem) patch.rating = rating;
         if (isParfumMatiere) { patch.chips = parfumChips; patch.grades = parfumGrades; patch.intensity = parfumIntensity; patch.hedo = parfumHedo; patch.cortege = parfumCortege; patch.diffusion = parfumDiffusion; patch.nettete = parfumNettete; patch.dosage = parfumDosage; patch.recall = parfumRecall; }
         if (isParfumDirectCmp) { patch.pfamFamily = action.pfamFamily; patch.pfamPair = action.pfamPair; patch.pfamRound = action.pfamRoundId; patch.pfamVs = parfumVs; }
+        if (isErasureContinuous) patch.pipelinePos = pipelinePos;
         return { ...en, ...patch };
       }));
     }
@@ -3566,6 +3734,35 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
         pf3: a.pf3 ? { ...a.pf3, cmpUpTo: a.pf3.cmpUpTo + 1 } : a.pf3,
       })));
     }
+    // Erasure continuous pipeline (16/08 refonte) — write pipelinePos straight to the
+    // item, ALWAYS (unlike the legacy Claude-driven pipeline branch below, this never
+    // waits on `text`: dragging the hero line already decided the position, a comment
+    // is only ever needed to NAME a fresh piece or grow observations, see
+    // namePieceViaClaude further down). "forme" (last band, pos>=80) finishing here —
+    // no separate gesture, reaching that band and confirming with a plain tap is what
+    // marks the piece done (Maxence 16/08). A quoted name (« ... ») is unambiguous
+    // enough to apply locally, guaranteed, same "no API dependency for the clear
+    // case" precedent as extractLocalProgress — applied here in the SAME write so it
+    // never races the API round-trip below (which only fills in the softer,
+    // unquoted-mention case, see namePieceViaClaude).
+    let erasureFreshItemId = null;
+    let erasureNeedsName = false;
+    if (isErasureContinuous) {
+      const posFinal = Math.round(pipelinePos);
+      const doneNow = posFinal >= 80;
+      const aid0 = act.id;
+      const quotedName = text ? extractQuotedName(text) : null;
+      if (action.fresh) erasureFreshItemId = uid();
+      const existingPiece = action.pieceId ? (act.items || []).find((it) => it.id === action.pieceId) : null;
+      erasureNeedsName = !quotedName && (action.fresh || (existingPiece && !existingPiece.text));
+      setActivities((arr) => arr.map((a) => {
+        if (a.id !== aid0) return a;
+        let items = a.items || [];
+        if (action.fresh) items = [...items, { id: erasureFreshItemId, text: quotedName || "", pos: posFinal, done: doneNow }];
+        else if (action.pieceId) items = items.map((it) => (it.id === action.pieceId ? { ...it, pos: posFinal, done: doneNow, text: (!it.text && quotedName) ? quotedName : it.text } : it));
+        return { ...a, items };
+      }));
+    }
     // pipeline advances the piece, practice grows observations — recommandeur (with a
     // drawn item, or without) already has everything it needs synchronously above
     // (rating+status, or just log.note): no Claude round-trip for it (24/07 — removed
@@ -3582,7 +3779,15 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
     if (wantsClaude) {
       const key = (await store.get("tlx_apiKey")) || "";
       if (key) {
-        kind === "pipeline" ? advanceViaClaude(key, text) : coachViaClaude(key, text, act, action);
+        // Erasure (continuous, 16/08) never runs the old stage-advancing
+        // advanceViaClaude anymore — position already moved via drag above. Its
+        // Claude call is now just naming a fresh piece + growing observations,
+        // skipped entirely if a quoted name already resolved it synchronously
+        // above (erasureNeedsName false) — still worth the round-trip for
+        // observations alone in that case, same as any other pipeline/practice.
+        isErasureContinuous
+          ? namePieceViaClaude(key, text, erasureFreshItemId || action.pieceId, erasureNeedsName)
+          : (kind === "pipeline" ? advanceViaClaude(key, text) : coachViaClaude(key, text, act, action));
       } else {
         // sans clé, coachViaClaude ne tourne jamais — l'extraction locale du repère
         // de progression (16/08) doit donc aussi s'appliquer ici, pas seulement dans
@@ -3597,7 +3802,11 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
             })));
           }
         }
-        setSyncMsg(kind === "pipeline" ? "pas de clé API — commentaire gardé, pièce/observations non mises à jour" : "pas de clé API — commentaire gardé, observations non mises à jour");
+        // Erasure : le titre entre guillemets (voir extractQuotedName) et la
+        // position sont déjà écrits plus haut, avec ou sans clé — seule la
+        // déduction plus souple d'un nom non cité et les observations dépendent
+        // réellement de l'API, donc rien de plus à faire ici sans elle.
+        setSyncMsg(isErasureContinuous ? "pas de clé API — commentaire gardé, nom/observations non mis à jour" : kind === "pipeline" ? "pas de clé API — commentaire gardé, pièce/observations non mises à jour" : "pas de clé API — commentaire gardé, observations non mises à jour");
         setTimeout(() => setSyncMsg(""), 2200);
       }
       finishFlow(text);
@@ -3761,8 +3970,10 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
     if (current?.medReminder) { propose(); return; }
     // singleItem "choisir" step: not a session either — naming happens via the
     // input below (submitItemName), a tap or the auto-start timer here is a no-op
-    // until a title's been given and current.action.fresh has cleared.
-    if (current?.action?.fresh) return;
+    // until a title's been given and current.action.fresh has cleared. A continuous
+    // pipeline's fresh piece (Erasure, 16/08) is anonymous from the start instead —
+    // no naming screen to wait for, it begins a real session immediately.
+    if (current?.action?.fresh && !current?.action?.continuous) return;
     // parfum — cartes prep/reveal (voir pickAging) : pas une session, même idiome
     // que medReminder ci-dessus — un tap acquitte et repasse directement à la
     // suite (3e slot noté → reveal ; reveal lu → tirage du lendemain), jamais de
@@ -3846,6 +4057,15 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
       setParfumGrades(prev.grades || {});
     }
   }, [current]);
+  // seed pipelinePos from the drawn piece's saved position (Erasure continuous
+  // pipeline, 16/08) — resetFlow already zeroed it, this restores it the instant
+  // a real (non-fresh) piece is drawn so the drag resumes from where it left off
+  // instead of snapping back to 0.
+  useEffect(() => {
+    const act = current && current.action;
+    if (!act || !act.continuous) return;
+    setPipelinePos(act.piecePos || 0);
+  }, [current]);
   const AUTO_START_MS = 2200;
   useEffect(() => {
     if (stage !== "proposal" || holding) return;
@@ -3857,9 +4077,11 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
     // la révélation (sa réponse, la vraie matière, son mot du cycle précédent)
     // disparaissait sans être lue. Elles attendent donc un vrai tap. `fresh`
     // (l'étape "choisir") est déjà un no-op dans begin(), listée ici pour ne plus
-    // armer un timer pour rien.
+    // armer un timer pour rien. Exception : une pièce fraîche CONTINUE (Erasure,
+    // 16/08) n'a plus d'étape "choisir" séparée — anonyme dès le départ, elle doit
+    // auto-démarrer comme n'importe quelle proposition normale (voir begin()).
     const act = current && current.action;
-    if (act && (act.parfumPrep || act.parfumGuess || act.parfumColor || act.fresh)) return;
+    if (act && (act.parfumPrep || act.parfumGuess || act.parfumColor || (act.fresh && !act.continuous))) return;
     const t = setTimeout(() => { begin(); }, AUTO_START_MS);
     return () => clearTimeout(t);
   }, [stage, current, holding]);
@@ -3997,6 +4219,20 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
     const frac = Math.max(0, Math.min(1, (clientX - rect.left) / (rect.width || 1)));
     if (parfumColorPhase === "hue") setParfumColorH(Math.round(frac * 360));
     else setParfumColorS(Math.round(frac * 100));
+  };
+  // pièce Erasure sur la ligne héro (16/08 refonte, continuous — voir
+  // pipelineStepContinuous) : même lecture gauche→droite que colorActive (une
+  // position, pas une magnitude centre-out), mais sur "done" comme ratingActive/
+  // pfMeasureActive puisque c'est un point après-séance, pas une proposition.
+  // Un seul axe continu (pas de séquence à parcourir comme pfMeasures) : un tap
+  // sans drag soumet directement, voir onLineUp.
+  const pipelinePosActive = stage === "done" && !!current?.action?.continuous;
+  const setPipelinePosFromPointer = (clientX) => {
+    const el = lineRef.current;
+    if (!el || clientX == null) return;
+    const rect = el.getBoundingClientRect();
+    const frac = Math.max(0, Math.min(1, (clientX - rect.left) / (rect.width || 1)));
+    setPipelinePos(Math.round(frac * 100));
   };
   // mesures/facettes du parfum sur la ligne héro (16/08-k, Maxence : "pourquoi on
   // n'utilise pas la ligne principale pour toutes ces mesures ! c'est stupide de
@@ -4136,6 +4372,20 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
       }, effHold);
       return;
     }
+    if (pipelinePosActive) {
+      // même geste que ratingActive : hold = discard (finishFlow("")), drag = pose
+      // pipelinePos en direct (onLineMove), tap sans drag = submitComment().
+      draggedRating.current = false;
+      holdStartX.current = e && e.clientX != null ? e.clientX : 0;
+      holdStart.current = Date.now();
+      setHolding(true);
+      holdTimer.current = setTimeout(() => {
+        didHold.current = true; holdTimer.current = null;
+        setHolding(false);
+        finishFlow("");
+      }, effHold);
+      return;
+    }
     if (!canHold) return;
     holdStart.current = Date.now();
     setHolding(true); // the line begins retracting toward the centre over the full hold time
@@ -4160,6 +4410,12 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
     if (pfHeroActive) {
       if (!draggedRating.current && e && e.clientX != null && Math.abs(e.clientX - holdStartX.current) > 8) draggedRating.current = true;
       if (draggedRating.current) setPfHeroFromPointer(e.clientX);
+      if (holdTimer.current && draggedRating.current) cancelHold();
+      return;
+    }
+    if (pipelinePosActive) {
+      if (!draggedRating.current && e && e.clientX != null && Math.abs(e.clientX - holdStartX.current) > 8) draggedRating.current = true;
+      if (draggedRating.current) setPipelinePosFromPointer(e.clientX);
       if (holdTimer.current && draggedRating.current) cancelHold();
       return;
     }
@@ -4200,6 +4456,14 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
       // garde la même logique pour l'étape comparer") — avance dans pfVsSeq, pfVsCur
       // devient null une fois épuisée, la ligne retombe sur le fallback générique.
       setParfumVIdx((i) => i + 1);
+      return;
+    }
+    if (pipelinePosActive) {
+      const held = didHold.current;
+      cancelHold();
+      if (held) { didHold.current = false; draggedRating.current = false; return; } // discard déjà parti
+      if (draggedRating.current) { draggedRating.current = false; return; } // valeur déjà posée en direct, pas de submit ici
+      submitComment(); // tap franc, sans déplacement : confirme pipelinePos tel quel
       return;
     }
     if (ratingActive) {
@@ -4485,7 +4749,12 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
         // after-finish comment (advanceViaClaude), just resolving the piece from the
         // catalogue instead of a live `current.action` (17/07, was a known gap: the
         // free-log box only ever wrote a plain "done" entry for these, funnel never moved).
-        if (a.kind === "pipeline") advancePipelineFromLog(key, a, out.note || text, e.id);
+        // Erasure routed separately (16/08 refonte, wired 17/08): advancePipelineFromLog
+        // assumes the old discrete it.stage shape and would corrupt a_erasure's
+        // pos-based items — advanceErasureFromLog reasons in bands (0-4) instead,
+        // same "explicit correction primes over default" contract, no live drag needed.
+        if (a.id === "a_erasure") advanceErasureFromLog(key, a, out.note || text, e.id);
+        else if (a.kind === "pipeline") advancePipelineFromLog(key, a, out.note || text, e.id);
         setMsg(`logged: ${e.actionText}`);
       } else {
         setLog((L) => [...L, { id: uid(), date: todayKey(), ts: realNow().getTime(), type: "note", note: out.note || text }]);
@@ -4516,7 +4785,23 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
       ...(action && action.itemId ? { itemId: action.itemId } : {}),
     };
     if (a.kind === "task") setActivities((arr) => arr.map((x) => (x.id === a.id ? { ...x, done: true } : x)));
-    if (a.kind === "pipeline") {
+    if (a.kind === "pipeline" && a.id === "a_erasure") {
+      // continuous refonte (16/08) — advance the live piece by one band (20pts,
+      // same "one stage" spirit as the legacy branch below) instead of a stage
+      // index; typeof it.stage never matches a pos-based item so this has to be a
+      // separate branch, not just the generic pipeline one (which would otherwise
+      // corrupt a_erasure with legacy-shaped items during a quick-complete tap).
+      setActivities((arr) => arr.map((x) => {
+        if (x.id !== a.id) return x;
+        const pieces = (x.items || []).filter((it) => typeof it.pos === "number" && !it.done);
+        if (pieces.length) {
+          const p = pieces[0];
+          const np = Math.min(100, p.pos + 20);
+          return { ...x, items: x.items.map((it) => (it.id === p.id ? { ...it, pos: np, done: np >= 80, text: it.text || e.note || "" } : it)) };
+        }
+        return { ...x, items: [...(x.items || []), { id: uid(), text: e.note || "", pos: 20, done: false }] };
+      }));
+    } else if (a.kind === "pipeline") {
       // advance the most-live piece one stage, or start a fresh one — so the funnel moves
       setActivities((arr) => arr.map((x) => {
         if (x.id !== a.id) return x;
@@ -4575,7 +4860,26 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
         ...(action && action.itemId ? { itemId: action.itemId } : {}),
       };
       if (a.kind === "task") a.done = true;
-      if (a.kind === "pipeline") {
+      if (a.kind === "pipeline" && a.id === "a_erasure") {
+        // continuous refonte (16/08) — same one-band-per-draw stand-in as
+        // simComplete above, kept in sync with it so a multi-day batch run
+        // doesn't corrupt a_erasure with legacy stage-shaped items either.
+        const pieces = (a.items || []).filter((it) => typeof it.pos === "number" && !it.done);
+        let np;
+        if (pieces.length) {
+          // pieces[0] is the same object reference as its entry in a.items (filter
+          // doesn't clone) — mutating it in place updates a.items directly, no
+          // separate find-and-write-back needed.
+          pieces[0].pos = Math.min(100, pieces[0].pos + 20);
+          np = pieces[0].pos;
+          if (np >= 80) pieces[0].done = true;
+        } else {
+          a.items = [...(a.items || []), { id: uid(), text: "", pos: 20, done: false }];
+          np = 20;
+        }
+        e.progressed = true;
+        e.finished = np >= 80;
+      } else if (a.kind === "pipeline") {
         const last = (a.stages || []).length - 1;
         const pieces = (a.items || []).filter((it) => typeof it.stage === "number");
         const live = pieces.filter((p) => p.stage <= last).sort((u, v) => v.stage - u.stage);
@@ -5337,7 +5641,7 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                     className={(stage === "entry" || ambient) && !holding ? "breathe" : ""}
                     style={{ position: "relative", height: 44, width: "82%", margin: "0 auto",
                       display: "flex", justifyContent: "center", alignItems: "center",
-                      overflow: "visible", cursor: "pointer", touchAction: (ratingActive || colorActive || pfHeroActive) ? "none" : "manipulation", userSelect: "none", WebkitUserSelect: "none",
+                      overflow: "visible", cursor: "pointer", touchAction: (ratingActive || colorActive || pfHeroActive || pipelinePosActive) ? "none" : "manipulation", userSelect: "none", WebkitUserSelect: "none",
                       // GPU-composited layer for the rotation (Maxence 24/07: a "staircase"
                       // artifact instead of a clean diagonal on the swaying line) — without
                       // this hint some renderers rasterize a rotated 2px-tall line on the CPU
@@ -5372,7 +5676,7 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                         transform: `translateY(-50%) scaleX(${holding ? 0 : 1})`, transformOrigin: "center", transition: trackTransition }} />
                     {/* centre fill — grows symmetrically from the middle, overshoots the track when you go beyond.
                         LINE_MODE "tilt" skips this entirely: the tilt on the wrapper above is the only signal. */}
-                    {!ratingActive && !pfHeroActive && LINE_MODE === "fill" && frac > 0 && (
+                    {!ratingActive && !pfHeroActive && !pipelinePosActive && LINE_MODE === "fill" && frac > 0 && (
                       <div style={{ position: "relative", flexShrink: 0, height: over ? 8 : 6, width: `${widthPct}%`,
                         background: fillColor, opacity: over ? 1 : 0.9,
                         boxShadow: over ? `0 0 14px ${fillColor}` : "none",
@@ -5397,6 +5701,15 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                     {colorActive && (
                       <div style={{ position: "relative", flexShrink: 0, height: 6,
                         width: `${parfumColorPhase === "hue" ? ((parfumColorH ?? 0) / 360) * 100 : ((parfumColorS ?? 0) / 100) * 100}%`,
+                        background: fillColor, opacity: 0.9,
+                        transform: `scaleX(${holding ? 0 : 1})`, transformOrigin: "center",
+                        transition: holding ? `transform ${effHold}ms linear` : "width .08s linear" }} />
+                    )}
+                    {/* pièce Erasure (16/08 refonte, continuous) : même remplissage
+                        gauche→droite que colorActive — pipelinePos EST directement la
+                        position de la pièce dans le funnel, pas une valeur à traduire. */}
+                    {pipelinePosActive && (
+                      <div style={{ position: "relative", flexShrink: 0, height: 6, width: `${pipelinePos}%`,
                         background: fillColor, opacity: 0.9,
                         transform: `scaleX(${holding ? 0 : 1})`, transformOrigin: "center",
                         transition: holding ? `transform ${effHold}ms linear` : "width .08s linear" }} />
@@ -5478,8 +5791,12 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                     livre/vidéo…): ephemeral, not a session — tap/auto-start are no-ops
                     while action.fresh (see begin()). Same "« ... »" input idiom as the
                     running/done comment fields, submitItemName() swaps the proposal to
-                    the real action in place once a title's given. */}
-                {stage === "proposal" && current?.action?.fresh && (
+                    the real action in place once a title's given. Excludes a continuous
+                    pipeline's fresh piece (Erasure, 16/08 — the bug this replaced: this
+                    same input used to render for pipeline fresh pieces too and fed
+                    submitItemName's singleItem-shaped write, see NOW.md Aug 16-x) — that
+                    one starts anonymous and gets named later from the comment instead. */}
+                {stage === "proposal" && current?.action?.fresh && !current?.action?.continuous && (
                   <div className="fade">
                     <div style={{ position: "relative", maxWidth: 320, margin: "24px auto 0" }}>
                       <input className="in" value={itemNameInput}
@@ -5529,6 +5846,17 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                 {stage === "proposal" && current?.action?.parfumColor && (
                   <div className="mono" style={{ fontSize: 9, letterSpacing: ".12em", color: C.faint, marginTop: 4 }}>
                     {parfumColorPhase === "hue" ? "teinte — tap pour la saturation" : "saturation — tap pour garder"}
+                  </div>
+                )}
+
+                {/* pièce Erasure (16/08 refonte) : le nom de l'étape courante s'affiche
+                    en direct au passage d'un seuil (pas aimanté — même idiome que la
+                    phase teinte/saturation ci-dessus), lu depuis pipelinePos, pas depuis
+                    action.text (figé au tirage). "forme" = la dernière bande, pas un
+                    geste séparé — juste le texte que soumettre à ce niveau confirme. */}
+                {pipelinePosActive && (
+                  <div className="mono" style={{ fontSize: 9, letterSpacing: ".12em", color: C.faint, marginTop: 4 }}>
+                    {erasureStageLabel(current.activity, pipelinePos)}
                   </div>
                 )}
 
