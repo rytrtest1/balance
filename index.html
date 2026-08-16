@@ -980,27 +980,89 @@ function VoisinePicker({ items, currentItemId, voisines, setVoisines }) {
 // que la paire a RÉELLEMENT montrées (`facets` vient de l'appelant, union des
 // tallies des deux matières) — pas les 9 facettes de la famille entière, la plupart
 // sans rapport avec ce qu'on vient de sentir.
-function VoisinesComparePicker({ pair, facets, cmp, setCmp }) {
-  const [a, b] = pair;
-  const set = (facet, side) => setCmp((c) => {
-    if (c[facet] === side) { const { [facet]: _drop, ...rest } = c; return rest; }
-    return { ...c, [facet]: side };
+// vs — répété à CHAQUE round (16/08 v2, Maxence : "c'est capital de le faire à
+// chaque round" — la courbe de la relation compte autant que la relation :
+// deux matières à égalité en tête peuvent diverger en fond, exactement ce que
+// la tenue mesure en parfumerie). Une ligne = un slider natif au-dessus d'un
+// fond fixe (la valeur de l'AUTRE matière, grisée) ; cliquer le nom en haut/bas
+// bascule quelle matière le curseur représente — les deux valeurs restent
+// visibles en même temps (fond gris = fixe, remplissage clair = actif), un
+// jugement relatif plutôt qu'absolu, réutilisé identique pour l'intensité et
+// chaque facette. Remplace l'ancien toggle a/b discret par ligne (16/08 v1) :
+// ici on garde l'écart réel, pas juste qui gagne.
+function ParfumVsLine({ label, aName, bName, aVal, bVal, active, onToggle, onChange }) {
+  const activeVal = active === "a" ? aVal : bVal;
+  const otherVal = active === "a" ? bVal : aVal;
+  const nameStyle = (side) => ({
+    fontSize: 11, fontFamily: "var(--mono)", padding: "2px 0", background: "none", border: "none",
+    color: active === side ? C.text : C.faint, fontWeight: active === side ? 600 : 400,
   });
-  const row = { display: "flex", alignItems: "center", justifyContent: "center", gap: 10, marginTop: 8 };
+  return (
+    <div style={{ maxWidth: 320, margin: "0 auto 20px", textAlign: "center" }}>
+      <button className="link" onClick={() => onToggle("a")} style={nameStyle("a")}>{aName}</button>
+      <div style={{ position: "relative", height: 22, margin: "2px 0" }}>
+        <div style={{ position: "absolute", left: 0, right: 0, top: 10, height: 2, background: C.line, borderRadius: 1 }} />
+        <div style={{ position: "absolute", left: 0, top: 10, height: 2, width: `${otherVal * 10}%`, background: C.mut, borderRadius: 1 }} />
+        <div className="mono" style={{ position: "absolute", left: "50%", top: -2, transform: "translateX(-50%)", fontSize: 9, letterSpacing: ".12em", color: C.faint, textTransform: "uppercase", pointerEvents: "none", background: C.bg, padding: "0 4px" }}>{label}</div>
+        <input type="range" min="0" max="10" step="1" value={activeVal}
+          onChange={(e) => onChange(active, parseInt(e.target.value))}
+          style={{ position: "absolute", left: 0, top: 0, width: "100%", margin: 0, accentColor: C.text, background: "transparent" }} />
+      </div>
+      <button className="link" onClick={() => onToggle("b")} style={nameStyle("b")}>{bName}</button>
+    </div>
+  );
+}
+// facettes PARTAGÉES (les deux matières l'ont montrée ce round) en lignes
+// togglables ; facettes SOLO (une seule des deux) listées en dessous, juste
+// lecture, triées par intensité décroissante — rien à comparer, pas de ligne.
+// `values`/`setValues` (parfumVs) portent les notes RETENUES éditables : défaut
+// = la note déjà loggée ce round, absence de clé = pas encore ajustée (même
+// idiome que grades[w] ?? 5 dans ParfumNotePicker) ; `active`/`setActive`
+// (parfumVsActive) = quel côté chaque ligne montre en édition, ni l'un ni
+// l'autre n'a besoin d'être écrit tant qu'il n'y touche pas.
+function ParfumVsPicker({ pair, roundLabel, sessA, sessB, values, setValues, active, setActive }) {
+  const [a, b] = pair;
+  const gradeA = (f) => (values.facets?.[f]?.a ?? sessA.grades?.[f] ?? 5);
+  const gradeB = (f) => (values.facets?.[f]?.b ?? sessB.grades?.[f] ?? 5);
+  const setGrade = (f, side, v) => setValues((s) => ({ ...s, facets: { ...s.facets, [f]: { ...s.facets?.[f], [side]: v } } }));
+  const intA = values.intensity?.a ?? sessA.intensity ?? 5;
+  const intB = values.intensity?.b ?? sessB.intensity ?? 5;
+  const setInt = (side, v) => setValues((s) => ({ ...s, intensity: { ...s.intensity, [side]: v } }));
+  const toggle = (key, side) => setActive((s) => ({ ...s, [key]: side }));
+  const chipsA = Object.keys(sessA.grades || {});
+  const chipsB = Object.keys(sessB.grades || {});
+  const shared = chipsA.filter((f) => chipsB.includes(f));
+  const solo = [
+    ...chipsA.filter((f) => !chipsB.includes(f)).map((f) => ({ key: `a-${f}`, name: a.name, f, v: sessA.grades[f] })),
+    ...chipsB.filter((f) => !chipsA.includes(f)).map((f) => ({ key: `b-${f}`, name: b.name, f, v: sessB.grades[f] })),
+  ].sort((x, y) => y.v - x.v);
+  const hasIntensity = sessA.intensity != null && sessB.intensity != null;
   return (
     <div style={{ marginTop: 4 }}>
-      <div className="mono" style={{ fontSize: 11, color: C.faint, textAlign: "center", marginBottom: 12, letterSpacing: ".02em" }}>
-        #{a.num} {a.name} <span style={{ color: C.mut }}>vs</span> #{b.num} {b.name}
+      <div className="mono" style={{ fontSize: 11, color: C.faint, textAlign: "center", marginBottom: 16, letterSpacing: ".02em" }}>
+        {roundLabel} — #{a.num} {a.name} <span style={{ color: C.mut }}>vs</span> #{b.num} {b.name}
       </div>
-      {facets.map((f) => (
-        <div key={f} style={row}>
-          <button className={`chip ${cmp[f] === "a" ? "on" : ""}`} onClick={() => set(f, "a")}
-            style={{ fontSize: 11, padding: "3px 9px", minWidth: 40 }}>#{a.num}</button>
-          <span className="mono" style={{ fontSize: 10, color: C.faint, minWidth: 76, textAlign: "center" }}>{f}</span>
-          <button className={`chip ${cmp[f] === "b" ? "on" : ""}`} onClick={() => set(f, "b")}
-            style={{ fontSize: 11, padding: "3px 9px", minWidth: 40 }}>#{b.num}</button>
-        </div>
+      {hasIntensity && (
+        <ParfumVsLine label="intensité" aName={a.name} bName={b.name}
+          aVal={intA} bVal={intB} active={active.intensity || "a"}
+          onToggle={(side) => toggle("intensity", side)} onChange={(side, v) => setInt(side, v)} />
+      )}
+      {shared.map((f) => (
+        <ParfumVsLine key={f} label={f} aName={a.name} bName={b.name}
+          aVal={gradeA(f)} bVal={gradeB(f)} active={active[f] || "a"}
+          onToggle={(side) => toggle(f, side)} onChange={(side, v) => setGrade(f, side, v)} />
       ))}
+      {solo.length > 0 && (
+        <div style={{ marginTop: 4 }}>
+          {solo.map(({ key, name, f, v }) => (
+            <div key={key} style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, marginBottom: 6 }}>
+              <span className="mono" style={{ fontSize: 10, color: C.faint, minWidth: 60, textAlign: "right" }}>{name}</span>
+              <span className="chip on" style={{ fontSize: 11, padding: "3px 9px" }}>{f}</span>
+              <span className="mono" style={{ fontSize: 10, color: C.mut, width: 14 }}>{v}</span>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -1597,7 +1659,7 @@ function pickAging(activities, log, place, options = {}) {
         if ((!pf.pf3 || pf.pf3.revealed) && atHome) {
           const picks = pickItemsLRU(pf, log, 2);
           pf.pf3 = { order: picks.map((p) => p.id), nums: picks.map((p) => p.num), names: picks.map((p) => p.text),
-            prepAcked: false, prepTs: null, round: 0, doneInRound: 0, guessed: false, guesses: [], revealed: false, cmpDirectDone: false };
+            prepAcked: false, prepTs: null, round: 0, doneInRound: 0, guessed: false, guesses: [], revealed: false, cmpUpTo: 0 };
           if (options.seeded) options.seeded.push(pf);
         }
         if (pf.pf3 && !pf.pf3.revealed) {
@@ -1609,29 +1671,34 @@ function pickAging(activities, log, place, options = {}) {
               text: `aujourd'hui : ${PARFUM_BLIND ? numList : nameList}`,
               parfumPrep: true, desc: "prépare une mouillette pour chacune de ces 2 bouteilles, puis reviens noter." } }, log);
           }
-        } else if (pf.pf3.round >= 1 && !pf.pf3.cmpDirectDone) {
-          // comparer à froid (16/08, Maxence : "on peut réutiliser l'idée du 1v1 +
-          // ceci-cela pour les paires chaque jour ?") — différentiel d'Arctander posé
-          // sans passer par un score d'algo : les 2 blottes du jour sont déjà en main,
-          // fraîches, l'une à côté de l'autre — c'est LE moment où le nez juge
-          // relativement. Une seule fois par paire, juste après le round "direct"
-          // (round>=1 = les deux blottes notées), avant que m30/h2/... prennent le
-          // relais. Facettes affichées = seulement celles que la paire a RÉELLEMENT
-          // montrées ce cycle (union des tallies, pas les 9 de la famille — simplifié
-          // 16/08, la plupart des facettes de la famille ne s'appliquent jamais aux 2
-          // matières du jour). Écrit dans pfamCompares (voir submitComment) — seule
-          // source de ce ledger depuis le retrait de x_pf_famille.
+        } else if (pf.pf3.cmpUpTo < pf.pf3.round) {
+          // comparer — répété à CHAQUE round (16/08 v1 → v2, Maxence : "c'est capital
+          // de le faire à chaque round" — la courbe de la relation compte autant que
+          // la relation : deux matières à égalité en tête peuvent diverger en fond,
+          // exactement ce que la tenue mesure en parfumerie). cmpUpTo = index du
+          // dernier round déjà comparé ; round a déjà avancé dès que les 2 blottes de
+          // CE round sont notées (voir submitComment), donc cmpUpTo<round = un vs en
+          // attente. Boucle comme l'expiration ci-dessous : si les 2 sessions du round
+          // manquent (fenêtre ratée sans capture), on saute ce round sans carte plutôt
+          // qu'un vs vide — coûte un tour au pire, se rattrape au tirage suivant.
           const [idA, idB] = pf.pf3.order;
           const [itemA, itemB] = [idA, idB].map((id) => (pf.items || []).find((it) => it.id === id));
-          const facets = Array.from(new Set([...Object.keys(itemFacetTally(itemA)), ...Object.keys(itemFacetTally(itemB))]));
-          const pair = [
-            { id: idA, num: pf.pf3.nums[0], name: pf.pf3.names[0] },
-            { id: idB, num: pf.pf3.nums[1], name: pf.pf3.names[1] },
-          ];
-          return resolveDraw({ activity: pf, action: { ...matAction, id: "x_pf_direct_cmp",
-            text: `comparer à froid — ${nameList}`,
-            pfamFamily: parfumWeekFamille(), pfamPair: pair, pfamFacets: facets,
-            desc: "les deux fraîches, côte à côte : laquelle montre le plus chaque trait ?" } }, log);
+          const lastOfRound = (it, roundId) => (it && it.sessions || []).filter((s) => s.round === roundId).slice(-1)[0];
+          let drawn = null;
+          while (pf.pf3.cmpUpTo < pf.pf3.round) {
+            const roundDef = PARFUM_ROUNDS[pf.pf3.cmpUpTo];
+            if (!lastOfRound(itemA, roundDef.id) || !lastOfRound(itemB, roundDef.id)) { pf.pf3.cmpUpTo += 1; continue; }
+            const pair = [
+              { id: idA, num: pf.pf3.nums[0], name: pf.pf3.names[0] },
+              { id: idB, num: pf.pf3.nums[1], name: pf.pf3.names[1] },
+            ];
+            drawn = { activity: pf, action: { ...matAction, id: "x_pf_direct_cmp",
+              text: `comparer — ${roundDef.label} — ${nameList}`,
+              pfamFamily: parfumWeekFamille(), pfamPair: pair, pfamRoundId: roundDef.id,
+              desc: "les deux côte à côte : où en est chacune sur ce qu'elle montre ?" } };
+            break;
+          }
+          if (drawn) return resolveDraw(drawn, log);
         } else if (pf.pf3.round >= PARFUM_ROUNDS.length) {
           // le test (08/08). Avant, la fin d'un cycle était une révélation passive :
           // l'app affichait la réponse, il la lisait. C'est de l'encodage sans
@@ -2245,11 +2312,14 @@ function Throughline() {
   const [parfumRecall, setParfumRecall] = useState(null);
   // voisines — R7, liens vers d'autres matières du catalogue (voir VoisinePicker).
   const [parfumVoisines, setParfumVoisines] = useState([]);
-  // différentiel d'Arctander — comparaison quotidienne x_pf_direct_cmp (16/08, voir
-  // VoisinesComparePicker). {facette: "a"|"b"} — la paire vit sur
-  // current.action.pfamPair (posée dans pickAging), pas ici : seule la RÉPONSE est
-  // un state de flow.
-  const [parfumCmp, setParfumCmp] = useState({});
+  // vs — comparaison x_pf_direct_cmp répétée à chaque round (16/08 v2, voir
+  // ParfumVsPicker). parfumVs = {intensity:{a,b}, facets:{f:{a,b}}} — notes
+  // RETENUES éditables, absence de clé = pas encore ajustée (défaut = la note
+  // déjà loggée ce round, lue depuis sessA/sessB au rendu, pas ici). parfumVsActive
+  // = quel côté ("a"|"b") chaque ligne montre en édition. La paire elle-même vit
+  // sur current.action.pfamPair (posée dans pickAging), pas ici.
+  const [parfumVs, setParfumVs] = useState({});
+  const [parfumVsActive, setParfumVsActive] = useState({});
   // parfum — les 3 réponses posées sur la carte "avant de savoir", juste avant la
   // révélation (voir pickAging). Éphémère comme itemNameInput : rien de tapé ici
   // n'est une session, pas de timer, pas de clic compté.
@@ -2998,7 +3068,7 @@ function Throughline() {
     setAlbumTitles([]); setAlbumIdx(0); setDescOpen(false); setRating(50);
     propose(log, activities, false, current ? current.activity.id : null);
   };
-  const resetFlow = (nextStage = "entry") => { setStage(nextStage); setCurrent(null); setRunning(false); setElapsedMs(0); setPaused(false); setComment(""); setItemNameInput(""); setParfumChips([]); setParfumGrades({}); setParfumIntensity(null); setParfumHedo(null); setParfumCortege(null); setParfumVoisines([]); setParfumCmp({}); setParfumAFroid(""); setParfumDiffusion(null); setParfumNettete(null); setParfumRole(null); setParfumDosage(null); setParfumRecall(null); setDescOpen(false); setVocabOpen(false); setSyncMsg(""); setSyncing(false); setAlbumTitles([]); setAlbumIdx(0); setRating(50); };
+  const resetFlow = (nextStage = "entry") => { setStage(nextStage); setCurrent(null); setRunning(false); setElapsedMs(0); setPaused(false); setComment(""); setItemNameInput(""); setParfumChips([]); setParfumGrades({}); setParfumIntensity(null); setParfumHedo(null); setParfumCortege(null); setParfumVoisines([]); setParfumVs({}); setParfumVsActive({}); setParfumAFroid(""); setParfumDiffusion(null); setParfumNettete(null); setParfumRole(null); setParfumDosage(null); setParfumRecall(null); setDescOpen(false); setVocabOpen(false); setSyncMsg(""); setSyncing(false); setAlbumTitles([]); setAlbumIdx(0); setRating(50); };
   // Album de la semaine title-by-title appreciation (Maxence 16/07, item 4/5) —
   // isAlbumActivity gates the extra running-stage UI to that one activity only.
   const isAlbumActivity = !!(current && current.activity.id === "a_ecoute_album");
@@ -3343,9 +3413,8 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
     // l'item (voir plus bas) pour retrouver l'historique d'une matière sans rescanner
     // tout le log.
     const isParfumMatiere = act && act.id === "a_parfum_explo" && action.id === "x_pf_matiere" && !!action.itemId;
-    // voisines olfactives — différentiel d'Arctander posé chaque jour juste après le
-    // round "direct" (16/08, voir pickAging). pfamPair/pfamFacets posés par pickAging
-    // au tirage, pas ici.
+    // vs — comparaison répétée à chaque round (16/08 v2, voir pickAging).
+    // pfamPair/pfamRoundId posés par pickAging au tirage, pas ici.
     const isParfumDirectCmp = act && act.id === "a_parfum_explo" && action.id === "x_pf_direct_cmp" && !!action.pfamPair;
     if (doneEntryId) {
       setLog((L) => L.map((en) => {
@@ -3355,7 +3424,7 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
         if (text) patch.note = text;
         if (isRecoWithItem) patch.rating = rating;
         if (isParfumMatiere) { patch.chips = parfumChips; patch.grades = parfumGrades; patch.intensity = parfumIntensity; patch.hedo = parfumHedo; patch.cortege = parfumCortege; patch.voisines = parfumVoisines; patch.afroid = parfumAFroid; patch.diffusion = parfumDiffusion; patch.nettete = parfumNettete; patch.role = parfumRole; patch.dosage = parfumDosage; patch.recall = parfumRecall; }
-        if (isParfumDirectCmp) { patch.pfamFamily = action.pfamFamily; patch.pfamPair = action.pfamPair; patch.cmp = parfumCmp; }
+        if (isParfumDirectCmp) { patch.pfamFamily = action.pfamFamily; patch.pfamPair = action.pfamPair; patch.pfamRound = action.pfamRoundId; patch.pfamVs = parfumVs; }
         return { ...en, ...patch };
       }));
     }
@@ -3406,28 +3475,45 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
       })));
     }
     if (isParfumDirectCmp) {
-      // écrit sur LES DEUX matières, symétrique — le différentiel n'a de sens que
-      // rapporté à l'autre, donc chaque fiche garde SA moitié du jugement ("plus
-      // fumé" côté A implique "moins fumé" côté B, jamais l'inverse posé deux fois).
-      // pfamCompares garde un usage futur (biais éventuel vers une paire moins
-      // confrontée) même sans sélection algorithmique dédiée aujourd'hui (16/08,
-      // x_pf_famille retiré — voir pickAging).
+      // écrit sur LES DEUX matières, symétrique — les notes ajustées dans le vs
+      // (16/08 v2) VALENT désormais la note du round, patchées directement sur la
+      // session déjà loggée (pas un jugement à part comme l'ancien a/b) : le vs
+      // n'ajoute pas une couche de données, il affine celle qui existe déjà, côte à
+      // côte. pfamCompares garde son rôle d'amortissement (voir pickItemsLRU),
+      // plus de champ cmp dessus — la vraie source du "qui montre plus" est
+      // maintenant les grades des deux sessions elles-mêmes.
       const [pa, pb] = action.pfamPair;
-      const dirA = {}, dirB = {};
-      for (const f in parfumCmp) {
-        const v = parfumCmp[f];
-        if (v === "a") { dirA[f] = "plus"; dirB[f] = "moins"; }
-        else if (v === "b") { dirA[f] = "moins"; dirB[f] = "plus"; }
-      }
-      const stamp = { date: todayKey(), ts: realNow().getTime(), family: action.pfamFamily };
+      const roundId = action.pfamRoundId;
+      const lastRoundIdx = (sessions) => {
+        for (let i = (sessions || []).length - 1; i >= 0; i--) if (sessions[i].round === roundId) return i;
+        return -1;
+      };
+      const patchSession = (sess, side) => {
+        const newGrades = { ...sess.grades };
+        for (const f in (parfumVs.facets || {})) {
+          const v = parfumVs.facets[f][side];
+          if (v != null) newGrades[f] = v;
+        }
+        const newIntensity = parfumVs.intensity && parfumVs.intensity[side] != null ? parfumVs.intensity[side] : sess.intensity;
+        return { ...sess, grades: newGrades, intensity: newIntensity };
+      };
+      const stamp = { date: todayKey(), ts: realNow().getTime(), family: action.pfamFamily, round: roundId };
       setActivities((arr) => arr.map((a) => (a.id !== "a_parfum_explo" ? a : {
         ...a,
         items: (a.items || []).map((it) => {
-          if (it.id === pa.id) return { ...it, pfamCompares: [...(it.pfamCompares || []), { ...stamp, against: pb.id, otherNum: pb.num, otherName: pb.name, cmp: dirA }] };
-          if (it.id === pb.id) return { ...it, pfamCompares: [...(it.pfamCompares || []), { ...stamp, against: pa.id, otherNum: pa.num, otherName: pa.name, cmp: dirB }] };
+          if (it.id === pa.id) {
+            const idx = lastRoundIdx(it.sessions);
+            const sessions = idx < 0 ? it.sessions : it.sessions.map((s, i) => (i === idx ? patchSession(s, "a") : s));
+            return { ...it, sessions, pfamCompares: [...(it.pfamCompares || []), { ...stamp, against: pb.id, otherNum: pb.num, otherName: pb.name }] };
+          }
+          if (it.id === pb.id) {
+            const idx = lastRoundIdx(it.sessions);
+            const sessions = idx < 0 ? it.sessions : it.sessions.map((s, i) => (i === idx ? patchSession(s, "b") : s));
+            return { ...it, sessions, pfamCompares: [...(it.pfamCompares || []), { ...stamp, against: pa.id, otherNum: pa.num, otherName: pa.name }] };
+          }
           return it;
         }),
-        pf3: a.pf3 ? { ...a.pf3, cmpDirectDone: true } : a.pf3,
+        pf3: a.pf3 ? { ...a.pf3, cmpUpTo: a.pf3.cmpUpTo + 1 } : a.pf3,
       })));
     }
     // pipeline advances the piece, practice grows observations — recommandeur (with a
@@ -4311,7 +4397,7 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
       stage, tab, current, activities, log, holdMs, holdDate, place,
       begin, finish, tapAction, submitComment, start, resetFlow,
       setManualMin, setComment, setTab, applyDebugTime, simReseed, runSimBatch,
-      parfumChips, setParfumChips, parfumGrades, setParfumGrades, parfumIntensity, setParfumIntensity, parfumHedo, setParfumHedo, parfumCortege, setParfumCortege, parfumVoisines, setParfumVoisines, parfumCmp, setParfumCmp, ackParfum,
+      parfumChips, setParfumChips, parfumGrades, setParfumGrades, parfumIntensity, setParfumIntensity, parfumHedo, setParfumHedo, parfumCortege, setParfumCortege, parfumVoisines, setParfumVoisines, parfumVs, setParfumVs, parfumVsActive, setParfumVsActive, ackParfum,
       parfumGuesses, setParfumGuesses, submitParfumGuess,
       parfumAFroid, setParfumAFroid, parfumDiffusion, setParfumDiffusion, parfumNettete, setParfumNettete, parfumRole, setParfumRole, parfumDosage, setParfumDosage, parfumRecall, setParfumRecall,
       readReminders, scheduleReminder, cancelReminder, checkDueReminder,
@@ -5137,15 +5223,27 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                             {vocabOpen && <ParfumNotePicker chips={parfumChips} setChips={setParfumChips} grades={parfumGrades} setGrades={setParfumGrades} intensity={parfumIntensity} setIntensity={setParfumIntensity} hedo={parfumHedo} setHedo={setParfumHedo} cortege={parfumCortege} setCortege={setParfumCortege} items={current.activity.items} currentItemId={current.action.itemId} voisines={parfumVoisines} setVoisines={setParfumVoisines} diffusion={parfumDiffusion} setDiffusion={setParfumDiffusion} nettete={parfumNettete} setNettete={setParfumNettete} role={parfumRole} setRole={setParfumRole} dosage={parfumDosage} setDosage={setParfumDosage} showMesures={current.action.parfumRound === "direct"} full={current.action.parfumRound === "direct" || current.action.parfumRound === "final"} />}
                           </div>
                         )}
-                        {/* voisines olfactives — différentiel d'Arctander posé chaque jour
-                            (x_pf_direct_cmp, 16/08) : contrairement au vocabulaire de
-                            x_pf_matiere ci-dessus, pas de toggle — la comparaison EST le
-                            contenu de cette carte, la cacher par défaut n'aurait aucun sens. */}
-                        {current && current.action.id === "x_pf_direct_cmp" && current.action.pfamPair && (
-                          <div style={{ marginBottom: 18 }}>
-                            <VoisinesComparePicker pair={current.action.pfamPair} facets={current.action.pfamFacets || []} cmp={parfumCmp} setCmp={setParfumCmp} />
-                          </div>
-                        )}
+                        {/* vs — comparaison répétée à chaque round (x_pf_direct_cmp, 16/08 v2) :
+                            contrairement au vocabulaire de x_pf_matiere ci-dessus, pas de toggle —
+                            la comparaison EST le contenu de cette carte, la cacher par défaut
+                            n'aurait aucun sens. */}
+                        {current && current.action.id === "x_pf_direct_cmp" && current.action.pfamPair && (() => {
+                          const roundId = current.action.pfamRoundId;
+                          const roundDef = PARFUM_ROUNDS.find((r) => r.id === roundId);
+                          const [pa, pb] = current.action.pfamPair;
+                          const itemA = (current.activity.items || []).find((it) => it.id === pa.id);
+                          const itemB = (current.activity.items || []).find((it) => it.id === pb.id);
+                          const lastSess = (it) => ((it && it.sessions) || []).filter((s) => s.round === roundId).slice(-1)[0];
+                          const sessA = lastSess(itemA), sessB = lastSess(itemB);
+                          if (!sessA || !sessB) return null;
+                          return (
+                            <div style={{ marginBottom: 18 }}>
+                              <ParfumVsPicker pair={current.action.pfamPair} roundLabel={roundDef ? roundDef.label : roundId}
+                                sessA={sessA} sessB={sessB} values={parfumVs} setValues={setParfumVs}
+                                active={parfumVsActive} setActive={setParfumVsActive} />
+                            </div>
+                          );
+                        })()}
                         {/* same "« … »" idea as the running field (Maxence 16/07, round 6): a
                             styled overlay, not the native placeholder, dots spaced out and grey
                             throughout, same font/size as the activity text. No border under it
