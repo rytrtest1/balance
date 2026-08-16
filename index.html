@@ -5025,11 +5025,16 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                   pointerEvents off while faded so a stray tap can't land on a hidden
                   button instead of just waking the screen. */}
               <div style={{ minHeight: 130, display: "flex", flexDirection: "column", justifyContent: "flex-end", textAlign: "center",
-                // comparer (16/08-q, Maxence : "il faut que les deux matières soient bien
-                // plus proches de la ligne sinon on ne comprend pas qu'elles sont l'une
-                // versus l'autre") — resserré SEULEMENT sur cette carte (pfVsHeroActive),
-                // aucune autre activité/étape n'est affectée par ce changement.
-                marginBottom: pfVsHeroActive ? 14 : 30,
+                // comparer (16/08-q, affiné 16/08-t — Maxence : "je ne vois toujours pas
+                // assez la séparation... il faut sûrement rapprocher les deux matières de
+                // la ligne") — measuré au pixel (getBoundingClientRect) : le wrapper de la
+                // ligne fait 44px de haut mais le VRAI trait visible (2px) est centré
+                // dedans, avec ~21px de marge invisible (zone tactile) de chaque côté. Un
+                // marginBottom de 14 laissait donc un écart RÉEL de 14+21=35px jusqu'au
+                // trait, pas 14 — d'où l'impression de bloc pas assez serré malgré le
+                // changement. Négatif pour compenser cette zone invisible, viser un écart
+                // visuel réel d'environ 10-12px. Toujours scopé à pfVsHeroActive seul.
+                marginBottom: pfVsHeroActive ? -11 : 30,
                 opacity: ambient ? 0 : 1, pointerEvents: ambient ? "none" : "auto",
                 transition: `opacity ${ambient ? AMBIENT_FADE_OUT_MS : AMBIENT_FADE_IN_MS}ms ease` }}>
 
@@ -5276,7 +5281,7 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
               {/* ---------- below the line: controls ---------- */}
               {/* ambient: fades (slow out, quick back in) rather than unmounting — same
                   reasoning as the block above the line. */}
-              <div style={{ minHeight: 130, marginTop: pfVsHeroActive ? 14 : 30, textAlign: "center",
+              <div style={{ minHeight: 130, marginTop: pfVsHeroActive ? -11 : 30, textAlign: "center",
                 opacity: ambient ? 0 : 1, pointerEvents: ambient ? "none" : "auto",
                 transition: `opacity ${ambient ? AMBIENT_FADE_OUT_MS : AMBIENT_FADE_IN_MS}ms ease` }}>
 
