@@ -1010,39 +1010,46 @@ function VoisinePicker({ items, currentItemId, voisines, setVoisines }) {
 // vs — répété à CHAQUE round, UNE facette à la fois (16/08-i, Maxence : "on garde
 // l'idée du one by one on compare une facette à la fois"). La ligne héro devient un
 // DOUBLE slider pour ce cas : la matière active (nom en clair) se drag et remplit
-// net, l'autre reste en repères gris — les deux visibles en même temps (voir
-// pfVsHeroActive). Cliquer le nom en haut/bas bascule le côté que le drag édite.
-// Séquence = intensité puis les facettes PARTAGÉES seulement (les solo retirées
-// 16/08-i : "on enlève les catégories à ne pas comparer"). `active`/`setActive`
-// (parfumVsActive) = quel côté chaque ligne édite ; la lecture/écriture de la
-// valeur elle-même vit dans App (pfVsVal/setPfVsFromPointer), plus ici.
-function ParfumVsPicker({ pair, roundLabel, sessA, sessB, active, setActive, vIdx, setVIdx }) {
+// net, l'autre reste visible en gris derrière (voir pfVsHeroActive). Cliquer le nom
+// en haut/bas bascule le côté que le drag édite. Séquence = intensité puis les
+// facettes PARTAGÉES seulement (les solo retirées 16/08-i : "on enlève les
+// catégories à ne pas comparer"). `active`/`setActive` (parfumVsActive) = quel côté
+// chaque ligne édite ; la lecture/écriture de la valeur elle-même vit dans App
+// (pfVsVal/setPfVsFromPointer), plus ici. Réduit à l'essentiel (16/08-n, Maxence :
+// "écris la première matière au-dessus de la ligne principale, l'autre en dessous,
+// rien d'autre, on simplifie") — plus de légende round/paire ni de nom de facette
+// ici (le titre principal au-dessus de LA ligne, dans App, porte déjà la facette en
+// cours) : juste les deux noms et les points de nav.
+function ParfumVsPicker({ pair, sessA, sessB, active, setActive, vIdx, setVIdx }) {
   const [a, b] = pair;
   const chipsA = sessA.chips || Object.keys(sessA.grades || {});
   const chipsB = sessB.chips || Object.keys(sessB.grades || {});
   const shared = chipsA.filter((f) => chipsB.includes(f));
   const seq = [
-    ...(sessA.intensity != null || sessB.intensity != null ? [{ key: "__int", label: "intensité" }] : []),
-    ...shared.map((f) => ({ key: f, label: f })),
+    ...(sessA.intensity != null || sessB.intensity != null ? [{ key: "__int" }] : []),
+    ...shared.map((f) => ({ key: f })),
   ];
   if (!seq.length) return (
-    <div className="mono" style={{ fontSize: 11, color: C.faint, textAlign: "center", marginTop: 4 }}>
-      {roundLabel} — rien de partagé à comparer ce round
+    <div className="mono" style={{ fontSize: 10, letterSpacing: ".1em", textTransform: "uppercase", color: C.faint, textAlign: "center", marginTop: 4 }}>
+      rien de partagé à comparer ce round
     </div>
   );
   const cur = seq[Math.min(vIdx, seq.length - 1)];
   const side = active[cur.key] || "a";
+  // même style que les autres étiquettes secondaires (activity.name/baseText/pfCur)
+  // — majuscules, seul le titre principal (le nom de la matière, ailleurs dans
+  // l'app) reste en minuscules (16/08-n, Maxence : "rend le tout plus cohérent...
+  // on garde seulement le titre principal en minuscule genre le nom de la matière,
+  // autour en majuscules").
   const nameStyle = (s) => ({
-    fontSize: 11, fontFamily: "var(--mono)", padding: "2px 0", background: "none", border: "none",
-    color: side === s ? C.text : C.faint, fontWeight: side === s ? 600 : 400,
+    fontFamily: "var(--mono)", fontSize: 10, letterSpacing: ".1em", textTransform: "uppercase",
+    padding: "2px 0", background: "none", border: "none",
+    color: side === s ? C.text : C.faint,
   });
   return (
     <div style={{ marginTop: 4, textAlign: "center" }}>
-      <div className="mono" style={{ fontSize: 11, color: C.faint, marginBottom: 14, letterSpacing: ".02em", maxWidth: 320, marginLeft: "auto", marginRight: "auto" }}>
-        {roundLabel} — #{a.num} {a.name} <span style={{ color: C.mut }}>vs</span> #{b.num} {b.name}
-      </div>
       <button className="link" onClick={() => setActive((st) => ({ ...st, [cur.key]: "a" }))} style={nameStyle("a")}>{a.name}</button>
-      <div className="mono" style={{ fontSize: 9, letterSpacing: ".15em", color: C.faint, textTransform: "uppercase", textAlign: "center", margin: "6px 0 4px" }}>{cur.label}</div>
+      <div style={{ height: 10 }} />
       <button className="link" onClick={() => setActive((st) => ({ ...st, [cur.key]: "b" }))} style={nameStyle("b")}>{b.name}</button>
       {seq.length > 1 && (
         <div style={{ display: "flex", justifyContent: "center", gap: 6, marginTop: 10 }}>
@@ -1647,11 +1654,14 @@ function pickAging(activities, log, place, options = {}) {
               { id: idA, num: pf.pf3.nums[0], name: pf.pf3.names[0] },
               { id: idB, num: pf.pf3.nums[1], name: pf.pf3.names[1] },
             ];
-            // texte réduit au nom de l'étape (16/08-l, Maxence : "nomme bien l'étape...
-            // comparer") — les deux matières + le round vivent déjà dans la légende de
-            // ParfumVsPicker juste en dessous, les répéter dans le titre faisait doublon.
+            // 16/08-n (Maxence : "mets comparer à la place de 'légers' où il y avait écrit
+            // 'ouverture' l'étape d'avant... à la place de 'comparer' [en] titre principal
+            // la facette comparée en cours") — "comparer" descend dans le slot du round
+            // (baseText, petit), le TITRE (text, grand) devient dynamique, piloté par
+            // pfVsCur côté App (voir le JSX) ; `text` ici n'est qu'un repli avant que
+            // sessA/sessB soient chargées.
             drawn = { activity: pf, action: { ...matAction, id: "x_pf_direct_cmp",
-              text: "comparer", baseText: roundDef.label,
+              text: roundDef.label, baseText: "comparer",
               pfamFamily: parfumWeekFamille(), pfamPair: pair, pfamRoundId: roundDef.id,
               desc: "les deux côte à côte : où en est chacune sur ce qu'elle montre ?" } };
             break;
@@ -3961,10 +3971,12 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
   const pfVsSessA = pfVsPair ? pfVsLastSess(pfVsPair[0].id) : null;
   const pfVsSessB = pfVsPair ? pfVsLastSess(pfVsPair[1].id) : null;
   const pfVsSeq = (pfVsSessA && pfVsSessB) ? [
-    ...(pfVsSessA.intensity != null || pfVsSessB.intensity != null ? [{ key: "__int" }] : []),
-    ...((pfVsSessA.chips || Object.keys(pfVsSessA.grades || {})).filter((f) => (pfVsSessB.chips || Object.keys(pfVsSessB.grades || {})).includes(f))).map((f) => ({ key: f })),
+    ...(pfVsSessA.intensity != null || pfVsSessB.intensity != null ? [{ key: "__int", label: "intensité" }] : []),
+    ...((pfVsSessA.chips || Object.keys(pfVsSessA.grades || {})).filter((f) => (pfVsSessB.chips || Object.keys(pfVsSessB.grades || {})).includes(f))).map((f) => ({ key: f, label: f })),
   ] : [];
-  const pfVsCur = pfVsSeq.length ? pfVsSeq[Math.min(parfumVIdx, pfVsSeq.length - 1)] : null;
+  // pas de clamp (16/08-n, même principe que pfMesures/pfCur) : sortir de
+  // l'intervalle est le signal "séquence épuisée", géré par onLineUp.
+  const pfVsCur = (pfVsSeq.length && parfumVIdx < pfVsSeq.length) ? pfVsSeq[parfumVIdx] : null;
   const pfVsSide = pfVsCur ? (parfumVsActive[pfVsCur.key] || "a") : "a";
   const pfVsVal = (side) => {
     if (!pfVsCur) return null;
@@ -4092,10 +4104,10 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
         setParfumMIdx((i) => i + 1);
         return;
       }
-      // vs (pfVsHeroActive) : inchangé, tap = submitComment direct — pas de séquence
-      // à parcourir au sens "avancer plusieurs fois", la comparaison EST le contenu
-      // entier de la carte (voir ParfumVsPicker).
-      submitComment();
+      // vs (pfVsHeroActive) : même logique que les mesures (16/08-n, Maxence : "on
+      // garde la même logique pour l'étape comparer") — avance dans pfVsSeq, pfVsCur
+      // devient null une fois épuisée, la ligne retombe sur le fallback générique.
+      setParfumVIdx((i) => i + 1);
       return;
     }
     if (ratingActive) {
@@ -5026,7 +5038,7 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                         Claude-generated title (musique/film) replaces the underlying action
                         entirely (titre vs album, etc.), so surface the original alongside it. */}
                     {current.action.baseText && current.action.baseText !== current.action.text && (
-                      <div className="mono" style={{ fontSize: 10, letterSpacing: ".1em", color: C.faint, marginBottom: 8 }}>{current.action.baseText}</div>
+                      <div className="mono" style={{ fontSize: 10, letterSpacing: ".1em", textTransform: "uppercase", color: C.faint, marginBottom: 8 }}>{current.action.baseText}</div>
                     )}
                     {/* the item shows immediately — for a recommandeur it's the real curated
                         library entry (already meaningful). If the (non-blocking) embellisher
@@ -5047,7 +5059,10 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                       color: colorActive && (parfumColorH != null || parfumColorS != null)
                         ? `hsl(${parfumColorH ?? 0}, ${parfumColorS ?? 70}%, 62%)`
                         : (stage === "done" ? C.mut : C.text) }}>
-                      {current.action.text}
+                      {/* comparer (16/08-n) : le titre principal devient la facette EN COURS
+                          de comparaison (pfVsCur), pas un texte figé posé au tirage — même
+                          repli que pour pfCur ci-dessous si la séquence n'est pas encore prête. */}
+                      {pfVsHeroActive && pfVsCur ? pfVsCur.label : current.action.text}
                     </div>
                     {/* recommandeur (musique, film…): the line above is ONLY the title — what
                         describes it (artist/director/note) sits behind a reveal/hide toggle,
@@ -5067,7 +5082,7 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                         le nom de la mesure/facette actuellement focalisée (pfCur, calculé
                         plus haut) — mesure ou facette, même emplacement. */}
                     {pfMeasureActive && pfCur && (
-                      <div className="mono" style={{ fontSize: 11, color: C.mut, marginTop: 10, letterSpacing: ".04em" }}>{pfCur.key}</div>
+                      <div className="mono" style={{ fontSize: 10, letterSpacing: ".1em", textTransform: "uppercase", color: C.faint, marginTop: 10 }}>{pfCur.key}</div>
                     )}
                   </div>
                 )}
@@ -5212,28 +5227,29 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                         transform: `scaleX(${holding ? 0 : 1})`, transformOrigin: "center",
                         transition: holding ? `transform ${effHold}ms linear` : "width .08s linear" }} />
                     )}
-                    {/* vs parfum : double jauge sur la même ligne — l'active pleine (comme
-                        ci-dessus), l'autre matière en deux repères fins PAR-DESSUS (jamais
-                        une seconde barre pleine, voir le bug 16/08-j : deux barres centre-out
-                        se recouvrent toujours, la plus large avale la plus courte). */}
+                    {/* vs parfum : double jauge sur la même ligne (16/08-n, retour à deux
+                        barres pleines superposées — Maxence : "enlevé ce truc de repères...
+                        la matière grisée en gris sur le slider, la sélectionnée en blanc, si
+                        celle sélectionnée dépasse celle grisée on voit le gris dans le blanc
+                        et inversement"). La plus PETITE des deux se dessine en dernier (donc
+                        par-dessus) quelle que soit sa couleur — c'est ce qui la rend visible
+                        "dans" l'autre plutôt qu'avalée dessous (bug 16/08-j corrigé
+                        autrement la fois d'avant, repris ici plus simplement). */}
                     {pfVsHeroActive && (() => {
                       const activeFrac = (pfVsVal(pfVsSide) ?? 0) / 100;
                       const otherVal = pfVsVal(pfVsSide === "a" ? "b" : "a");
-                      const otherFrac = otherVal == null ? null : otherVal / 100;
-                      return (
-                        <>
-                          <div style={{ position: "relative", flexShrink: 0, height: 6, width: `${activeFrac * 100}%`,
-                            background: fillColor, opacity: 0.9,
-                            transform: `scaleX(${holding ? 0 : 1})`, transformOrigin: "center",
-                            transition: holding ? `transform ${effHold}ms linear` : "width .08s linear" }} />
-                          {otherFrac != null && (
-                            <>
-                              <div style={{ position: "absolute", left: `calc(50% - ${otherFrac * 50}%)`, top: "50%", width: 2, height: 14, background: C.mut, opacity: 0.75, transform: "translate(-50%, -50%)" }} />
-                              <div style={{ position: "absolute", left: `calc(50% + ${otherFrac * 50}%)`, top: "50%", width: 2, height: 14, background: C.mut, opacity: 0.75, transform: "translate(-50%, -50%)" }} />
-                            </>
-                          )}
-                        </>
+                      const otherFrac = (otherVal ?? 0) / 100;
+                      const activeBar = (
+                        <div key="active" style={{ position: "absolute", left: "50%", top: "50%", height: 6, width: `${activeFrac * 100}%`,
+                          background: fillColor, opacity: 0.9, transform: `translate(-50%, -50%) scaleX(${holding ? 0 : 1})`, transformOrigin: "center",
+                          transition: holding ? `transform ${effHold}ms linear` : "width .08s linear" }} />
                       );
+                      const otherBar = otherVal == null ? null : (
+                        <div key="other" style={{ position: "absolute", left: "50%", top: "50%", height: 6, width: `${otherFrac * 100}%`,
+                          background: C.mut, opacity: 0.8, transform: `translate(-50%, -50%) scaleX(${holding ? 0 : 1})`, transformOrigin: "center",
+                          transition: holding ? `transform ${effHold}ms linear` : "width .08s linear" }} />
+                      );
+                      return activeFrac >= otherFrac ? <>{activeBar}{otherBar}</> : <>{otherBar}{activeBar}</>;
                     })()}
                   </div>
                 );
@@ -5505,7 +5521,6 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                             n'aurait aucun sens. */}
                         {current && current.action.id === "x_pf_direct_cmp" && current.action.pfamPair && (() => {
                           const roundId = current.action.pfamRoundId;
-                          const roundDef = PARFUM_ROUNDS.find((r) => r.id === roundId);
                           const [pa, pb] = current.action.pfamPair;
                           const itemA = (current.activity.items || []).find((it) => it.id === pa.id);
                           const itemB = (current.activity.items || []).find((it) => it.id === pb.id);
@@ -5514,7 +5529,7 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                           if (!sessA || !sessB) return null;
                           return (
                             <div style={{ marginBottom: 18 }}>
-                              <ParfumVsPicker pair={current.action.pfamPair} roundLabel={roundDef ? roundDef.label : roundId}
+                              <ParfumVsPicker pair={current.action.pfamPair}
                                 sessA={sessA} sessB={sessB}
                                 active={parfumVsActive} setActive={setParfumVsActive}
                                 vIdx={parfumVIdx} setVIdx={setParfumVIdx} />
