@@ -995,98 +995,29 @@ function VoisinePicker({ items, currentItemId, voisines, setVoisines }) {
 // que la paire a RÉELLEMENT montrées (`facets` vient de l'appelant, union des
 // tallies des deux matières) — pas les 9 facettes de la famille entière, la plupart
 // sans rapport avec ce qu'on vient de sentir.
-// LA ligne — l'unique slider du protocole parfum (16/08-i, Maxence : "tout slider
-// doit être COMME LA LIGNE sur le modèle du slider pour noter les titres du jour" ;
-// repris 16/08-j : "le slider est toujours à cran... on doit garder exactement le
-// slider fluide utilisé pour titre du jour... de la même taille que la ligne
-// centrale toujours"). Donc : même taille que la ligne héro (44 de haut, 82% de
-// large, pas 320px de carte), même piste/remplissage (2px/6px bone), et surtout
-// même RÉSOLUTION — max passe de 10 à 100 par défaut, comme la note d'album/la
-// note recommandeur, seule façon d'obtenir un drag qui ne "saute" jamais d'un cran
-// à l'autre (un score 0-10 n'a que 11 arrêts possibles quelle que soit la finesse
-// du calcul ; rien ailleurs dans l'app ne suppose une échelle 0-10 pour ces
-// valeurs, vérifié avant le changement). Tap (sans vrai déplacement, seuil 8px
-// comme partout) = onTap (mesure/facette suivante) ; drag = pose la valeur en
-// continu. value null = jamais touchée : la NEUTRALITÉ reste toujours possible
-// (Maxence : "si on ne touche pas au slider c'est pour dire la présence sans se
-// prononcer sur l'intensité"). Le libellé de ce qu'une ligne mesure n'est plus un
-// prop ici (essayé posé AU-DESSUS puis superposé À la ligne, retiré 16/08-i,
-// Maxence : "on dirait juste qu'il est barré") — chaque appelant l'affiche
-// lui-même en légende sous les points de navigation (voir ParfumNotePicker).
-// `other` = seconde valeur à comparer (vs : les deux matières sur LA MÊME ligne).
-// Bug trouvé 16/08-j (Maxence : "ça marche seulement quand la première est
-// inférieure à la seconde et inversement") : les deux anciennes barres centre-out
-// se recouvraient TOUJOURS (les deux centrées sur le milieu, la plus large avale
-// forcément la plus courte) — un ordre de dessin ne peut jamais les rendre
-// visibles ensemble. Remplacé par deux repères fins (ticks) à la position de
-// `other`, posés PAR-DESSUS le remplissage plein de la valeur active — visibles
-// en tout temps, quel que soit lequel des deux est le plus grand.
-// mode="position" (teinte/saturation) : lecture gauche→droite + piste `track`
-// (dégradé CSS) + marqueur vertical au lieu du remplissage centre-out — le centre
-// n'a aucun sens sur une roue chromatique.
-function PfLine({ value, onChange, onTap, other, max = 100, mode = "centre", track }) {
-  const ref = useRef(null);
-  const dragged = useRef(false);
-  const downX = useRef(0);
-  const read = (clientX) => {
-    const el = ref.current;
-    if (!el || clientX == null) return null;
-    const rect = el.getBoundingClientRect();
-    if (mode === "position") {
-      const frac = Math.max(0, Math.min(1, (clientX - rect.left) / (rect.width || 1)));
-      return Math.round(frac * max);
-    }
-    const half = rect.width / 2 || 1;
-    return Math.round(Math.max(0, Math.min(1, Math.abs(clientX - (rect.left + half)) / half)) * max);
-  };
-  // capture en best-effort APRÈS coup (peut jeter NotFoundError sur un pointeur
-  // synthétique — trouvé en testant le DragSlider précédent) ; la valeur ne se pose
-  // qu'au premier vrai déplacement, jamais au down (sinon un tap-suivant sauterait
-  // la valeur au point d'appui — même fix que la ligne héro/album, 20/07).
-  const onDown = (e) => { dragged.current = false; downX.current = e.clientX; try { e.currentTarget.setPointerCapture(e.pointerId); } catch (err) {} };
-  const onMove = (e) => {
-    if (e.buttons !== 1) return;
-    if (!dragged.current && e.clientX != null && Math.abs(e.clientX - downX.current) > 8) dragged.current = true;
-    if (dragged.current) { const v = read(e.clientX); if (v != null) onChange(v); }
-  };
-  const onUp = () => { if (!dragged.current && onTap) onTap(); dragged.current = false; };
-  const frac = value == null ? 0 : value / max;
-  const otherFrac = other == null ? 0 : other / max;
-  return (
-    <div ref={ref} onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp} onPointerCancel={onUp}
-      onContextMenu={(e) => e.preventDefault()}
-      style={{ position: "relative", height: 44, width: "82%", margin: "0 auto", cursor: "pointer", touchAction: "none", userSelect: "none", WebkitUserSelect: "none" }}>
-      <div style={{ position: "absolute", left: 0, right: 0, top: "50%", height: track ? 3 : 2, background: track || C.soft, transform: "translateY(-50%)" }} />
-      {mode === "centre" && frac > 0 && (
-        <div style={{ position: "absolute", left: "50%", top: "50%", height: 6, width: `${frac * 100}%`, background: C.bone, opacity: 0.9, transform: "translate(-50%, -50%)" }} />
-      )}
-      {mode === "centre" && other != null && (
-        <>
-          <div style={{ position: "absolute", left: `calc(50% - ${otherFrac * 50}%)`, top: "50%", width: 2, height: 14, background: C.mut, opacity: 0.75, transform: "translate(-50%, -50%)" }} />
-          <div style={{ position: "absolute", left: `calc(50% + ${otherFrac * 50}%)`, top: "50%", width: 2, height: 14, background: C.mut, opacity: 0.75, transform: "translate(-50%, -50%)" }} />
-        </>
-      )}
-      {mode === "position" && value != null && (
-        <div style={{ position: "absolute", left: `calc(${frac * 100}% - 1px)`, top: 4, width: 2, height: 18, background: C.text }} />
-      )}
-    </div>
-  );
-}
+// LA ligne — plus de slider séparé pour le parfum (16/08-k, Maxence : "je ne
+// comprends vraiment pas pourquoi on n'utilise pas la ligne principale pour
+// toutes ces mesures ! c'est stupide de dupliquer"). `PfLine` (16/08-i à -j) est
+// supprimé — mesures, facettes et vs sont maintenant tous édités en draguant LA
+// vraie ligne héro elle-même (voir pfMeasureActive/pfVsHeroActive dans App, même
+// mécanique que ratingActive/colorActive : drag = pose la valeur en continu 0-100,
+// centre-out ; tap sans drag reprend son rôle habituel sur "done" = submitComment().
+// La navigation entre mesures/facettes/comparaisons ne passe donc plus par un tap
+// sur la ligne (redondant avec les points de nav ci-dessous, qui existaient déjà) —
+// seulement par les points. ParfumNotePicker/ParfumVsPicker n'ont donc plus de
+// slider ni de state d'index local : mIdx/fIdx/vIdx remontent dans App pour que la
+// ligne héro sache quoi éditer.
 // vs — répété à CHAQUE round, UNE facette à la fois (16/08-i, Maxence : "on garde
-// l'idée du one by one on compare une facette à la fois, la suivante au clic sur
-// la ligne, sinon overstimulation"). La ligne est un DOUBLE slider : la matière
-// active (nom en clair) se drag et remplit net, l'autre reste en jauge grisée
-// derrière — les deux visibles en même temps pour comparer d'un coup d'œil.
-// Cliquer le nom en haut/bas bascule le côté que le drag édite. Séquence =
-// intensité puis les facettes PARTAGÉES seulement (les solo retirées 16/08-i :
-// "on enlève les catégories à ne pas comparer") ; tap sur la ligne = suivante, en
-// boucle (repasser dessus pour ajuster reste possible). `values`/`setValues`
-// (parfumVs) portent les notes RETENUES éditables — défaut = la note déjà loggée
-// ce round, absence de clé = pas ajustée ; `active`/`setActive` (parfumVsActive)
-// = quel côté chaque ligne édite.
-function ParfumVsPicker({ pair, roundLabel, sessA, sessB, values, setValues, active, setActive }) {
+// l'idée du one by one on compare une facette à la fois"). La ligne héro devient un
+// DOUBLE slider pour ce cas : la matière active (nom en clair) se drag et remplit
+// net, l'autre reste en repères gris — les deux visibles en même temps (voir
+// pfVsHeroActive). Cliquer le nom en haut/bas bascule le côté que le drag édite.
+// Séquence = intensité puis les facettes PARTAGÉES seulement (les solo retirées
+// 16/08-i : "on enlève les catégories à ne pas comparer"). `active`/`setActive`
+// (parfumVsActive) = quel côté chaque ligne édite ; la lecture/écriture de la
+// valeur elle-même vit dans App (pfVsVal/setPfVsFromPointer), plus ici.
+function ParfumVsPicker({ pair, roundLabel, sessA, sessB, active, setActive, vIdx, setVIdx }) {
   const [a, b] = pair;
-  const [vIdx, setVIdx] = useState(0);
   const chipsA = sessA.chips || Object.keys(sessA.grades || {});
   const chipsB = sessB.chips || Object.keys(sessB.grades || {});
   const shared = chipsA.filter((f) => chipsB.includes(f));
@@ -1101,27 +1032,17 @@ function ParfumVsPicker({ pair, roundLabel, sessA, sessB, values, setValues, act
   );
   const cur = seq[Math.min(vIdx, seq.length - 1)];
   const side = active[cur.key] || "a";
-  const val = (s) => cur.key === "__int"
-    ? (values.intensity?.[s] ?? (s === "a" ? sessA.intensity : sessB.intensity) ?? null)
-    : (values.facets?.[cur.key]?.[s] ?? (s === "a" ? sessA.grades?.[cur.key] : sessB.grades?.[cur.key]) ?? null);
-  const setVal = (v) => setValues((st) => cur.key === "__int"
-    ? { ...st, intensity: { ...st.intensity, [side]: v } }
-    : { ...st, facets: { ...st.facets, [cur.key]: { ...st.facets?.[cur.key], [side]: v } } });
   const nameStyle = (s) => ({
     fontSize: 11, fontFamily: "var(--mono)", padding: "2px 0", background: "none", border: "none",
     color: side === s ? C.text : C.faint, fontWeight: side === s ? 600 : 400,
   });
   return (
-    // pas de maxWidth sur ce wrapper (16/08-j — même raison que ParfumNotePicker :
-    // PfLine doit rester 82% de la vraie largeur, pas 82% d'une carte à 320px).
     <div style={{ marginTop: 4, textAlign: "center" }}>
       <div className="mono" style={{ fontSize: 11, color: C.faint, marginBottom: 14, letterSpacing: ".02em", maxWidth: 320, marginLeft: "auto", marginRight: "auto" }}>
         {roundLabel} — #{a.num} {a.name} <span style={{ color: C.mut }}>vs</span> #{b.num} {b.name}
       </div>
       <button className="link" onClick={() => setActive((st) => ({ ...st, [cur.key]: "a" }))} style={nameStyle("a")}>{a.name}</button>
       <div className="mono" style={{ fontSize: 9, letterSpacing: ".15em", color: C.faint, textTransform: "uppercase", textAlign: "center", margin: "6px 0 4px" }}>{cur.label}</div>
-      <PfLine value={val(side)} other={val(side === "a" ? "b" : "a")}
-        onChange={setVal} onTap={() => setVIdx((i) => (i + 1) % seq.length)} />
       <button className="link" onClick={() => setActive((st) => ({ ...st, [cur.key]: "b" }))} style={nameStyle("b")}>{b.name}</button>
       {seq.length > 1 && (
         <div style={{ display: "flex", justifyContent: "center", gap: 6, marginTop: 10 }}>
@@ -1143,30 +1064,27 @@ function ParfumVsPicker({ pair, roundLabel, sessA, sessB, values, setValues, act
 // que les familles (single-select, retaper enlève). "avec quoi" reste du texte
 // libre dans le champ aide existant, pas un champ de plus.
 const PARFUM_ROLES = ["note principale", "modificateur", "fixateur", "volume/liant", "autre"];
-// Refonte one-by-one (16/08-i, Maxence : "on fait un par un sinon trop d'infos à
-// l'écran. genre d'abord intensité etc, ensuite facettes, à chaque facette
-// sélectionnée un slider apparaît, à la prochaine facette le nouveau remplace le
-// slider visible"). Deux phases séquentielles, une seule ligne visible à la fois :
+// Refonte one-by-one (16/08-i, affinée 16/08-k). Deux phases séquentielles, une
+// seule mesure/facette FOCALISÉE à la fois (mIdx/fIdx, remontés dans App) :
 // 1) MESURES — intensité, agrément, (diffusion/netteté à l'ouverture), cortège,
-//    (dosage aux rounds direct/final) — toutes en PfLine 0-10 magnitude ; tap sur
-//    la ligne = mesure suivante, non touchée = neutre (null, jamais écrit).
-//    diffusion/netteté/cortège/dosage étaient des tap-cycles/chips discrets —
-//    passés en curseurs ("on garde l'idée de slider pour toute chose à mesurer"),
-//    lus comme des magnitudes : diffusion 0=collée→10=loin, netteté 0=flou→10=net,
-//    cortège 0=tient seule→10=besoin d'un cortège, dosage 0=traces→10=structurant.
+//    (dosage aux rounds direct/final) — toutes éditées par drag sur la ligne héro
+//    (voir pfMeasureActive dans App, plus de slider ici), navigation par les points
+//    seulement. Non touchée = neutre (null, jamais écrit). diffusion/netteté/
+//    cortège/dosage étaient des tap-cycles/chips discrets — passés en magnitudes
+//    0-100 : diffusion 0=collée→loin, netteté 0=flou→net, cortège 0=tient seule→
+//    besoin d'un cortège, dosage 0=traces→structurant.
 // 2) FACETTES — les facettes du round précédent reviennent une à une avec leur
-//    valeur en mémoire (préremplies côté App, voir le useEffect de rappel), tap =
-//    suivante en boucle ; "+" discret en dessous ouvre la grille familles pour en
-//    ajouter. Premier tap sur une famille = OUVRE seulement (ne sélectionne plus,
-//    l'auto-add head est retiré) ; appui MAINTENU (450ms) = la famille elle-même
-//    en facette ; une sous-facette tapée = sélection + son slider prend la ligne.
-//    Retaper une sous-facette déjà choisie dans la grille la retire.
+//    valeur en mémoire (préremplies côté App, voir le useEffect de rappel), points
+//    de nav pour circuler entre elles ; "+" discret en dessous ouvre la grille
+//    familles pour en ajouter. Premier tap sur une famille = OUVRE seulement (ne
+//    sélectionne plus, l'auto-add head est retiré) ; appui MAINTENU (450ms) = la
+//    famille elle-même en facette. Sous-facette : tap = focalise (ou sélectionne
+//    si neuve), retirer une facette déjà choisie demande un appui maintenu
+//    (16/08-j — sinon impossible d'y revenir pour ajuster).
 // Registres : "comme quoi" (sources) supprimé ("si on a une idée on la met en
 // commentaire") ; "comme si" (sensible) réservé au round final (touche fraîche +
 // touche vieille = le moment de la vue globale) — tabs visibles seulement là.
-function ParfumNotePicker({ chips, setChips, grades, setGrades, intensity, setIntensity, hedo, setHedo, cortege, setCortege, items, currentItemId, voisines, setVoisines, diffusion, setDiffusion, nettete, setNettete, role, setRole, dosage, setDosage, showMesures, full, finalRound }) {
-  const [mIdx, setMIdx] = useState(0);
-  const [fIdx, setFIdx] = useState(0);
+function ParfumNotePicker({ chips, setChips, grades, setGrades, intensity, setIntensity, hedo, setHedo, cortege, setCortege, items, currentItemId, voisines, setVoisines, diffusion, setDiffusion, nettete, setNettete, role, setRole, dosage, setDosage, showMesures, full, finalRound, mIdx, setMIdx, fIdx, setFIdx }) {
   const [gridOpen, setGridOpen] = useState(chips.length === 0);
   const [registre, setRegistre] = useState("olfactif");
   const [open, setOpen] = useState(null);
@@ -1229,10 +1147,9 @@ function ParfumNotePicker({ chips, setChips, grades, setGrades, intensity, setIn
   const curFIdx = Math.min(fIdx, chips.length - 1);
   const curChip = chips.length ? chips[curFIdx] : null;
   const row = { display: "flex", flexWrap: "wrap", justifyContent: "center", gap: 6, maxWidth: 320, margin: "0 auto" };
-  // légende — sous les points de nav, sous la ligne (16/08-j, Maxence : "le texte
-  // au centre de la ligne c'est vraiment pas beau... en dessous de la ligne, en
-  // dessous des points de navigation me semble bien") ; plus jamais posée sur/dans
-  // la ligne elle-même (voir PfLine).
+  // légende + points — plus de ligne ici (16/08-k) : le drag édite directement la
+  // ligne héro au-dessus (voir pfMeasureActive dans App), ces points ne font plus
+  // que naviguer entre mesures/facettes (mIdx/fIdx remontés dans App).
   const caption = (text) => (
     <div className="mono" style={{ fontSize: 9, letterSpacing: ".15em", color: C.faint, textTransform: "uppercase", textAlign: "center", marginTop: 8 }}>{text}</div>
   );
@@ -1247,22 +1164,20 @@ function ParfumNotePicker({ chips, setChips, grades, setGrades, intensity, setIn
   return (
     <div>
       {inMesures ? (
-        // pas de maxWidth ici (16/08-j, Maxence : "de la même taille que la ligne
-        // centrale toujours") — PfLine est 82% de SON parent ; le capper à 320px
-        // la rétrécissait par rapport à la vraie ligne héro (82% du viewport).
         <div style={{ margin: "18px auto 0" }}>
-          <PfLine value={mesures[mIdx].val} onChange={mesures[mIdx].set}
-            onTap={() => setMIdx((i) => i + 1)} />
           {dots(mesures.length, mIdx, setMIdx)}
           {caption(mesures[mIdx].key)}
+          {/* passage aux facettes — plus de tap-sur-la-ligne pour avancer (16/08-k, la
+              ligne héro ne fait plus que draguer) donc il faut un geste explicite pour
+              quitter la phase mesures ; les points ne couvrent que 0..mesures.length-1. */}
+          <div style={{ textAlign: "center", marginTop: 12 }}>
+            <button className="link" onClick={() => setMIdx(mesures.length)} style={{ fontSize: 11 }}>facettes →</button>
+          </div>
         </div>
       ) : (
         <>
           {curChip && (
             <div style={{ margin: "18px auto 0" }}>
-              <PfLine value={grades[curChip] ?? null}
-                onChange={(v) => setGrades((g) => ({ ...g, [curChip]: v }))}
-                onTap={() => setFIdx((i) => (i + 1) % chips.length)} />
               {dots(chips.length, curFIdx, setFIdx)}
               {caption(curChip)}
             </div>
@@ -2405,6 +2320,15 @@ function Throughline() {
   // sur current.action.pfamPair (posée dans pickAging), pas ici.
   const [parfumVs, setParfumVs] = useState({});
   const [parfumVsActive, setParfumVsActive] = useState({});
+  // quelle mesure/facette/comparaison est FOCALISÉE sur la ligne héro en ce moment
+  // (16/08-k, Maxence : "pourquoi on n'utilise pas la ligne principale pour toutes
+  // ces mesures ! c'est stupide de dupliquer") — remontées ici depuis
+  // ParfumNotePicker/ParfumVsPicker (qui n'ont plus leur propre slider, juste des
+  // points de nav qui écrivent ici) pour que la ligne héro elle-même (voir
+  // pfMeasureActive/pfVsHeroActive plus bas) sache quoi éditer au drag.
+  const [parfumMIdx, setParfumMIdx] = useState(0);
+  const [parfumFIdx, setParfumFIdx] = useState(0);
+  const [parfumVIdx, setParfumVIdx] = useState(0);
   // parfum — les 3 réponses posées sur la carte "avant de savoir", juste avant la
   // révélation (voir pickAging). Éphémère comme itemNameInput : rien de tapé ici
   // n'est une session, pas de timer, pas de clic compté.
@@ -3161,7 +3085,7 @@ function Throughline() {
     setAlbumTitles([]); setAlbumIdx(0); setDescOpen(false); setRating(50);
     propose(log, activities, false, current ? current.activity.id : null);
   };
-  const resetFlow = (nextStage = "entry") => { setStage(nextStage); setCurrent(null); setRunning(false); setElapsedMs(0); setPaused(false); setComment(""); setItemNameInput(""); setParfumChips([]); setParfumGrades({}); setParfumIntensity(null); setParfumHedo(null); setParfumCortege(null); setParfumVoisines([]); setParfumVs({}); setParfumVsActive({}); setParfumColorH(null); setParfumColorS(null); setParfumColorPhase("hue"); setParfumDiffusion(null); setParfumNettete(null); setParfumRole(null); setParfumDosage(null); setParfumRecall(null); setDescOpen(false); setVocabOpen(false); setSyncMsg(""); setSyncing(false); setAlbumTitles([]); setAlbumIdx(0); setRating(50); };
+  const resetFlow = (nextStage = "entry") => { setStage(nextStage); setCurrent(null); setRunning(false); setElapsedMs(0); setPaused(false); setComment(""); setItemNameInput(""); setParfumChips([]); setParfumGrades({}); setParfumIntensity(null); setParfumHedo(null); setParfumCortege(null); setParfumVoisines([]); setParfumVs({}); setParfumVsActive({}); setParfumColorH(null); setParfumColorS(null); setParfumColorPhase("hue"); setParfumDiffusion(null); setParfumNettete(null); setParfumRole(null); setParfumDosage(null); setParfumRecall(null); setParfumMIdx(0); setParfumFIdx(0); setParfumVIdx(0); setDescOpen(false); setVocabOpen(false); setSyncMsg(""); setSyncing(false); setAlbumTitles([]); setAlbumIdx(0); setRating(50); };
   // Album de la semaine title-by-title appreciation (Maxence 16/07, item 4/5) —
   // isAlbumActivity gates the extra running-stage UI to that one activity only.
   const isAlbumActivity = !!(current && current.activity.id === "a_ecoute_album");
@@ -4017,6 +3941,77 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
     if (parfumColorPhase === "hue") setParfumColorH(Math.round(frac * 360));
     else setParfumColorS(Math.round(frac * 100));
   };
+  // mesures/facettes du parfum sur la ligne héro (16/08-k, Maxence : "pourquoi on
+  // n'utilise pas la ligne principale pour toutes ces mesures ! c'est stupide de
+  // dupliquer" — plus de PfLine séparée, voir ParfumNotePicker/ParfumVsPicker).
+  // Même ligne que ratingActive : drag = pose la valeur (magnitude centre-out
+  // 0-100), tap sans drag = submitComment(), le rôle habituel de la ligne sur
+  // "done" — inchangé. Navigation entre mesures/facettes UNIQUEMENT via les
+  // points sous la ligne (déjà là), plus de tap-pour-avancer sur la ligne
+  // elle-même (redondant). `vocabOpen` replié = la ligne redevient la ligne
+  // "done" normale, submit direct au tap, comme n'importe quelle autre activité.
+  const pfShowMesures = current?.action?.parfumRound === "direct";
+  const pfFull = current?.action?.parfumRound === "direct" || current?.action?.parfumRound === "final";
+  const pfMesures = (current && current.action.id === "x_pf_matiere" && current.action.itemId) ? [
+    { key: "intensité", val: parfumIntensity, set: setParfumIntensity },
+    { key: "agrément", val: parfumHedo, set: setParfumHedo },
+    ...(pfShowMesures ? [
+      { key: "diffusion", val: parfumDiffusion, set: setParfumDiffusion },
+      { key: "netteté", val: parfumNettete, set: setParfumNettete },
+    ] : []),
+    { key: "cortège", val: parfumCortege, set: setParfumCortege },
+    ...(pfFull ? [{ key: "dosage", val: parfumDosage, set: setParfumDosage }] : []),
+  ] : [];
+  const pfInMesures = vocabOpen && parfumMIdx < pfMesures.length;
+  const pfCurFIdx = Math.min(parfumFIdx, parfumChips.length - 1);
+  const pfCurChip = (!pfInMesures && vocabOpen && parfumChips.length) ? parfumChips[pfCurFIdx] : null;
+  const pfMeasureActive = stage === "done" && (pfInMesures || !!pfCurChip);
+  const pfMeasureVal = pfInMesures ? pfMesures[parfumMIdx].val : (pfCurChip ? (parfumGrades[pfCurChip] ?? null) : null);
+  const setPfMeasureFromPointer = (clientX) => {
+    const el = lineRef.current;
+    if (!el || clientX == null) return;
+    const rect = el.getBoundingClientRect();
+    const half = rect.width / 2 || 1;
+    const v = Math.round(Math.max(0, Math.min(1, Math.abs(clientX - (rect.left + half)) / half)) * 100);
+    if (pfInMesures) pfMesures[parfumMIdx].set(v);
+    else if (pfCurChip) setParfumGrades((g) => ({ ...g, [pfCurChip]: v }));
+  };
+  // vs (x_pf_direct_cmp) — même ligne, double jauge (voir le JSX de remplissage
+  // plus bas) : l'active se drag comme pfMeasureActive, l'autre matière reste
+  // visible en repères gris derrière, toujours (voir le fix du bug 16/08-j).
+  const pfVsPair = (current?.action?.id === "x_pf_direct_cmp" && current.action.pfamPair) ? current.action.pfamPair : null;
+  const pfVsRoundId = pfVsPair ? current.action.pfamRoundId : null;
+  const pfVsLastSess = (itemId) => {
+    const it = (current.activity.items || []).find((x) => x.id === itemId);
+    return ((it && it.sessions) || []).filter((s) => s.round === pfVsRoundId).slice(-1)[0];
+  };
+  const pfVsSessA = pfVsPair ? pfVsLastSess(pfVsPair[0].id) : null;
+  const pfVsSessB = pfVsPair ? pfVsLastSess(pfVsPair[1].id) : null;
+  const pfVsSeq = (pfVsSessA && pfVsSessB) ? [
+    ...(pfVsSessA.intensity != null || pfVsSessB.intensity != null ? [{ key: "__int" }] : []),
+    ...((pfVsSessA.chips || Object.keys(pfVsSessA.grades || {})).filter((f) => (pfVsSessB.chips || Object.keys(pfVsSessB.grades || {})).includes(f))).map((f) => ({ key: f })),
+  ] : [];
+  const pfVsCur = pfVsSeq.length ? pfVsSeq[Math.min(parfumVIdx, pfVsSeq.length - 1)] : null;
+  const pfVsSide = pfVsCur ? (parfumVsActive[pfVsCur.key] || "a") : "a";
+  const pfVsVal = (side) => {
+    if (!pfVsCur) return null;
+    return pfVsCur.key === "__int"
+      ? (parfumVs.intensity?.[side] ?? (side === "a" ? pfVsSessA.intensity : pfVsSessB.intensity) ?? null)
+      : (parfumVs.facets?.[pfVsCur.key]?.[side] ?? (side === "a" ? pfVsSessA.grades?.[pfVsCur.key] : pfVsSessB.grades?.[pfVsCur.key]) ?? null);
+  };
+  const pfVsHeroActive = stage === "done" && !!pfVsCur;
+  const setPfVsFromPointer = (clientX) => {
+    const el = lineRef.current;
+    if (!el || clientX == null || !pfVsCur) return;
+    const rect = el.getBoundingClientRect();
+    const half = rect.width / 2 || 1;
+    const v = Math.round(Math.max(0, Math.min(1, Math.abs(clientX - (rect.left + half)) / half)) * 100);
+    setParfumVs((st) => pfVsCur.key === "__int"
+      ? { ...st, intensity: { ...st.intensity, [pfVsSide]: v } }
+      : { ...st, facets: { ...st.facets, [pfVsCur.key]: { ...st.facets?.[pfVsCur.key], [pfVsSide]: v } } });
+  };
+  const pfHeroActive = pfMeasureActive || pfVsHeroActive;
+  const setPfHeroFromPointer = pfMeasureActive ? setPfMeasureFromPointer : setPfVsFromPointer;
   const onLineDown = (e) => {
     didHold.current = false;
     if (ratingActive) {
@@ -4032,6 +4027,20 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
         didHold.current = true; holdTimer.current = null;
         setHolding(false);
         finishFlow(""); // same discard as any other "done" skip — comment/rating dropped
+      }, effHold);
+      return;
+    }
+    if (pfHeroActive) {
+      // même geste que ratingActive juste au-dessus — hold = discard (finishFlow("")),
+      // drag = pose la valeur (voir onLineMove), tap sans drag = submitComment().
+      draggedRating.current = false;
+      holdStartX.current = e && e.clientX != null ? e.clientX : 0;
+      holdStart.current = Date.now();
+      setHolding(true);
+      holdTimer.current = setTimeout(() => {
+        didHold.current = true; holdTimer.current = null;
+        setHolding(false);
+        finishFlow("");
       }, effHold);
       return;
     }
@@ -4071,6 +4080,12 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
       if (holdTimer.current && draggedRating.current) cancelHold();
       return;
     }
+    if (pfHeroActive) {
+      if (!draggedRating.current && e && e.clientX != null && Math.abs(e.clientX - holdStartX.current) > 8) draggedRating.current = true;
+      if (draggedRating.current) setPfHeroFromPointer(e.clientX);
+      if (holdTimer.current && draggedRating.current) cancelHold();
+      return;
+    }
     if (!ratingActive) return;
     // 8px is the same travel threshold used below to drop the pending hold-to-skip —
     // below it, this still reads as a stationary press (a tap in progress), so the
@@ -4089,6 +4104,14 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
       // tap franc, sans déplacement : phase teinte → saturation, phase saturation → garder.
       if (parfumColorPhase === "hue") setParfumColorPhase("sat");
       else submitParfumColor(false);
+      return;
+    }
+    if (pfHeroActive) {
+      const held = didHold.current;
+      cancelHold();
+      if (held) { didHold.current = false; draggedRating.current = false; return; } // discard déjà parti
+      if (draggedRating.current) { draggedRating.current = false; return; } // valeur déjà posée en direct
+      submitComment(); // tap franc, sans déplacement — même lecture que ratingActive
       return;
     }
     if (ratingActive) {
@@ -5124,7 +5147,7 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                     className={(stage === "entry" || ambient) && !holding ? "breathe" : ""}
                     style={{ position: "relative", height: 44, width: "82%", margin: "0 auto",
                       display: "flex", justifyContent: "center", alignItems: "center",
-                      overflow: "visible", cursor: "pointer", touchAction: (ratingActive || colorActive) ? "none" : "manipulation", userSelect: "none", WebkitUserSelect: "none",
+                      overflow: "visible", cursor: "pointer", touchAction: (ratingActive || colorActive || pfHeroActive) ? "none" : "manipulation", userSelect: "none", WebkitUserSelect: "none",
                       // GPU-composited layer for the rotation (Maxence 24/07: a "staircase"
                       // artifact instead of a clean diagonal on the swaying line) — without
                       // this hint some renderers rasterize a rotated 2px-tall line on the CPU
@@ -5159,7 +5182,7 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                         transform: `translateY(-50%) scaleX(${holding ? 0 : 1})`, transformOrigin: "center", transition: trackTransition }} />
                     {/* centre fill — grows symmetrically from the middle, overshoots the track when you go beyond.
                         LINE_MODE "tilt" skips this entirely: the tilt on the wrapper above is the only signal. */}
-                    {!ratingActive && LINE_MODE === "fill" && frac > 0 && (
+                    {!ratingActive && !pfHeroActive && LINE_MODE === "fill" && frac > 0 && (
                       <div style={{ position: "relative", flexShrink: 0, height: over ? 8 : 6, width: `${widthPct}%`,
                         background: fillColor, opacity: over ? 1 : 0.9,
                         boxShadow: over ? `0 0 14px ${fillColor}` : "none",
@@ -5188,6 +5211,37 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                         transform: `scaleX(${holding ? 0 : 1})`, transformOrigin: "center",
                         transition: holding ? `transform ${effHold}ms linear` : "width .08s linear" }} />
                     )}
+                    {/* mesure/facette parfum (16/08-k) : même remplissage centre-out que
+                        ratingActive — une seule valeur, celle que mIdx/fIdx pointent. */}
+                    {pfMeasureActive && (
+                      <div style={{ position: "relative", flexShrink: 0, height: 6, width: `${((pfMeasureVal ?? 0) / 100) * 100}%`,
+                        background: fillColor, opacity: 0.9,
+                        transform: `scaleX(${holding ? 0 : 1})`, transformOrigin: "center",
+                        transition: holding ? `transform ${effHold}ms linear` : "width .08s linear" }} />
+                    )}
+                    {/* vs parfum : double jauge sur la même ligne — l'active pleine (comme
+                        ci-dessus), l'autre matière en deux repères fins PAR-DESSUS (jamais
+                        une seconde barre pleine, voir le bug 16/08-j : deux barres centre-out
+                        se recouvrent toujours, la plus large avale la plus courte). */}
+                    {pfVsHeroActive && (() => {
+                      const activeFrac = (pfVsVal(pfVsSide) ?? 0) / 100;
+                      const otherVal = pfVsVal(pfVsSide === "a" ? "b" : "a");
+                      const otherFrac = otherVal == null ? null : otherVal / 100;
+                      return (
+                        <>
+                          <div style={{ position: "relative", flexShrink: 0, height: 6, width: `${activeFrac * 100}%`,
+                            background: fillColor, opacity: 0.9,
+                            transform: `scaleX(${holding ? 0 : 1})`, transformOrigin: "center",
+                            transition: holding ? `transform ${effHold}ms linear` : "width .08s linear" }} />
+                          {otherFrac != null && (
+                            <>
+                              <div style={{ position: "absolute", left: `calc(50% - ${otherFrac * 50}%)`, top: "50%", width: 2, height: 14, background: C.mut, opacity: 0.75, transform: "translate(-50%, -50%)" }} />
+                              <div style={{ position: "absolute", left: `calc(50% + ${otherFrac * 50}%)`, top: "50%", width: 2, height: 14, background: C.mut, opacity: 0.75, transform: "translate(-50%, -50%)" }} />
+                            </>
+                          )}
+                        </>
+                      );
+                    })()}
                   </div>
                 );
               })()}
@@ -5465,7 +5519,7 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                             <div style={{ textAlign: "center", marginBottom: vocabOpen ? 0 : 8 }}>
                               <button className="link" onClick={() => setVocabOpen((o) => !o)}>{vocabOpen ? "cacher le vocabulaire" : "vocabulaire"}</button>
                             </div>
-                            {vocabOpen && <ParfumNotePicker chips={parfumChips} setChips={setParfumChips} grades={parfumGrades} setGrades={setParfumGrades} intensity={parfumIntensity} setIntensity={setParfumIntensity} hedo={parfumHedo} setHedo={setParfumHedo} cortege={parfumCortege} setCortege={setParfumCortege} items={current.activity.items} currentItemId={current.action.itemId} voisines={parfumVoisines} setVoisines={setParfumVoisines} diffusion={parfumDiffusion} setDiffusion={setParfumDiffusion} nettete={parfumNettete} setNettete={setParfumNettete} role={parfumRole} setRole={setParfumRole} dosage={parfumDosage} setDosage={setParfumDosage} showMesures={current.action.parfumRound === "direct"} full={current.action.parfumRound === "direct" || current.action.parfumRound === "final"} finalRound={current.action.parfumRound === "final"} />}
+                            {vocabOpen && <ParfumNotePicker chips={parfumChips} setChips={setParfumChips} grades={parfumGrades} setGrades={setParfumGrades} intensity={parfumIntensity} setIntensity={setParfumIntensity} hedo={parfumHedo} setHedo={setParfumHedo} cortege={parfumCortege} setCortege={setParfumCortege} items={current.activity.items} currentItemId={current.action.itemId} voisines={parfumVoisines} setVoisines={setParfumVoisines} diffusion={parfumDiffusion} setDiffusion={setParfumDiffusion} nettete={parfumNettete} setNettete={setParfumNettete} role={parfumRole} setRole={setParfumRole} dosage={parfumDosage} setDosage={setParfumDosage} showMesures={current.action.parfumRound === "direct"} full={current.action.parfumRound === "direct" || current.action.parfumRound === "final"} finalRound={current.action.parfumRound === "final"} mIdx={parfumMIdx} setMIdx={setParfumMIdx} fIdx={parfumFIdx} setFIdx={setParfumFIdx} />}
                           </div>
                         )}
                         {/* vs — comparaison répétée à chaque round (x_pf_direct_cmp, 16/08 v2) :
@@ -5484,8 +5538,9 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                           return (
                             <div style={{ marginBottom: 18 }}>
                               <ParfumVsPicker pair={current.action.pfamPair} roundLabel={roundDef ? roundDef.label : roundId}
-                                sessA={sessA} sessB={sessB} values={parfumVs} setValues={setParfumVs}
-                                active={parfumVsActive} setActive={setParfumVsActive} />
+                                sessA={sessA} sessB={sessB}
+                                active={parfumVsActive} setActive={setParfumVsActive}
+                                vIdx={parfumVIdx} setVIdx={setParfumVIdx} />
                             </div>
                           );
                         })()}
