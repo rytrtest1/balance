@@ -4013,6 +4013,35 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
   const submitFreeLog = async () => {
     const text = logText.trim();
     if (!text) return;
+    // debug (16/08, Maxence : "je veux tester le vs sans attendre le tirage naturel")
+    // — force un cycle parfum tout neuf, prêt immédiatement au round ouverture, paire
+    // choisie par le VRAI algo (pickItemsLRU, même sélection qu'en tirage normal, pas
+    // fabriquée à la main) pour que le test reste représentatif. prepAcked posé direct
+    // à true (saute la carte "prépare une mouillette", non pertinente pour tester
+    // l'écran) ; le reste (individuel × 2 puis vs, puis avancer aux checkpoints
+    // suivants) se joue ensuite normalement, y compris avec les boutons temps
+    // existants (+5m/+1h/...) — aucun autre raccourci que le démarrage du cycle.
+    // SIM uniquement (bac à sable), avant l'appel Claude qui suit — pas de clé requise.
+    if (SIM && text.toLowerCase() === "test vs parfum") {
+      const pf = activities.find((a) => a.id === "a_parfum_explo");
+      const picks = pf ? pickItemsLRU(pf, log, 2) : [];
+      if (pf && picks.length === 2) {
+        const pf3 = {
+          order: picks.map((it) => it.id), nums: picks.map((it) => it.num), names: picks.map((it) => it.text),
+          prepAcked: true, prepTs: realNow().getTime(),
+          round: 0, doneInRound: 0, guessed: false, guesses: [], revealed: false, cmpUpTo: 0,
+        };
+        const nextActivities = activities.map((a) => (a.id === "a_parfum_explo" ? { ...a, pf3 } : a));
+        setActivities(nextActivities);
+        const draw = pickAging(nextActivities, log, place, {});
+        if (draw) { proposedAtRef.current = Date.now(); setRunning(false); setElapsedMs(0); setCurrent(draw); setStage("proposal"); }
+        setMsg(draw ? "cycle test forcé" : "aucune matière disponible"); setTimeout(() => setMsg(""), 1800);
+      } else {
+        setMsg("a_parfum_explo introuvable ou pool insuffisant"); setTimeout(() => setMsg(""), 1800);
+      }
+      setLogText(""); setLogOpen(false);
+      return;
+    }
     const key = (await store.get("tlx_apiKey")) || "";
     if (!key) {
       // no key: can't classify freely, kept as a note rather than silently dropped
