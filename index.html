@@ -196,6 +196,39 @@ const isOneDayBeforeWorkStretch = (d = realNow()) => {
   const plus = (n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
   return !isWorkDayToday(d) && isWorkDayToday(plus(1));
 };
+// repère de progression (page/épisode/chapitre) extrait localement par motif, sans
+// appel API — pour que ça marche même sans clé ou quand l'appel Claude échoue (ex:
+// plus de crédit, Maxence 16/08: "ça doit pouvoir marcher sans le call api, genre
+// reconnaître le numéro de page ou l'épisode et le remplacer"). Couvre les formes
+// vues dans ses vraies notes : "page 105/833", "page 240", "p.22/117", "83/833" nu,
+// "épisode 6"/"ép.6"/"ep 6", "chapitre 3". Complémentaire à l'extraction Claude (qui
+// reste seule capable de item_done/observations) — pas un remplacement : les deux
+// s'appliquent, celle-ci d'abord et de façon garantie, Claude ensuite si elle répond.
+const extractLocalProgress = (text) => {
+  const t = (text || "").toLowerCase();
+  let m = t.match(/page\s*(\d+)\s*\/\s*(\d+)/) || t.match(/\bp\.?\s*(\d+)\s*\/\s*(\d+)/);
+  if (m) return `p.${m[1]}/${m[2]}`;
+  m = t.match(/\b(\d+)\s*\/\s*(\d+)\b/);
+  if (m) return `p.${m[1]}/${m[2]}`;
+  m = t.match(/page\s*(\d+)\b/) || t.match(/\bp\.?\s*(\d+)\b/);
+  if (m) return `p.${m[1]}`;
+  m = t.match(/(?:épisode|episode|ép\.?|ep\.?)\s*(\d+)\b/);
+  if (m) return `ép.${m[1]}`;
+  m = t.match(/chapitre\s*(\d+)\b/);
+  if (m) return `ch.${m[1]}`;
+  return null;
+};
+// affichage seulement (voir resolveSingleItem) — ép./chapitre sont des unités
+// finies : le repère utile à revoir est celui d'après, pas celui qu'on vient de
+// finir. La page reste un signet littéral (déjà la bonne page où reprendre).
+const nextProgressHint = (p) => {
+  if (!p) return p;
+  let m = p.match(/^ép\.(\d+)$/);
+  if (m) return `prochain ép.${parseInt(m[1], 10) + 1}`;
+  m = p.match(/^ch\.(\d+)$/);
+  if (m) return `prochain ch.${parseInt(m[1], 10) + 1}`;
+  return p;
+};
 const isDone = (e) => e.type !== "note";
 // a real completion, as opposed to a free-text "note" entry (submitFreeLog) — used
 // wherever "clics" are counted (rapport gate, sandbox banners) so jotting a note
@@ -338,7 +371,13 @@ function resolveSingleItem(a, action) {
   // progress (page/épisode/chapitre…) is tracked separately from the title itself
   // (Maxence 02/08: a page number typed into the title once just goes stale — see
   // coachViaClaude, which is what keeps `progress` current from session comments).
-  const progressSuffix = current.progress ? ` (${current.progress})` : "";
+  // Display-only nuance (Maxence 16/08: "si on dit épisode x ça propose bien le
+  // x+1 ?") — the STORED value stays literal (what was actually said, "ép.6" =
+  // episode just done — coachViaClaude's Claude-facing context still reads this raw
+  // value, unchanged), but épisode/chapitre are discrete finished units where the
+  // useful next thing to see is the one after, unlike a page number (a bookmark,
+  // already the right place to resume — no +1 applied there).
+  const progressSuffix = current.progress ? ` (${nextProgressHint(current.progress)})` : "";
   return { ...action, text: `${action.text} — « ${current.text} »${progressSuffix}`, itemId: current.id, fresh: false };
 }
 
@@ -2635,7 +2674,11 @@ function Throughline() {
     const spread = domainBalance(activities, log); // frozen for this reveal, not recomputed per frame
     const ampDeg = spread * 6; // the pendulum's max — today's actual imbalance, not an arbitrary constant
     const halfPeriodMs = (7 - spread * 3.5) * 500; // one bascule's duration — same natural pace as the old sway
-    const clicksLeft = Math.max(0, RAPPORT_MIN_CLICS - log.filter((e) => e.date === todayKey() && isClick(e)).length);
+    // pure animation pacing, decoupled from the rapport gate itself (which switched to
+    // minutes spent, 13/08) — this reveal's rhythm was tuned around a click count, not
+    // a duration, so it keeps its own constant here rather than borrowing the gate's.
+    const REVEAL_CLICKS_BASE = 10;
+    const clicksLeft = Math.max(0, REVEAL_CLICKS_BASE - log.filter((e) => e.date === todayKey() && isClick(e)).length);
     const totalMs = clicksLeft * halfPeriodMs;
     const tick = (now) => {
       const elapsed = now - startedAt;
@@ -3119,11 +3162,14 @@ function Throughline() {
     const t = e.changedTouches[0]; const dx = t.clientX - s.x, dy = t.clientY - s.y;
     if (Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy) * 1.5) advanceAlbumTitle(dx < 0 ? 1 : -1);
   };
-  // rapport: a day-close screen, gated on the day's click count. Used to be
+  // rapport: a day-close screen, gated on time actually spent today. Used to be
   // unlocked only by typing "rapport" by hand (14/07) — replaced (Maxence 19/07)
   // by a button that appears on its own once the threshold clears, see the entry
   // screen's footer button below. finishFlow no longer inspects the comment text.
-  const RAPPORT_MIN_CLICS = 10;
+  // Gate switched from a click count (10) to minutes spent (Maxence 13/08: "oui
+  // rapport seulement après 2h d'activité" — a handful of short activities used to
+  // unlock it just as fast as a couple of long ones, which didn't feel earned).
+  const RAPPORT_MIN_MINUTES = 120;
   const finishFlow = (text) => {
     // showDoneHint was only ever re-checked against storage at app launch — it
     // stayed true for every activity within one continuous session, so "ton mot
@@ -3224,8 +3270,11 @@ Détermine où en est la pièce APRÈS cette session. Par défaut new_stage = in
     } catch (err) {
       setSyncMsg("lecture impossible (" + (err.message || "erreur") + ") — commentaire gardé");
     } finally {
+      // finishFlow() already ran synchronously in submitComment right after this call
+      // was fired (13/08: arrière-plan) — just clear the toast, don't reset the flow
+      // again here (the app has likely already moved to a different activity by now).
       setSyncing(false);
-      setTimeout(() => { setSyncMsg(""); finishFlow(text); }, 2400);
+      setTimeout(() => setSyncMsg(""), 2400);
     }
   };
 
@@ -3304,6 +3353,20 @@ Détermine où en est la pièce APRÈS ce qui est décrit. Par défaut new_stage
     const singleItem = !!action.singleItem;
     const label = action.itemLabel || "titre";
     const curItem = singleItem && action.itemId ? (act.items || []).find((it) => it.id === action.itemId) : null;
+    // extraction locale, garantie, avant même l'appel API (16/08 : plus de dépendance
+    // au réseau/crédit pour ce cas courant — voir extractLocalProgress). Claude peut
+    // encore raffiner/écraser cette valeur plus bas s'il répond, mais elle est déjà
+    // posée que l'appel réussisse ou non.
+    if (curItem) {
+      const localProgress = extractLocalProgress(text);
+      if (localProgress) {
+        const aid0 = act.id;
+        setActivities((arr) => arr.map((a) => (a.id !== aid0 ? a : {
+          ...a,
+          items: (a.items || []).map((it) => (it.id === curItem.id ? { ...it, progress: localProgress } : it)),
+        })));
+      }
+    }
     // progress (page/épisode/chapitre…) lives in its own field, never folded into
     // `text` itself — a page number typed straight into the title just goes stale
     // as it's re-read later (Maxence 02/08, caught on the parfum livre item).
@@ -3360,8 +3423,11 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
     } catch (err) {
       setSyncMsg("lecture impossible (" + (err.message || "erreur") + ") — commentaire gardé");
     } finally {
+      // finishFlow() already ran synchronously in submitComment right after this call
+      // was fired (13/08: arrière-plan) — just clear the toast, don't reset the flow
+      // again here (the app has likely already moved to a different activity by now).
       setSyncing(false);
-      setTimeout(() => { setSyncMsg(""); finishFlow(text); }, 2400);
+      setTimeout(() => setSyncMsg(""), 2400);
     }
   };
 
@@ -3505,21 +3571,45 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
     // (rating+status, or just log.note): no Claude round-trip for it (24/07 — removed
     // recoNoteViaClaude, which only ever distilled a comment that was already fully
     // captured in log.note verbatim, and was never read back anywhere in the app).
+    // arrière-plan (Maxence 13/08: "pouvoir écrire un commentaire en arrière-plan sans
+    // attendre son traitement pour passer à l'activité suivante — comportement à
+    // généraliser"). finishFlow() now fires right away in every branch below instead
+    // of at the end of a setTimeout — advanceViaClaude/coachViaClaude both capture
+    // current.activity/current.action synchronously on their first line, before their
+    // first await, so moving on immediately is safe: the API round-trip keeps updating
+    // observations/items in the background regardless of what's on screen by then.
     const wantsClaude = !!text && (kind === "pipeline" || kind === "practice");
     if (wantsClaude) {
       const key = (await store.get("tlx_apiKey")) || "";
-      if (key) { kind === "pipeline" ? advanceViaClaude(key, text) : coachViaClaude(key, text, act, action); return; }
-      setSyncMsg(kind === "pipeline" ? "pas de clé API — commentaire gardé, pièce/observations non mises à jour" : "pas de clé API — commentaire gardé, observations non mises à jour");
-      setTimeout(() => { setSyncMsg(""); finishFlow(text); }, 2200);
+      if (key) {
+        kind === "pipeline" ? advanceViaClaude(key, text) : coachViaClaude(key, text, act, action);
+      } else {
+        // sans clé, coachViaClaude ne tourne jamais — l'extraction locale du repère
+        // de progression (16/08) doit donc aussi s'appliquer ici, pas seulement dans
+        // coachViaClaude, sinon "sans call API" resterait vrai pour tout sauf ce cas.
+        if (action.singleItem && action.itemId) {
+          const localProgress = extractLocalProgress(text);
+          if (localProgress) {
+            const aid0 = act.id, itemId0 = action.itemId;
+            setActivities((arr) => arr.map((a) => (a.id !== aid0 ? a : {
+              ...a,
+              items: (a.items || []).map((it) => (it.id === itemId0 ? { ...it, progress: localProgress } : it)),
+            })));
+          }
+        }
+        setSyncMsg(kind === "pipeline" ? "pas de clé API — commentaire gardé, pièce/observations non mises à jour" : "pas de clé API — commentaire gardé, observations non mises à jour");
+        setTimeout(() => setSyncMsg(""), 2200);
+      }
+      finishFlow(text);
       return;
     }
     // task, or any recommandeur draw: no Claude round-trip, but still show the same
     // brief loading chip as pipeline/practice so submitting a comment reads
-    // identically everywhere (Maxence 16/07 — écoute felt broken without it).
+    // identically everywhere (Maxence 16/07 — écoute felt broken without it) — just
+    // no longer gating the transition on it.
     if (text) {
       setSyncing(true); setSyncMsg("commentaire enregistré…");
-      setTimeout(() => { setSyncing(false); setSyncMsg(""); finishFlow(text); }, 700);
-      return;
+      setTimeout(() => { setSyncing(false); setSyncMsg(""); }, 700);
     }
     finishFlow(text);
   };
@@ -4246,6 +4336,58 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
       setLogText(""); setLogOpen(false);
       return;
     }
+    // lancer une activité depuis le log, en tapant son nom (Maxence 16/08 : "à bien
+    // vérifier pour chaque activité si ça fonctionne, et quel mot le plus simple
+    // pour être sûr que ça marche" — puis 16/08 confirmé : "piano pièce" sans le
+    // tiret, ou juste "erasure", doivent marcher aussi). Deux niveaux, tous les
+    // deux déterministes, AUCUN appel Claude — marche sans clé API :
+    //   1. nom complet normalisé (casse, espaces, tiret — ou – traité comme un
+    //      espace) — couvre "piano pièce" pour "piano — pièce".
+    //   2. sinon, préfixe du nom complet normalisé (≥3 caractères, coupé sur un
+    //      espace réel, jamais en plein milieu d'un mot) — couvre "erasure" pour
+    //      "erasure poetry" — MAIS seulement si un SEUL nom du catalogue commence
+    //      ainsi (ex: "parfum" est ambigu entre les deux activités parfum, donc ne
+    //      matche rien ici et retombe plus bas). Jamais l'inverse (le nom qui
+    //      préfixerait un texte plus long tapé) — c'est ce qui garde "fait podcast"
+    //      ou toute description d'une session déjà faite sur le chemin normal plus
+    //      bas (intent "activity" via Claude), puisqu'aucun nom du catalogue n'est
+    //      un texte plus long que ce qu'on tape pour juste lancer quelque chose.
+    if (stage === "entry") {
+      const normName = (s) => s.toLowerCase().trim().replace(/[—–-]/g, " ").replace(/\s+/g, " ").trim();
+      const typedNorm = normName(text);
+      let exact = activities.find((a) => normName(a.name) === typedNorm);
+      if (!exact && typedNorm.length >= 3) {
+        const prefixed = activities.filter((a) => {
+          const n = normName(a.name);
+          return n.length > typedNorm.length && n.startsWith(typedNorm) && n[typedNorm.length] === " ";
+        });
+        if (prefixed.length === 1) exact = prefixed[0];
+      }
+      if (exact) {
+        const p = resolveDraw({ activity: exact, action: null }, log);
+        if (p) {
+          proposedAtRef.current = Date.now();
+          setRunning(false); setElapsedMs(0);
+          setCurrent(p); setStage("proposal");
+          if (exact.kind === "recommandeur" && exact.note) {
+            (async () => {
+              const recoKey = (await store.get("tlx_apiKey")) || "";
+              if (!recoKey) return;
+              try {
+                const { title, desc } = await generateReco(recoKey, exact, p.action, log);
+                setCurrent((c) => c && c.activity.id === exact.id ? { ...c, action: { ...c.action, baseText: c.action.baseText || c.action.text, text: title, desc } } : c);
+              } catch (e) {}
+            })();
+          }
+          setLogText(""); setLogOpen(false);
+          setMsg(`${exact.name} proposé`); setTimeout(() => setMsg(""), 1800);
+          return;
+        }
+        setMsg(`${exact.name} : rien à tirer (pool vide ?)`); setTimeout(() => setMsg(""), 2200);
+        setLogText(""); setLogOpen(false);
+        return;
+      }
+    }
     const key = (await store.get("tlx_apiKey")) || "";
     if (!key) {
       // no key: can't classify freely, kept as a note rather than silently dropped
@@ -4314,7 +4456,17 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
           setMsg(`${ta.name} proposé`);
           return;
         }
-        // no activity match / nothing resolvable — fall through and just keep it as a note below
+        // no activity match / nothing resolvable — falls through and gets kept as a
+        // note below, but that used to look IDENTICAL to a normal successful "noté"
+        // (Maxence 16/08: "vérifier pour chaque activité si ça fonctionne") — a
+        // failed "start" (Claude picked a wrong/unresolvable activity_id) needs to
+        // read differently from a genuine note, or there's no way to notice it silently
+        // didn't launch anything. Distinguishing message kept broad since the exact
+        // failure (bad id vs empty pool) isn't worth surfacing in the UI.
+        setLog((L) => [...L, { id: uid(), date: todayKey(), ts: realNow().getTime(), type: "note", note: out.note || text }]);
+        setLogText(""); setLogOpen(false);
+        setMsg(`n'a pas pu démarrer "${ta ? ta.name : out.activity_id}" — noté à la place`);
+        return;
       }
       const a = out.intent === "activity" ? activities.find((x) => x.id === out.activity_id) : null;
       if (a) {
@@ -5308,7 +5460,7 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                     line, so it reads as its own footer rather than part of the entry
                     hint above it. Absent entirely below the click threshold — no
                     disabled/greyed state, matches "ne pas ajouter par défaut". */}
-                {stage === "entry" && log.filter((e) => e.date === todayKey() && isClick(e)).length >= RAPPORT_MIN_CLICS && (
+                {stage === "entry" && log.filter((e) => e.date === todayKey() && isClick(e)).reduce((s, e) => s + (e.min || 0), 0) >= RAPPORT_MIN_MINUTES && (
                   <div className="fade" style={{ position: "fixed", left: 0, right: 0, bottom: 28, textAlign: "center" }}>
                     <button className="link" onClick={() => setStage("report")}>rapport</button>
                   </div>
@@ -5460,7 +5612,7 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                     <div style={{ position: "relative", maxWidth: 320, margin: current && current.activity.id === "a_parfum_explo" ? "8px auto 0" : "54px auto 0" }}>
                       <input className="in" value={comment}
                         autoComplete="off" name="comment-running"
-                        onChange={(e) => setComment(e.target.value)}
+                        onChange={(e) => setComment(e.target.value.toLowerCase())}
                         onKeyDown={(e) => { if (e.key === "Enter") submitRunningComment(); }}
                         style={{ fontFamily: "var(--mono)", fontSize: 13, textAlign: "center", display: "block", color: C.text }} />
                       {!comment && (
@@ -5516,7 +5668,7 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                           <div style={{ position: "relative", maxWidth: 360, margin: "0 auto" }}>
                             <input className="in" value={comment}
                               autoComplete="off" name="comment-done"
-                              onChange={(e) => setComment(e.target.value)}
+                              onChange={(e) => setComment(e.target.value.toLowerCase())}
                               style={{ fontFamily: "var(--mono)", fontSize: 13, textAlign: "center", display: "block", color: C.text }} />
                             {!comment && (
                               <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: COMMENT_HINT_MODE === "cursor" ? "flex-start" : "center", justifyContent: "center", gap: 6, pointerEvents: "none", fontFamily: "var(--mono)", fontSize: 13, color: C.faint }}>
@@ -5805,7 +5957,7 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
             <div style={{ marginTop: 18, maxWidth: 320, marginLeft: "auto", marginRight: "auto" }}>
               <input className="in" value={logText} placeholder="qu'as-tu fait ?"
                 autoComplete="off" name="freelog"
-                onChange={(e) => setLogText(e.target.value)}
+                onChange={(e) => setLogText(e.target.value.toLowerCase())}
                 onKeyDown={(e) => { if (e.key === "Enter") submitFreeLog(); }}
                 disabled={logBusy}
                 style={{ fontSize: 14, textAlign: "center", borderBottom: `1px solid ${C.line}`, paddingBottom: 8, fontStyle: logText ? "normal" : "italic", color: logText ? C.text : C.faint }} />
