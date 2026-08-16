@@ -458,18 +458,17 @@ const PARFUM_WEEK_EPOCH_DAYS = Math.floor(Date.UTC(2024, 0, 1) / 86400000); // l
 // pickItemsLRU, jamais-sentie (lastSeen=-1) prime TOUJOURS sur déjà-sentie, donc
 // aucune répétition n'est possible tant qu'une matière de la famille n'a pas encore
 // été sentie — "nouveau avant répétition" est déjà garanti par ce tri, pas besoin
-// d'un mécanisme séparé ici. Compte sur les ESSENTIELLES de la famille
-// (PARFUM_ESSENTIEL, 15/08-d), pas sur l'effectif complet — le tirage lui-même se
-// limite aux essentielles (voir pickItemsLRU), la durée de séjour doit suivre la
-// même base. Repli sur l'effectif complet si une famille n'a aucune essentielle
-// marquée (ne devrait pas arriver, chaque famille en a au moins une). Décompte
-// dynamique sur PARFUM_FAMILLE_REF (pas un chiffre en dur) : s'auto-ajuste si le
-// catalogue change un jour.
+// d'un mécanisme séparé ici. Décompte dynamique sur PARFUM_FAMILLE_REF (pas un
+// chiffre en dur) : s'auto-ajuste si le catalogue change un jour. Compte sur
+// l'effectif COMPLET de la famille (15/08-f, Maxence : la réduction aux essentielles
+// (PARFUM_ESSENTIEL, 15/08-d) ne faisait gagner que 4 semaines sur 14 au total — 11
+// familles restaient à 1 semaine dans les deux cas, seules floral/boisé/balsamique
+// changeaient — pas assez pour justifier de sacrifier la couverture. `PARFUM_ESSENTIEL`
+// reste défini et à jour, gardé de côté comme `PARFUM_BLIND`, au cas où il revienne
+// dessus plus tard sur une famille précise plutôt que globalement.
 function parfumFamilyWeeks(famille) {
   const inFam = Object.keys(PARFUM_FAMILLE_REF).filter((num) => PARFUM_FAMILLE_REF[num] === famille);
-  const essentiels = inFam.filter((num) => PARFUM_ESSENTIEL.has(Number(num)));
-  const n = essentiels.length || inFam.length;
-  const passDays = Math.ceil(n / 2);
+  const passDays = Math.ceil(inFam.length / 2);
   return Math.max(1, Math.ceil(passDays / 7));
 }
 // recalculé à chaque appel plutôt que mis en cache — 14 familles, coût négligeable,
@@ -504,13 +503,9 @@ function pickItemsLRU(a, log, n) {
   // une préférence d'apprentissage, pas un verrou.
   const famille = parfumWeekFamille();
   const inFamille = all.filter((it) => dominantFamille(it) === famille);
-  const famPool = inFamille.length >= n ? inFamille : all;
-  // matières essentielles (15/08-d) — même repli en cascade que la famille juste
-  // au-dessus : si le sous-pool essentiel de la famille n'a plus assez de "doing"
-  // (déjà toutes passées "done", ou pas encore tagué essentiel), on remonte au pool
-  // famille entier plutôt que de bloquer. Jamais de verrou dur sur un forçage.
-  const essentielPool = famPool.filter((it) => it.num && PARFUM_ESSENTIEL.has(it.num));
-  const doing = essentielPool.length >= n ? essentielPool : famPool;
+  // repli sur PARFUM_ESSENTIEL retiré (15/08-f, voir parfumFamilyWeeks) — le tirage
+  // couvre à nouveau la famille entière, pas que le sous-ensemble essentiel.
+  const doing = inFamille.length >= n ? inFamille : all;
   const today = todayKey();
   const echues = doing.filter((it) => it.due && it.due <= today).sort((x, y) => (x.due < y.due ? -1 : x.due > y.due ? 1 : 0));
   const picks = echues.slice(0, PARFUM_REVIEW_SLOTS);
