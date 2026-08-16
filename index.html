@@ -996,24 +996,35 @@ function VoisinePicker({ items, currentItemId, voisines, setVoisines }) {
 // tallies des deux matières) — pas les 9 facettes de la famille entière, la plupart
 // sans rapport avec ce qu'on vient de sentir.
 // LA ligne — l'unique slider du protocole parfum (16/08-i, Maxence : "tout slider
-// doit être COMME LA LIGNE sur le modèle du slider pour noter les titres du jour").
-// Même langage visuel que la mini-ligne album : piste 1px, remplissage 2px bone
-// depuis le centre (magnitude), pas de pastille, pas de chiffre — la position du
-// remplissage se lit toute seule (même décision que le 20/07 sur la ligne album).
-// Tap (sans vrai déplacement, seuil 8px comme partout) = onTap (mesure/facette
-// suivante) ; drag = pose la valeur en continu, arrondie en score entier seulement
-// au calcul — jamais de cran d'arrêt sous le doigt. value null = jamais touchée :
-// la NEUTRALITÉ reste toujours possible (Maxence : "si on ne touche pas au slider
-// c'est pour dire la présence sans se prononcer sur l'intensité").
-// `other` = seconde jauge grisée derrière (vs : les deux matières sur LA MÊME
-// ligne, l'active nette, l'autre légèrement grisée). Le libellé de ce qu'une ligne
-// mesure vit en légende AU-DESSUS (voir ParfumVsPicker/ParfumNotePicker), pas posé
-// sur le trait — un texte superposé À LA ligne (essayé puis retiré 16/08-i,
-// Maxence : "on dirait juste qu'il est barré") lit comme une rature, pas une
-// étiquette. mode="position" (teinte/saturation) : lecture gauche→droite + piste
-// `track` (dégradé CSS) + marqueur vertical au lieu du remplissage centre-out —
-// le centre n'a aucun sens sur une roue chromatique.
-function PfLine({ value, onChange, onTap, other, label, max = 10, mode = "centre", track }) {
+// doit être COMME LA LIGNE sur le modèle du slider pour noter les titres du jour" ;
+// repris 16/08-j : "le slider est toujours à cran... on doit garder exactement le
+// slider fluide utilisé pour titre du jour... de la même taille que la ligne
+// centrale toujours"). Donc : même taille que la ligne héro (44 de haut, 82% de
+// large, pas 320px de carte), même piste/remplissage (2px/6px bone), et surtout
+// même RÉSOLUTION — max passe de 10 à 100 par défaut, comme la note d'album/la
+// note recommandeur, seule façon d'obtenir un drag qui ne "saute" jamais d'un cran
+// à l'autre (un score 0-10 n'a que 11 arrêts possibles quelle que soit la finesse
+// du calcul ; rien ailleurs dans l'app ne suppose une échelle 0-10 pour ces
+// valeurs, vérifié avant le changement). Tap (sans vrai déplacement, seuil 8px
+// comme partout) = onTap (mesure/facette suivante) ; drag = pose la valeur en
+// continu. value null = jamais touchée : la NEUTRALITÉ reste toujours possible
+// (Maxence : "si on ne touche pas au slider c'est pour dire la présence sans se
+// prononcer sur l'intensité"). Le libellé de ce qu'une ligne mesure n'est plus un
+// prop ici (essayé posé AU-DESSUS puis superposé À la ligne, retiré 16/08-i,
+// Maxence : "on dirait juste qu'il est barré") — chaque appelant l'affiche
+// lui-même en légende sous les points de navigation (voir ParfumNotePicker).
+// `other` = seconde valeur à comparer (vs : les deux matières sur LA MÊME ligne).
+// Bug trouvé 16/08-j (Maxence : "ça marche seulement quand la première est
+// inférieure à la seconde et inversement") : les deux anciennes barres centre-out
+// se recouvraient TOUJOURS (les deux centrées sur le milieu, la plus large avale
+// forcément la plus courte) — un ordre de dessin ne peut jamais les rendre
+// visibles ensemble. Remplacé par deux repères fins (ticks) à la position de
+// `other`, posés PAR-DESSUS le remplissage plein de la valeur active — visibles
+// en tout temps, quel que soit lequel des deux est le plus grand.
+// mode="position" (teinte/saturation) : lecture gauche→droite + piste `track`
+// (dégradé CSS) + marqueur vertical au lieu du remplissage centre-out — le centre
+// n'a aucun sens sur une roue chromatique.
+function PfLine({ value, onChange, onTap, other, max = 100, mode = "centre", track }) {
   const ref = useRef(null);
   const dragged = useRef(false);
   const downX = useRef(0);
@@ -1044,13 +1055,16 @@ function PfLine({ value, onChange, onTap, other, label, max = 10, mode = "centre
   return (
     <div ref={ref} onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp} onPointerCancel={onUp}
       onContextMenu={(e) => e.preventDefault()}
-      style={{ position: "relative", height: 26, cursor: "pointer", touchAction: "none", userSelect: "none", WebkitUserSelect: "none" }}>
-      <div style={{ position: "absolute", left: 0, right: 0, top: "50%", height: track ? 3 : 1, background: track || C.soft, transform: "translateY(-50%)" }} />
-      {mode === "centre" && otherFrac > 0 && (
-        <div style={{ position: "absolute", left: "50%", top: "50%", height: 2, width: `${otherFrac * 100}%`, background: C.mut, opacity: 0.55, transform: "translate(-50%, -50%)" }} />
-      )}
+      style={{ position: "relative", height: 44, width: "82%", margin: "0 auto", cursor: "pointer", touchAction: "none", userSelect: "none", WebkitUserSelect: "none" }}>
+      <div style={{ position: "absolute", left: 0, right: 0, top: "50%", height: track ? 3 : 2, background: track || C.soft, transform: "translateY(-50%)" }} />
       {mode === "centre" && frac > 0 && (
-        <div style={{ position: "absolute", left: "50%", top: "50%", height: 2, width: `${frac * 100}%`, background: C.bone, opacity: 0.9, transform: "translate(-50%, -50%)" }} />
+        <div style={{ position: "absolute", left: "50%", top: "50%", height: 6, width: `${frac * 100}%`, background: C.bone, opacity: 0.9, transform: "translate(-50%, -50%)" }} />
+      )}
+      {mode === "centre" && other != null && (
+        <>
+          <div style={{ position: "absolute", left: `calc(50% - ${otherFrac * 50}%)`, top: "50%", width: 2, height: 14, background: C.mut, opacity: 0.75, transform: "translate(-50%, -50%)" }} />
+          <div style={{ position: "absolute", left: `calc(50% + ${otherFrac * 50}%)`, top: "50%", width: 2, height: 14, background: C.mut, opacity: 0.75, transform: "translate(-50%, -50%)" }} />
+        </>
       )}
       {mode === "position" && value != null && (
         <div style={{ position: "absolute", left: `calc(${frac * 100}% - 1px)`, top: 4, width: 2, height: 18, background: C.text }} />
@@ -1098,8 +1112,10 @@ function ParfumVsPicker({ pair, roundLabel, sessA, sessB, values, setValues, act
     color: side === s ? C.text : C.faint, fontWeight: side === s ? 600 : 400,
   });
   return (
-    <div style={{ marginTop: 4, maxWidth: 320, marginLeft: "auto", marginRight: "auto", textAlign: "center" }}>
-      <div className="mono" style={{ fontSize: 11, color: C.faint, marginBottom: 14, letterSpacing: ".02em" }}>
+    // pas de maxWidth sur ce wrapper (16/08-j — même raison que ParfumNotePicker :
+    // PfLine doit rester 82% de la vraie largeur, pas 82% d'une carte à 320px).
+    <div style={{ marginTop: 4, textAlign: "center" }}>
+      <div className="mono" style={{ fontSize: 11, color: C.faint, marginBottom: 14, letterSpacing: ".02em", maxWidth: 320, marginLeft: "auto", marginRight: "auto" }}>
         {roundLabel} — #{a.num} {a.name} <span style={{ color: C.mut }}>vs</span> #{b.num} {b.name}
       </div>
       <button className="link" onClick={() => setActive((st) => ({ ...st, [cur.key]: "a" }))} style={nameStyle("a")}>{a.name}</button>
@@ -1176,42 +1192,79 @@ function ParfumNotePicker({ chips, setChips, grades, setGrades, intensity, setIn
     setGrades((g) => { if (!(w in g)) return g; const { [w]: _drop, ...rest } = g; return rest; });
     setFIdx((f) => Math.max(0, i >= 0 && f >= i ? f - 1 : f));
   };
-  const selectChip = (w) => {
+  // famille — la longue-pression choisit la famille ELLE-MÊME comme facette, un
+  // toggle immédiat (add/remove) : elle ne vit jamais dans la grille qu'on retape
+  // au quotidien, donc pas besoin du geste hold/tap séparé ci-dessous.
+  const toggleChip = (w) => {
     if (chips.includes(w)) { removeChip(w); return; }
     setChips((arr) => [...arr, w]);
-    setFIdx(chips.length); // index du nouveau après append — son slider remplace le visible
+    setFIdx(chips.length);
   };
   const famDown = (f) => {
     longFired.current = false;
-    longTimer.current = setTimeout(() => { longFired.current = true; selectChip(f.key); }, 450);
+    longTimer.current = setTimeout(() => { longFired.current = true; toggleChip(f.key); }, 450);
   };
   const famUp = (f) => {
     clearTimeout(longTimer.current);
     if (!longFired.current) setOpen((o) => (o === f.key ? null : f.key));
   };
+  // sous-facette — 16/08-j (Maxence : "on ne peut pas revenir sur une déjà
+  // sélectionnée pour modifier l'intensité, il faut installer le système de hold
+  // pour désélectionner seulement"). Retaper une facette DÉJÀ choisie ramenait son
+  // slider — impossible d'y revenir pour ajuster. Maintenant : tap sur une facette
+  // choisie = juste la refocaliser (fIdx), retirer devient un hold, même seuil
+  // 450ms que les familles.
+  const subDown = (w) => {
+    longFired.current = false;
+    longTimer.current = setTimeout(() => { longFired.current = true; removeChip(w); }, 450);
+  };
+  const subUp = (w) => {
+    clearTimeout(longTimer.current);
+    if (longFired.current) return;
+    if (chips.includes(w)) { setFIdx(chips.indexOf(w)); return; }
+    setChips((arr) => [...arr, w]);
+    setFIdx(chips.length);
+  };
   const famLit = (f) => chips.includes(f.key) || (f.facets || []).some((w) => chips.includes(w));
-  const curChip = chips.length ? chips[Math.min(fIdx, chips.length - 1)] : null;
+  const curFIdx = Math.min(fIdx, chips.length - 1);
+  const curChip = chips.length ? chips[curFIdx] : null;
   const row = { display: "flex", flexWrap: "wrap", justifyContent: "center", gap: 6, maxWidth: 320, margin: "0 auto" };
+  // légende — sous les points de nav, sous la ligne (16/08-j, Maxence : "le texte
+  // au centre de la ligne c'est vraiment pas beau... en dessous de la ligne, en
+  // dessous des points de navigation me semble bien") ; plus jamais posée sur/dans
+  // la ligne elle-même (voir PfLine).
+  const caption = (text) => (
+    <div className="mono" style={{ fontSize: 9, letterSpacing: ".15em", color: C.faint, textTransform: "uppercase", textAlign: "center", marginTop: 8 }}>{text}</div>
+  );
+  const dots = (n, i, onPick) => n > 1 && (
+    <div style={{ display: "flex", justifyContent: "center", gap: 6, marginTop: 10 }}>
+      {Array.from({ length: n }).map((_, k) => (
+        <button key={k} className="dot" onClick={() => onPick(k)}
+          style={{ width: 4, height: 4, background: k === i ? C.bone : C.line, border: "none", cursor: "pointer" }} />
+      ))}
+    </div>
+  );
   return (
     <div>
       {inMesures ? (
-        <div style={{ maxWidth: 320, margin: "18px auto 0" }}>
-          <PfLine label={mesures[mIdx].key} value={mesures[mIdx].val} onChange={mesures[mIdx].set}
+        // pas de maxWidth ici (16/08-j, Maxence : "de la même taille que la ligne
+        // centrale toujours") — PfLine est 82% de SON parent ; le capper à 320px
+        // la rétrécissait par rapport à la vraie ligne héro (82% du viewport).
+        <div style={{ margin: "18px auto 0" }}>
+          <PfLine value={mesures[mIdx].val} onChange={mesures[mIdx].set}
             onTap={() => setMIdx((i) => i + 1)} />
-          <div style={{ display: "flex", justifyContent: "center", gap: 6, marginTop: 10 }}>
-            {mesures.map((m, i) => (
-              <button key={m.key} className="dot" onClick={() => setMIdx(i)}
-                style={{ width: 4, height: 4, background: i === mIdx ? C.bone : C.line, border: "none", cursor: "pointer" }} />
-            ))}
-          </div>
+          {dots(mesures.length, mIdx, setMIdx)}
+          {caption(mesures[mIdx].key)}
         </div>
       ) : (
         <>
           {curChip && (
-            <div style={{ maxWidth: 320, margin: "18px auto 0" }}>
-              <PfLine label={curChip} value={grades[curChip] ?? null}
+            <div style={{ margin: "18px auto 0" }}>
+              <PfLine value={grades[curChip] ?? null}
                 onChange={(v) => setGrades((g) => ({ ...g, [curChip]: v }))}
                 onTap={() => setFIdx((i) => (i + 1) % chips.length)} />
+              {dots(chips.length, curFIdx, setFIdx)}
+              {caption(curChip)}
             </div>
           )}
           <div style={{ textAlign: "center", marginTop: curChip ? 10 : 18 }}>
@@ -1240,7 +1293,10 @@ function ParfumNotePicker({ chips, setChips, grades, setGrades, intensity, setIn
               {open && (
                 <div style={{ ...row, marginTop: 8 }}>
                   {(familles.find((f) => f.key === open) || { facets: [] }).facets.map((w) => (
-                    <button key={w} className={`chip ${chips.includes(w) ? "on" : ""}`} onClick={() => selectChip(w)}
+                    <button key={w} className={`chip ${chips.includes(w) ? "on" : ""}`}
+                      onPointerDown={() => subDown(w)} onPointerUp={() => subUp(w)}
+                      onPointerCancel={() => clearTimeout(longTimer.current)}
+                      onContextMenu={(e) => e.preventDefault()}
                       style={{ fontSize: 11, padding: "3px 9px", color: chips.includes(w) ? undefined : C.mut }}>{w}</button>
                   ))}
                 </div>
@@ -5359,6 +5415,28 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                             <span className="mono" style={{ fontSize: 10, color: C.faint }}>min</span>
                           </div>
                         )}
+                        {/* le ressenti en mots simples d'abord, la mesure ensuite (16/08-j,
+                            Maxence : "à l'ouverture premier sniff on dit d'abord notre ressenti
+                            en mots simples juste en commentaire. ensuite il y a bien intensité
+                            etc à mesurer") — le champ commentaire remonte donc au-dessus du
+                            vocabulaire/de la comparaison ci-dessous, pour TOUS les rounds (pas
+                            de raison que l'ordre change round à round). Enter ne valide plus rien
+                            ici (16/08, Maxence : "un commentaire ne valide jamais une activité,
+                            seulement toucher la ligne, sinon ça fait des galères parfois") — seule
+                            la ligne (tapAction → submitComment) reste la surface de validation. */}
+                        <div style={{ position: "relative", maxWidth: 360, margin: "0 auto 18px" }}>
+                          <input className="in" value={comment}
+                            autoComplete="off" name="comment-done"
+                            onChange={(e) => setComment(e.target.value)}
+                            style={{ fontFamily: "var(--mono)", fontSize: 13, textAlign: "center", display: "block", color: C.text }} />
+                          {!comment && (
+                            <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: COMMENT_HINT_MODE === "cursor" ? "flex-start" : "center", justifyContent: "center", gap: 6, pointerEvents: "none", fontFamily: "var(--mono)", fontSize: 13, color: C.faint }}>
+                              {COMMENT_HINT_MODE === "cursor"
+                                ? <span className="hintcursor" />
+                                : <><span>«</span><span>...</span><span>»</span></>}
+                            </div>
+                          )}
+                        </div>
                         {/* parfum — une des 2 évaluations du jour : chips/curseur sur l'écran
                             "done", capturés sur le log entry par submitComment() en plus du
                             flux normal (log + coachViaClaude, inchangés). */}
@@ -5411,29 +5489,6 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                             </div>
                           );
                         })()}
-                        {/* same "« … »" idea as the running field (Maxence 16/07, round 6): a
-                            styled overlay, not the native placeholder, dots spaced out and grey
-                            throughout, same font/size as the activity text. No border under it
-                            once done — the borderBottom read as a "big line" that didn't belong
-                            once the session already ended (round 6, was here since round 1). */}
-                        {/* Enter ne valide plus rien ici (16/08, Maxence : "un commentaire ne valide
-                            jamais une activité, seulement toucher la ligne, sinon ça fait des
-                            galères parfois") — appuyer sur Entrée pendant la frappe pouvait
-                            soumettre par accident. Seule la ligne (tapAction → submitComment) reste
-                            la surface de validation, comme partout ailleurs dans l'app. */}
-                        <div style={{ position: "relative", maxWidth: 360, margin: "0 auto" }}>
-                          <input className="in" value={comment}
-                            autoComplete="off" name="comment-done"
-                            onChange={(e) => setComment(e.target.value)}
-                            style={{ fontFamily: "var(--mono)", fontSize: 13, textAlign: "center", display: "block", color: C.text }} />
-                          {!comment && (
-                            <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: COMMENT_HINT_MODE === "cursor" ? "flex-start" : "center", justifyContent: "center", gap: 6, pointerEvents: "none", fontFamily: "var(--mono)", fontSize: 13, color: C.faint }}>
-                              {COMMENT_HINT_MODE === "cursor"
-                                ? <span className="hintcursor" />
-                                : <><span>«</span><span>...</span><span>»</span></>}
-                            </div>
-                          )}
-                        </div>
                         {/* the "what your word does" hint teaches once (showDoneHint, seen-once-
                             ever like the tap hint) then gets out of the way for good — an
                             instruction, not a standing affordance (Maxence 16/07). */}
