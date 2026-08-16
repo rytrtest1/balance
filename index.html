@@ -982,8 +982,8 @@ function ParfumVsPicker({ pair, sessA, sessB, active, setActive, vIdx, setVIdx }
   const chipsB = sessB.chips || Object.keys(sessB.grades || {});
   const shared = chipsA.filter((f) => chipsB.includes(f));
   const seq = [
-    ...(sessA.intensity != null || sessB.intensity != null ? [{ key: "__int" }] : []),
-    ...shared.map((f) => ({ key: f })),
+    ...(sessA.intensity != null || sessB.intensity != null ? [{ key: "__int", label: "intensité" }] : []),
+    ...shared.map((f) => ({ key: f, label: f })),
   ];
   // swipe — même idiome que ParfumNotePicker/l'album (16/08-o, Maxence : "il faut
   // pouvoir swipe pour naviguer entre les différents points"). stopPropagation
@@ -1018,8 +1018,12 @@ function ParfumVsPicker({ pair, sessA, sessB, active, setActive, vIdx, setVIdx }
   return (
     <div onTouchStart={onTouchStart} onTouchEnd={onTouchEnd} style={{ marginTop: 4, textAlign: "center" }}>
       <button className="link" onClick={() => setActive((st) => ({ ...st, [cur.key]: "b" }))} style={nameStyle}>{b.name}</button>
+      {/* la facette EN COURS de comparaison — 16/08-q (Maxence : "on met intensité ou
+          autre sous la seconde matière, avec les points de navigation en dessous") —
+          même style que les autres étiquettes secondaires, juste au-dessus des points. */}
+      <div className="mono" style={{ fontSize: 10, letterSpacing: ".1em", textTransform: "uppercase", color: C.faint, marginTop: 10 }}>{cur.label}</div>
       {seq.length > 1 && (
-        <div style={{ display: "flex", justifyContent: "center", gap: 6, marginTop: 10 }}>
+        <div style={{ display: "flex", justifyContent: "center", gap: 6, marginTop: 8 }}>
           {seq.map((s, i) => (
             <button key={s.key} className="dot" onClick={() => setVIdx(i)}
               style={{ width: 4, height: 4, background: i === Math.min(vIdx, seq.length - 1) ? C.bone : C.line, border: "none", cursor: "pointer" }} />
@@ -1141,8 +1145,15 @@ function ParfumNotePicker({ chips, setChips, grades, setGrades, showMesures, ful
   };
   const famLit = (f) => chips.includes(f.key) || (f.facets || []).some((w) => chips.includes(w));
   const row = { display: "flex", flexWrap: "wrap", justifyContent: "center", gap: 6, maxWidth: 320, margin: "0 auto" };
+  // nom de ce qui est mesuré — 16/08-q (Maxence, retour en arrière sur -m : "pour le
+  // moment où on mesure intensité agrément etc va sous la ligne genre juste au
+  // dessus des points de navigation... pareil au moment des facettes au-dessus des
+  // chips juste au dessus des points"). Même style que baseText/activity.name
+  // (majuscules, petit, C.faint) pour la cohérence — plus dans le titre au-dessus
+  // de la ligne (essayé en -m, retiré).
+  const curLabel = !pastMesures ? (mesures[mIdx] ? mesures[mIdx].key : null) : (chips.length ? chips[facetteIdx] : null);
   const dots = (n, i, onPick) => n > 1 && (
-    <div style={{ display: "flex", justifyContent: "center", gap: 6, marginTop: 18 }}>
+    <div style={{ display: "flex", justifyContent: "center", gap: 6, marginTop: 8 }}>
       {Array.from({ length: n }).map((_, k) => (
         <button key={k} className="dot" onClick={() => onPick(k)}
           style={{ width: 4, height: 4, background: k === i ? C.bone : C.line, border: "none", cursor: "pointer" }} />
@@ -1151,6 +1162,9 @@ function ParfumNotePicker({ chips, setChips, grades, setGrades, showMesures, ful
   );
   return (
     <div onTouchStart={onTouchStart} onTouchEnd={onTouchEnd}>
+      {curLabel && (
+        <div className="mono" style={{ fontSize: 10, letterSpacing: ".1em", textTransform: "uppercase", color: C.faint }}>{curLabel}</div>
+      )}
       {!pastMesures
         ? dots(mesures.length, mIdx, setMIdx)
         : dots(chips.length, facetteIdx, (k) => setMIdx(mesures.length + k))}
@@ -1632,17 +1646,16 @@ function pickAging(activities, log, place, options = {}) {
               { id: idA, num: pf.pf3.nums[0], name: pf.pf3.names[0] },
               { id: idB, num: pf.pf3.nums[1], name: pf.pf3.names[1] },
             ];
-            // 16/08-o (Maxence, suite de -n : "à la place de 'comparer' mettre la première
-            // matière première en minuscules mais... plus grosses genre plus importantes
-            // comme d'hab" — le TITRE principal redevient le nom de la matière A, comme sur
-            // l'écran mesures ; "comparer" cède sa place à la facette EN COURS de comparaison
-            // (baseText, petit — "j'aimerais que intensité ou les facettes... soit mise en
-            // avant différemment... au pire enlève comparer et laisse juste la chose
-            // comparée", solution retenue). `text`/`baseText` ici ne sont que des replis
-            // avant que sessA/sessB/pfVsCur soient prêts (voir le JSX, qui pilote les deux
-            // dynamiquement). Pas de `desc` : pair[0].name prend la place de "détails".
+            // 16/08-q (Maxence, dernier réglage du jour : "on remet COMPARER à la place
+            // d'intensité... on met intensité ou autre sous la seconde matière, avec les
+            // points de navigation en dessous") — "comparer" REVIENT dans le slot baseText,
+            // statique (plus la facette dynamique, essayée en -o puis -n, retirée). Le
+            // TITRE principal reste le nom de la matière A (comme sur l'écran mesures) ;
+            // la facette EN COURS de comparaison vit maintenant sous la matière B, voir
+            // ParfumVsPicker. `text` reste un repli avant que pfVsHeroActive soit prêt.
+            // Pas de `desc` : pair[0].name prend la place de "détails".
             drawn = { activity: pf, action: { ...matAction, id: "x_pf_direct_cmp",
-              text: pair[0].name, baseText: roundDef.label,
+              text: pair[0].name, baseText: "comparer",
               pfamFamily: parfumWeekFamille(), pfamPair: pair, pfamRoundId: roundDef.id } };
             break;
           }
@@ -4993,7 +5006,12 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                   duration idiom as the "done" vs "running" tilt transition elsewhere).
                   pointerEvents off while faded so a stray tap can't land on a hidden
                   button instead of just waking the screen. */}
-              <div style={{ minHeight: 130, display: "flex", flexDirection: "column", justifyContent: "flex-end", textAlign: "center", marginBottom: 30,
+              <div style={{ minHeight: 130, display: "flex", flexDirection: "column", justifyContent: "flex-end", textAlign: "center",
+                // comparer (16/08-q, Maxence : "il faut que les deux matières soient bien
+                // plus proches de la ligne sinon on ne comprend pas qu'elles sont l'une
+                // versus l'autre") — resserré SEULEMENT sur cette carte (pfVsHeroActive),
+                // aucune autre activité/étape n'est affectée par ce changement.
+                marginBottom: pfVsHeroActive ? 14 : 30,
                 opacity: ambient ? 0 : 1, pointerEvents: ambient ? "none" : "auto",
                 transition: `opacity ${ambient ? AMBIENT_FADE_OUT_MS : AMBIENT_FADE_IN_MS}ms ease` }}>
 
@@ -5004,13 +5022,10 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                     </div>
                     {/* sub-activity: shown whenever the main line no longer carries it — a
                         Claude-generated title (musique/film) replaces the underlying action
-                        entirely (titre vs album, etc.), so surface the original alongside it. */}
-                    {/* comparer (16/08-o) : ce slot montre la facette EN COURS de comparaison
-                        (pfVsCur), pas un texte figé posé au tirage — "comparer" lui a cédé la
-                        place (voir pickAging). */}
-                    {pfVsHeroActive && pfVsCur ? (
-                      <div className="mono" style={{ fontSize: 10, letterSpacing: ".1em", textTransform: "uppercase", color: C.faint, marginBottom: 8 }}>{pfVsCur.label}</div>
-                    ) : current.action.baseText && current.action.baseText !== current.action.text && (
+                        entirely (titre vs album, etc.), so surface the original alongside it.
+                        Comparer : "comparer" REVENU ici (16/08-q, après un aller-retour en
+                        -n/-o avec la facette dynamique) — statique, posé par pickAging. */}
+                    {current.action.baseText && current.action.baseText !== current.action.text && (
                       <div className="mono" style={{ fontSize: 10, letterSpacing: ".1em", textTransform: "uppercase", color: C.faint, marginBottom: 8 }}>{current.action.baseText}</div>
                     )}
                     {/* the item shows immediately — for a recommandeur it's the real curated
@@ -5057,15 +5072,6 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                           <div className="fade mono" style={{ fontSize: 11, color: C.mut, marginTop: 8, lineHeight: 1.5 }}>{current.action.desc}</div>
                         )}
                       </div>
-                    )}
-                    {/* parfum — à la place de "détails" (16/08-m, Maxence : "à la place de
-                        details en dessous de la matière première on met intensité... la
-                        chip sélectionnée apparaît à la place de details... pour qu'on
-                        comprenne qu'on la note aussi en drag avec la ligne principale") :
-                        le nom de la mesure/facette actuellement focalisée (pfCur, calculé
-                        plus haut) — mesure ou facette, même emplacement. */}
-                    {pfMeasureActive && pfCur && (
-                      <div className="mono" style={{ fontSize: 10, letterSpacing: ".1em", textTransform: "uppercase", color: C.faint, marginTop: 10 }}>{pfCur.key}</div>
                     )}
                   </div>
                 )}
@@ -5241,7 +5247,7 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
               {/* ---------- below the line: controls ---------- */}
               {/* ambient: fades (slow out, quick back in) rather than unmounting — same
                   reasoning as the block above the line. */}
-              <div style={{ minHeight: 130, marginTop: 30, textAlign: "center",
+              <div style={{ minHeight: 130, marginTop: pfVsHeroActive ? 14 : 30, textAlign: "center",
                 opacity: ambient ? 0 : 1, pointerEvents: ambient ? "none" : "auto",
                 transition: `opacity ${ambient ? AMBIENT_FADE_OUT_MS : AMBIENT_FADE_IN_MS}ms ease` }}>
 
