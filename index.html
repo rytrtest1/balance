@@ -508,56 +508,46 @@ function pickItemsLRU(a, log, n) {
   const doing = inFamille.length >= n ? inFamille : all;
   const today = todayKey();
   const echues = doing.filter((it) => it.due && it.due <= today).sort((x, y) => (x.due < y.due ? -1 : x.due > y.due ? 1 : 0));
-  const picks = echues.slice(0, PARFUM_REVIEW_SLOTS);
   // `due` ne se pose que via submitParfumGuess, sautée tant que PARFUM_BLIND est
-  // faux (08/08) — donc `due` n'existe plus sur AUCUNE matière en ce moment, et
-  // l'ancien tirage traitait ça comme "jamais sentie" pour tout le monde (random
-  // pur), y compris des matières déjà sniffées plusieurs fois le jour même (bug
-  // remonté par Maxence le 09/08 : indole/opoponax/rhodinol retirées juste après
-  // leur propre cycle). Vrai LRU à la place, sur l'historique réel (`it.sessions`),
-  // indépendant de `due` : jamais sentie (aucune session) en tête, puis la
-  // dernière session la plus ancienne d'abord.
+  // faux (08/08) — donc echues reste vide en pratique aujourd'hui, gardé pour le
+  // jour où le blind reviendrait (voir PARFUM_BLIND).
   const lastSeen = (it) => { const s = it.sessions || []; return s.length ? Math.max(...s.map((x) => x.ts || 0)) : -1; };
-  const reste = doing.filter((it) => !picks.includes(it)).sort((x, y) => lastSeen(x) - lastSeen(y));
-  for (const it of reste) { if (picks.length >= n) break; if (!picks.includes(it)) picks.push(it); }
-  // 15/08-b (Maxence : "les plus proches d'abord, et si pas possible voisines") —
-  // la 1re place reste la couverture pure (l'item le plus en retard/jamais senti,
-  // ci-dessus) : rien ne doit pouvoir rester non-senti indéfiniment. La 2e cherche,
-  // PARMI les candidats encore assez en retard (fenêtre des WINDOW suivants en LRU,
-  // pas tout le pool — sinon la proximité écraserait complètement la couverture),
-  // celui qui partage le plus de profil avec le 1er — score de recouvrement par
-  // Math.min par facette commune (voir itemFacetTally).
-  // Sans recouvrement trouvé (typiquement : la 1re matière n'a encore aucune
-  // session, ou personne dans la fenêtre ne partage rien) ça retombe tel quel sur
-  // l'ordre LRU déjà posé au-dessus — "voisines" au sens le plus simple qui reste
-  // disponible : la famille de la semaine, sans rien de plus fin à offrir.
-  // Amorti par pfamCompares (16/08, Maxence : "il est capital que les propositions
-  // soient cohérentes" — vérifié en sandbox : sans amortissement, une fois la phase
-  // de couverture passée, le LRU pur est parfaitement périodique et l'argmax de
-  // recouvrement retombe donc TOUJOURS sur exactement le même partenaire pour une
-  // matière donnée — cycle figé, jamais de variation. `pfamCompares` était déjà
-  // écrit à chaque x_pf_direct_cmp mais jamais relu par le tirage : corrigé ici,
-  // même logique que l'ancien pickVoisinesFamille (score/(1+déjà comparées)) mais
-  // sur LE COUPLE précis, pas le total par matière — une paire souvent confrontée
-  // cède la place à une autre combinaison sans jamais tomber à zéro de chance.
-  if (n === 2 && picks.length === 2) {
-    const [first] = picks;
-    const firstTally = itemFacetTally(first);
-    if (Object.keys(firstTally).length) {
-      const WINDOW = 8;
-      const window = doing.filter((it) => it.id !== first.id).sort((x, y) => lastSeen(x) - lastSeen(y)).slice(0, WINDOW);
-      let best = null, bestScore = 0;
-      for (const it of window) {
-        const tally = itemFacetTally(it);
-        const shared = Object.keys(firstTally).filter((f) => tally[f]);
-        const raw = shared.reduce((sum, f) => sum + Math.min(firstTally[f], tally[f]), 0);
-        if (!raw) continue;
-        const pairCompares = (first.pfamCompares || []).filter((c) => c.against === it.id).length;
-        const score = raw / (1 + pairCompares);
-        if (score > bestScore) { bestScore = score; best = it; }
-      }
-      if (best) picks[1] = best;
+  // 16/08 — inversion complète du critère (Maxence : "le critère de sélection c'est
+  // pas d'abord ce qui n'est pas tombé, c'est deux matières voisines... oublie les
+  // voisines données par mes observations, donne-moi des voisines grâce à tes
+  // connaissances"). Avant : 1re place = couverture pure (l'item le plus en retard),
+  // 2e place = son meilleur partenaire par recouvrement DE SES PROPRES CHIPS
+  // (itemFacetTally) — inexploitable la 1re fois qu'une matière est tirée (aucune
+  // session = tally vide), donc la proximité ne s'activait quasiment jamais avant
+  // la 2e passe. Maintenant : le critère PRIMAIRE est la MEILLEURE PAIRE par
+  // proximité de référence (pfRefCloseness, sur PARFUM_FACETTES_REF — la vraie
+  // recherche par matière, jamais ses propres chips), cherchée PARMI une fenêtre
+  // des WINDOW matières les plus en retard (jamais senties d'abord via lastSeen).
+  // La fenêtre est ce qui reste de couverture : elle garantit qu'une matière jamais
+  // sentie entre tôt ou tard dans le calcul, sans pour autant dicter QUI est choisi
+  // — c'est la proximité qui tranche, pas l'ancienneté. Amorti par pfamCompares
+  // (même damping pairwise que le 15/08 : une paire déjà beaucoup confrontée cède
+  // la place à une autre combinaison sans jamais tomber à zéro de chance). Repli
+  // sur couverture pure UNIQUEMENT si personne dans la fenêtre ne partage rien
+  // (famille très éparse, ou matière #89 sans facettes_ref fiables) — le seul cas
+  // où "ce qui n'est pas tombé" redevient le seul critère disponible.
+  const WINDOW = 10;
+  const window = doing.filter((it) => it.due == null || it.due > today).sort((x, y) => lastSeen(x) - lastSeen(y)).slice(0, WINDOW);
+  let picks = null, bestScore = 0;
+  for (let x = 0; x < window.length; x++) {
+    for (let y = x + 1; y < window.length; y++) {
+      const [a, b] = [window[x], window[y]];
+      const raw = pfRefCloseness(a.num, b.num);
+      if (!raw) continue;
+      const pairCompares = (a.pfamCompares || []).filter((c) => c.against === b.id).length;
+      const score = raw / (1 + pairCompares);
+      if (score > bestScore) { bestScore = score; picks = [a, b]; }
     }
+  }
+  if (!picks) {
+    picks = echues.slice(0, PARFUM_REVIEW_SLOTS);
+    const reste = doing.filter((it) => !picks.includes(it)).sort((x, y) => lastSeen(x) - lastSeen(y));
+    for (const it of reste) { if (picks.length >= n) break; if (!picks.includes(it)) picks.push(it); }
   }
   // sorted by permanent bottle number, not draw order — .num is what actually
   // gets read aloud/displayed, so its order is the only one that matters for
@@ -781,6 +771,100 @@ const PARFUM_FAMILLE_REF = {
   153:"boisé", 154:"balsamique", 155:"épicé", 156:"vert", 157:"animal", 158:"balsamique", 159:"animal", 160:"boisé",
   161:"floral", 162:"floral", 163:"fruité", 164:"balsamique",
 };
+// R1 facettes de référence — même source que PARFUM_FAMILLE_REF (parfum-fiches-
+// reference.json), extraites ici pour la première fois (16/08, Maxence : "oublie
+// l'idée des voisines données grâce à mes observations, donne-moi des voisines
+// grâce à tes connaissances" — le choix de la paire du jour ne doit plus dépendre
+// de ses propres chips tapées en séance, qui n'existent souvent pas encore la
+// 1re fois et restent de toute façon le vocabulaire réduit de l'UI ; facettes_ref
+// vient de la vraie recherche par matière, vocabulaire plus riche, non contraint
+// aux chips affichées. Reste HORS séance comme PARFUM_FAMILLE_REF/PARFUM_ESSENTIEL
+// — sert uniquement à calculer la proximité dans pickItemsLRU, jamais affiché tel
+// quel. Voir pfRefCloseness ci-dessous pour l'usage.
+const PARFUM_FACETTES_REF = {
+  1:["poudré","violette","racine","boisé"], 2:["fumé","foin","tabac","astringent"], 3:["rose","miel","fruité","pêche"], 4:["fumé","cuir","goudron","médicinal"],
+  5:["terreux","boisé","camphré léger","fumé doux"], 6:["santalé","ambré","velouté","poussiéreux"], 7:["poivré","chaud","boisé-vert","cireux"], 8:["cuir","fumé doux","lisse","diffusif"],
+  9:["safran","foin","cuir","iodé"], 10:["fumé","encens brûlé","cade","cuir"], 11:["fumé","cuir","goudron","cendre"], 12:["résineux","citronné","poivré","sec"],
+  13:["fécal (haute dose)","floral narcotique","naphtaline","jasmin"], 14:["résineux","terreux","boisé sec","peu vanillé"], 15:["cuir","cannelle","fumé léger","animal doux"], 16:["doux","caramel","réglisse","myrrhé"],
+  17:["fumé","cuir","encens brûlé","sec"], 18:["résineux","vert-citronné","doux","encens"], 19:["torréfié","grillé","boisé","café"], 20:["santal","crémeux","musqué","sirop léger"],
+  21:["cèdre","musqué","cuir sec","ambré"], 22:["citron vert","métallique","lavande","propre"], 23:["jasmin","poire","banane","frais"], 24:["médicinal","fumé-cuir","terreux-champignon","vineux"],
+  25:["poivré","boisé-frais","sec","vert"], 26:["pêche","crémeux","gras","abricot"], 27:["betterave","terre mouillée","argile","minéral"], 28:["fumé","terreux","racine","noisette"],
+  29:["bergamote","lavande","poire","vert"], 30:["cuir","abricot","cèdre","oud léger"], 31:["mousse de chêne sèche","phénolique","terreux"], 32:["foin coupé","amande","tonka","vanillé"],
+  33:["vanille concentrée","sucré","confiseur"], 34:["vanille","baume doux","épicé léger"], 35:["jasmin","magnolia","frais","aérien"], 36:["muguet","bois de rose","citronné léger"],
+  37:["linge chaud","cireux","métallique léger","poudré"], 38:["chaud","poudré-velours","ambré","épicé doux"], 39:["marin","tabac","musqué","boisé doux"], 40:["doux","poudré","lactonique","propre"],
+  41:["citronné","floral doux","rond","non phototoxique"], 42:["vanille","crémeux","sucré","poudré"], 43:["ambré","boisé","sec","musqué"], 44:["musqué","propre","floral","poudré"],
+  45:["jasmin","agrumes","vert","aérien"], 46:["ambré","cuir","animal","miel"], 47:["balsamique","ambré","boisé discret","poivré"], 48:["encens","doux","citronné","résineux"],
+  49:["fumé","encens","cuir","résineux"], 50:["fumé","cendre","boisé","ambré"], 51:["benjoin","vanille","fumé","épicé"], 52:["boisé","rosé","citronné","poivré"],
+  53:["ambré","boisé","musqué","radiant"], 54:["caramel","barbe à papa","confiture","sucré"], 55:["oud","encens","ambré","cachemire"], 56:["santal","crémeux","rosé","fruité"],
+  57:["santal","crémeux","doux","animal-balsamique"], 58:["violette","iris","poudré","boisé"], 59:["vanille","crémeux","balsamique","fumé léger"], 60:["vanille","crémeux","gousse","rond"],
+  61:["rose","cire","confiture","miel"], 62:["violette","iris","poudré","boisé léger"], 63:["terreux","musqué","poivré","herbacé"], 64:["vétiver","boisé","pamplemousse","sec"],
+  65:["mousse","terreux","vert","boisé"], 66:["mousse","terreux","boisé","cuir léger"], 67:["aldéhydé","cireux","métallique","propre"], 68:["fumé","cuir","boisé sec","résineux"],
+  69:["fumé","encens noir","boisé","balsamique"], 70:["cuir","animal","boisé","poudré"], 71:["ambré","vanille","résineux","boisé"], 72:["boisé","rosé","fumé léger","balsamique"],
+  73:["miel","cire d'abeille","floral","doux"], 74:["poivré","anisé","herbacé","terpénique"], 75:["boisé","terreux","fumé","poivré"], 76:["lavande","herbacé","coumarine","floral"],
+  77:["cannelle","vanille","floral doux","résineux"], 78:["boisé","sec","crayon à papier","balsamique léger"], 79:["ambré","boisé","musqué","minéral"], 80:["ambré","tabac","boisé","doux"],
+  81:["santal","crémeux","boisé","doux"], 82:["boisé sec","ambré","animal","patchouli"], 83:["sec","ambré","cèdre","poudré"], 84:["foin coupé","coumarine","tabac","sec"],
+  85:["cuir","fumé","ambré","boisé"], 86:["marin","ozonique","iodé","algues"], 87:["fumé","doux","mielleux","sec"], 88:["mousse","sous-bois","cuir","algue"],
+  89:["métallique (non confirmé)","non identifié"], 90:["boisé doux","floral rosé","linalol","légèrement épicé"], 91:["cuir","castoréum","minéral","tabac"], 92:["musc de cerf","ambré","boisé sec","animal léger"],
+  93:["phénolique","cuir","chaud","puissant"], 94:["ambré","encens","poudré","bois humide"], 95:["vert coupant","terreux","balsamique","boisé"], 96:["résineux","pin","légèrement poivré","vert"],
+  97:["ozonique","muguet","melon","foin"], 98:["boisé lisse","ambré","velouté","diffusif"], 99:["ozonique","marin","floral","aldéhydé"], 100:["animal","fumé","résineux","doux"],
+  101:["lanoline","cuir doux","fermier","miellé"], 102:["abricot","cuir","pêche","miellé"], 103:["musc élégant","poudré","animal léger","tenace"], 104:["vétiver sec","boisé","légèrement fumé","frais"],
+  105:["santal crémeux","lacté","doux","boisé"], 106:["safran","cuir","tabac","floral rose"], 107:["santal","crémeux","carton sec","noisette"], 108:["lacté","sulfureux","grillé","caramel"],
+  109:["muguet","vert","aqueux","aldéhydé"], 110:["ozonique","marin","floral","aldéhydé"], 111:["rose","fruité poire","vert","cireux"], 112:["ambre gris","cèdre sec","cuir léger","musqué"],
+  113:["fécal (à l'état pur)","musqué","chaud","fumé"], 114:["cuir","phénolique","fruits secs","fumé"], 115:["marin","pastèque","ozonique","huître"], 116:["trèfle","foin","légèrement chocolaté","herbacé"],
+  117:["violette","iris","boisé","framboise"], 118:["fleur d'oranger","miel","tilleul","raisin"], 119:["muguet","doux","lilas","aqueux"], 120:["jasmin blanc","vert","miellé","indolé"],
+  121:["rose fraîche","vert rosée","légèrement épicé","musqué"], 122:["rose","géranium","cireux","légèrement cuir"], 123:["pomme","ananas","fraise","vert boisé"], 124:["rosé","géranium","citronné","frais"],
+  125:["framboise","confiture","poudré léger"], 126:["cireux","savonneux","gras","poudré-violette"], 127:["aldéhydé","savonneux","vert","métallique"], 128:["agrume","cireux","bougie chaude"],
+  129:["rosé","feuille verte","agrume"], 130:["rosé","géranium","vert","doux"], 131:["floral intense","balsamique","épicé doux","fruité-banane"], 132:["pin","résineux","fruité","doux"],
+  133:["iris","poudré","violette","boisé"], 134:["floral-boisé","épicé (coriandre)","frais"], 135:["agrume","amer-sec","vert","floral léger"], 136:["citron frais","pétillant","sucré-zeste"],
+  137:["boisé","ambré","velouté","cèdre"], 138:["cuir","terreux-racine","mousse de chêne","fumé"], 139:["fleur d'oranger","néroli","poudré","miellé"], 140:["santal","crémeux","lacté","boisé chaud"],
+  141:["patchouli","camphré","terreux","boisé sec"], 142:["daim","cuir doux","musqué","poudré"], 143:["ambre gris","tabac","cuir","algue marine"], 144:["girofle","épicé sec","boisé léger"],
+  145:["girofle","épicé","fruité en tête","balsamique"], 146:["musc doux","ambrette","peau propre","poudré"], 147:["musc","ambrette","fruité","rond et chaud"], 148:["herbacé","cèdre-thuyone","camphré","eucalyptus"],
+  149:["fumé","phénolique","bois de gaïac","vanillé léger"], 150:["ambre gris","labdanum","cuir","poivre-tabac"], 151:["lavande","herbacé","floral doux","boisé léger"], 152:["floral","fruité-vert en tête","miellé-thé en fond","moins indolé"],
+  153:["boisé-résineux","poivré","patchouli léger","pin"], 154:["cannelé","vanillé","balsamique","épicé doux"], 155:["cannelle","épicé chaud","fruité en tête","poudré-sec"], 156:["vert","ozonique","fruité","feuille froissée"],
+  157:["ambre gris","doux","balsamique","animal léger"], 158:["ambré","vanillé","résineux","agrume en tête"], 159:["ambre gris doux","musqué","floral léger","animal"], 160:["cèdre","crayon taillé","sec","musqué léger"],
+  161:["floral","fruité-banane","épicé doux","balsamique"], 162:["rose","miellé","épicé léger","vert en fond"], 163:["fruité (poire)","floral léger (jasmin)","doux"], 164:["vanillé","baume","cannelle légère","cuir-fumé léger"],
+};
+// proximité par fréquence inverse (16/08) — un partage sur une facette RARE (ex.
+// "castoréum") est bien plus diagnostique qu'un partage sur une facette courante
+// (ex. "boisé", qui apparaît dans des dizaines de fiches) ; sans pondération, deux
+// matières qui partagent juste "boisé"+"ambré" scoreraient aussi haut que deux
+// vraies jumelles (ex. #21/#160, "cèdre" partagé, une facette bien moins fréquente
+// dans le corpus). Poids = 1/nb de matières portant cette facette. Calculé une
+// fois au chargement, pas à chaque appel — 164 matières, coût négligeable de toute
+// façon mais pas de raison de refaire le travail à chaque tirage.
+// comparaison par MOT significatif, pas par phrase exacte (16/08, corrigé après un
+// test en sandbox : "oud" (#55) vs "oud léger" (#30) scorait 0 en phrase exacte,
+// alors que ce sont clairement deux oud voisins — les fiches R1 qualifient souvent
+// la même note d'un modificateur différent, "santal" vs "santal crémeux", "cèdre"
+// vs "cèdre sec". `parfumNorm` déjà définie plus bas pour la reconnaissance de nom
+// (guess J+1) fait exactement le nettoyage voulu ici — réutilisée telle quelle,
+// pas redéfinie. Mots ≥3 lettres — PAS le seuil ≥4 de parfumHit (repéré en
+// sandbox : "oud" fait 3 lettres, le seuil à 4 l'éliminait silencieusement des
+// deux côtés, donc #55 "oud" et #30 "oud léger" scoraient 0 malgré le partage le
+// plus évident possible). La pondération IDF ci-dessous se charge du reste (un mot
+// générique comme "léger", présent dans des dizaines de fiches, pèse
+// automatiquement presque rien face à un mot rare comme "castoréum" — pas besoin
+// d'une liste de mots à exclure à la main).
+const pfFacetteWords = (f) => parfumNorm(f).split(" ").filter((w) => w.length >= 3);
+const PARFUM_REF_WORDS = (() => {
+  const out = {};
+  for (const num in PARFUM_FACETTES_REF) {
+    out[num] = new Set(PARFUM_FACETTES_REF[num].flatMap(pfFacetteWords));
+  }
+  return out;
+})();
+const PARFUM_REF_WORD_FREQ = (() => {
+  const freq = {};
+  for (const num in PARFUM_REF_WORDS) { for (const w of PARFUM_REF_WORDS[num]) freq[w] = (freq[w] || 0) + 1; }
+  return freq;
+})();
+function pfRefCloseness(numA, numB) {
+  const [wa, wb] = [PARFUM_REF_WORDS[numA], PARFUM_REF_WORDS[numB]];
+  if (!wa || !wb) return 0;
+  let sum = 0;
+  for (const w of wa) { if (wb.has(w)) sum += 1 / PARFUM_REF_WORD_FREQ[w]; }
+  return sum;
+}
 // matières essentielles (15/08-d, Maxence : "réduire aux plus importantes plutôt que
 // tout couvrir" — les écoles de parfumerie ne font pas grossir le temps d'étude avec
 // la taille de la famille, elles réduisent la famille à ses références canoniques).
