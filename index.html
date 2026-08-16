@@ -513,36 +513,49 @@ function pickItemsLRU(a, log, n) {
   // jour où le blind reviendrait (voir PARFUM_BLIND).
   const lastSeen = (it) => { const s = it.sessions || []; return s.length ? Math.max(...s.map((x) => x.ts || 0)) : -1; };
   // 16/08 — inversion complète du critère (Maxence : "le critère de sélection c'est
-  // pas d'abord ce qui n'est pas tombé, c'est deux matières voisines... oublie les
-  // voisines données par mes observations, donne-moi des voisines grâce à tes
-  // connaissances"). Avant : 1re place = couverture pure (l'item le plus en retard),
-  // 2e place = son meilleur partenaire par recouvrement DE SES PROPRES CHIPS
-  // (itemFacetTally) — inexploitable la 1re fois qu'une matière est tirée (aucune
-  // session = tally vide), donc la proximité ne s'activait quasiment jamais avant
-  // la 2e passe. Maintenant : le critère PRIMAIRE est la MEILLEURE PAIRE par
-  // proximité de référence (pfRefCloseness, sur PARFUM_FACETTES_REF — la vraie
-  // recherche par matière, jamais ses propres chips), cherchée PARMI une fenêtre
-  // des WINDOW matières les plus en retard (jamais senties d'abord via lastSeen).
-  // La fenêtre est ce qui reste de couverture : elle garantit qu'une matière jamais
-  // sentie entre tôt ou tard dans le calcul, sans pour autant dicter QUI est choisi
-  // — c'est la proximité qui tranche, pas l'ancienneté. Amorti par pfamCompares
-  // (même damping pairwise que le 15/08 : une paire déjà beaucoup confrontée cède
-  // la place à une autre combinaison sans jamais tomber à zéro de chance). Repli
-  // sur couverture pure UNIQUEMENT si personne dans la fenêtre ne partage rien
-  // (famille très éparse, ou matière #89 sans facettes_ref fiables) — le seul cas
-  // où "ce qui n'est pas tombé" redevient le seul critère disponible.
+  // pas d'abord ce qui n'est pas tombé, c'est deux matières voisines... donne-moi
+  // des voisines grâce à tes connaissances"), puis corrigé le même jour (v2, deux
+  // bugs trouvés en le faisant vraiment tourner via "test vs parfum" plutôt qu'en
+  // le supposant) :
+  // 1) L'argmax de proximité (v1) tombait TOUJOURS sur LA paire la plus proche —
+  //    dès qu'une famille contient deux variantes quasi identiques d'une même
+  //    molécule (ici hedione/hedione high cis, score écrasant tout le reste), il
+  //    n'y avait plus jamais que cette paire-là, Maxence : "pas la peine de
+  //    rapporter au score le plus haut sinon je vais m'ennuyer avec que des
+  //    matières super proches". Remplacé par un tirage PONDÉRÉ (poids = proximité,
+  //    même logique que la loterie principale de l'app, buildLotteryRows plus bas —
+  //    argmax rejeté partout ailleurs dans ce projet pour la même raison) : la
+  //    proximité reste ce qui pèse le plus, mais n'écrase plus systématiquement.
+  // 2) Sur une famille jamais sentie, tout le monde est à égalité lastSeen=-1 — le
+  //    tri stable de la fenêtre retombait toujours sur les WINDOW premières
+  //    matières du catalogue PAR ORDRE DE LISTE, jamais les suivantes, tant
+  //    qu'aucune des premières n'a de vraie session. Corrigé par un mélange avant
+  //    le tri (casse les égalités au hasard, pas par ordre d'écriture).
+  // La fenêtre elle-même reste la garantie de couverture (une matière jamais
+  // sentie finit par y entrer, même si elle ne gagne pas le tirage tout de suite) —
+  // amorti par pfamCompares (une paire déjà beaucoup confrontée cède la place sans
+  // jamais tomber à zéro de chance). Repli sur couverture pure UNIQUEMENT si
+  // personne dans la fenêtre ne partage rien (famille très éparse, ou matière #89
+  // sans facettes_ref fiables) — le seul cas où proximité n'a rien à trancher.
   const WINDOW = 10;
-  const window = doing.filter((it) => it.due == null || it.due > today).sort((x, y) => lastSeen(x) - lastSeen(y)).slice(0, WINDOW);
-  let picks = null, bestScore = 0;
+  const shuffled = [...doing].sort(() => Math.random() - 0.5);
+  const window = shuffled.filter((it) => it.due == null || it.due > today).sort((x, y) => lastSeen(x) - lastSeen(y)).slice(0, WINDOW);
+  const candidates = [];
   for (let x = 0; x < window.length; x++) {
     for (let y = x + 1; y < window.length; y++) {
       const [a, b] = [window[x], window[y]];
       const raw = pfRefCloseness(a.num, b.num);
       if (!raw) continue;
       const pairCompares = (a.pfamCompares || []).filter((c) => c.against === b.id).length;
-      const score = raw / (1 + pairCompares);
-      if (score > bestScore) { bestScore = score; picks = [a, b]; }
+      candidates.push({ pair: [a, b], weight: raw / (1 + pairCompares) });
     }
+  }
+  let picks = null;
+  if (candidates.length) {
+    const total = candidates.reduce((s, c) => s + c.weight, 0);
+    let r = Math.random() * total;
+    for (const c of candidates) { r -= c.weight; if (r <= 0) { picks = c.pair; break; } }
+    if (!picks) picks = candidates[candidates.length - 1].pair;
   }
   if (!picks) {
     picks = echues.slice(0, PARFUM_REVIEW_SLOTS);
@@ -980,16 +993,53 @@ function VoisinePicker({ items, currentItemId, voisines, setVoisines }) {
 // que la paire a RÉELLEMENT montrées (`facets` vient de l'appelant, union des
 // tallies des deux matières) — pas les 9 facettes de la famille entière, la plupart
 // sans rapport avec ce qu'on vient de sentir.
+// slider continu (16/08, Maxence : "je veux que dans toute l'app ce soit une ligne
+// simple... sans cran d'arrêt qu'on convertit en score précis") — remplace tous les
+// <input type=range step=1> du protocole parfum. Le natif saute par incréments fixes
+// sous le doigt (cran d'arrêt) ; ici la position du pointeur est lue en continu sur
+// toute la largeur de l'élément et arrondie en score entier seulement à la fin du
+// calcul, donc le mouvement lui-même reste fluide. Un seul geste (pas de distinction
+// tap/drag comme la ligne centrale/album — ces sliders n'ont qu'un seul usage) :
+// pointerdown pose déjà la valeur là où on appuie, pointermove tant que pressé la
+// suit. `otherValue` optionnel dessine un second remplissage fixe (gris) derrière —
+// réutilisé par ParfumVsLine pour montrer les deux matières sur la même ligne.
+function DragSlider({ value, onChange, min = 0, max = 10, otherValue }) {
+  const ref = useRef(null);
+  const setFromPointer = (clientX) => {
+    const el = ref.current;
+    if (!el || clientX == null) return;
+    const rect = el.getBoundingClientRect();
+    const frac = Math.max(0, Math.min(1, (clientX - rect.left) / (rect.width || 1)));
+    onChange(Math.round(min + frac * (max - min)));
+  };
+  // valeur posée D'ABORD, capture ensuite en best-effort (peut échouer — trouvé en
+  // testant : NotFoundError si aucun pointeur actif — la capture n'est qu'un confort
+  // pour un drag fluide, jamais une condition pour que le tap pose la valeur).
+  const onDown = (e) => { setFromPointer(e.clientX); try { e.currentTarget.setPointerCapture(e.pointerId); } catch (err) {} };
+  const onMove = (e) => { if (e.buttons !== 1) return; setFromPointer(e.clientX); };
+  const pct = ((value - min) / (max - min)) * 100;
+  const otherPct = otherValue != null ? ((otherValue - min) / (max - min)) * 100 : null;
+  return (
+    <div ref={ref} onPointerDown={onDown} onPointerMove={onMove}
+      style={{ position: "relative", height: 22, flex: 1, cursor: "pointer", touchAction: "none", userSelect: "none", WebkitUserSelect: "none" }}>
+      <div style={{ position: "absolute", left: 0, right: 0, top: 10, height: 2, background: C.line, borderRadius: 1 }} />
+      {otherPct != null && (
+        <div style={{ position: "absolute", left: 0, top: 10, height: 2, width: `${otherPct}%`, background: C.mut, borderRadius: 1 }} />
+      )}
+      <div style={{ position: "absolute", left: 0, top: 10, height: 2, width: `${pct}%`, background: C.text, borderRadius: 1 }} />
+      <div style={{ position: "absolute", left: `calc(${pct}% - 5px)`, top: 6, width: 10, height: 10, borderRadius: "50%", background: C.text }} />
+    </div>
+  );
+}
 // vs — répété à CHAQUE round (16/08 v2, Maxence : "c'est capital de le faire à
 // chaque round" — la courbe de la relation compte autant que la relation :
 // deux matières à égalité en tête peuvent diverger en fond, exactement ce que
-// la tenue mesure en parfumerie). Une ligne = un slider natif au-dessus d'un
-// fond fixe (la valeur de l'AUTRE matière, grisée) ; cliquer le nom en haut/bas
-// bascule quelle matière le curseur représente — les deux valeurs restent
-// visibles en même temps (fond gris = fixe, remplissage clair = actif), un
-// jugement relatif plutôt qu'absolu, réutilisé identique pour l'intensité et
-// chaque facette. Remplace l'ancien toggle a/b discret par ligne (16/08 v1) :
-// ici on garde l'écart réel, pas juste qui gagne.
+// la tenue mesure en parfumerie). Une ligne = un DragSlider dont le remplissage
+// clair suit la matière ACTIVE, le fond gris fixe montre l'AUTRE ; cliquer le nom
+// en haut/bas bascule quelle matière le curseur représente — les deux valeurs
+// restent visibles en même temps, un jugement relatif plutôt qu'absolu, réutilisé
+// identique pour l'intensité et chaque facette. Remplace l'ancien toggle a/b
+// discret par ligne (16/08 v1) : ici on garde l'écart réel, pas juste qui gagne.
 function ParfumVsLine({ label, aName, bName, aVal, bVal, active, onToggle, onChange }) {
   const activeVal = active === "a" ? aVal : bVal;
   const otherVal = active === "a" ? bVal : aVal;
@@ -1000,13 +1050,9 @@ function ParfumVsLine({ label, aName, bName, aVal, bVal, active, onToggle, onCha
   return (
     <div style={{ maxWidth: 320, margin: "0 auto 20px", textAlign: "center" }}>
       <button className="link" onClick={() => onToggle("a")} style={nameStyle("a")}>{aName}</button>
-      <div style={{ position: "relative", height: 22, margin: "2px 0" }}>
-        <div style={{ position: "absolute", left: 0, right: 0, top: 10, height: 2, background: C.line, borderRadius: 1 }} />
-        <div style={{ position: "absolute", left: 0, top: 10, height: 2, width: `${otherVal * 10}%`, background: C.mut, borderRadius: 1 }} />
-        <div className="mono" style={{ position: "absolute", left: "50%", top: -2, transform: "translateX(-50%)", fontSize: 9, letterSpacing: ".12em", color: C.faint, textTransform: "uppercase", pointerEvents: "none", background: C.bg, padding: "0 4px" }}>{label}</div>
-        <input type="range" min="0" max="10" step="1" value={activeVal}
-          onChange={(e) => onChange(active, parseInt(e.target.value))}
-          style={{ position: "absolute", left: 0, top: 0, width: "100%", margin: 0, accentColor: C.text, background: "transparent" }} />
+      <div style={{ position: "relative", margin: "2px 0" }}>
+        <div className="mono" style={{ position: "absolute", left: "50%", top: -2, transform: "translateX(-50%)", fontSize: 9, letterSpacing: ".12em", color: C.faint, textTransform: "uppercase", pointerEvents: "none", background: C.bg, padding: "0 4px", zIndex: 1 }}>{label}</div>
+        <DragSlider value={activeVal} otherValue={otherVal} onChange={(v) => onChange(active, v)} />
       </div>
       <button className="link" onClick={() => onToggle("b")} style={nameStyle("b")}>{bName}</button>
     </div>
@@ -1120,9 +1166,7 @@ function ParfumNotePicker({ chips, setChips, grades, setGrades, intensity, setIn
           {chips.map((w) => (
             <div key={w} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
               <button className="chip on" onClick={() => removeChip(w)} style={{ fontSize: 11, padding: "3px 9px", flexShrink: 0 }}>{w}</button>
-              <input type="range" min="0" max="10" step="1" value={grades[w] ?? 5}
-                onChange={(e) => setGrades((g) => ({ ...g, [w]: parseInt(e.target.value) }))}
-                style={{ flex: 1, accentColor: C.text }} />
+              <DragSlider value={grades[w] ?? 5} onChange={(v) => setGrades((g) => ({ ...g, [w]: v }))} />
               <span className="mono" style={{ fontSize: 10, color: grades[w] == null ? C.faint : C.text, width: 14, textAlign: "right" }}>{grades[w] ?? "—"}</span>
             </div>
           ))}
@@ -1159,11 +1203,19 @@ function ParfumNotePicker({ chips, setChips, grades, setGrades, intensity, setIn
       )}
       <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, maxWidth: 320, margin: "16px auto 0" }}>
         <span className="mono" style={{ fontSize: 10, color: C.faint, letterSpacing: ".08em" }}>intensité</span>
-        <input type="range" min="0" max="10" step="1" value={intensity ?? 5}
-          onChange={(e) => setIntensity(parseInt(e.target.value))}
-          style={{ flex: 1, accentColor: C.text }} />
+        <DragSlider value={intensity ?? 5} onChange={setIntensity} />
         <span className="mono" style={{ fontSize: 11, color: intensity == null ? C.faint : C.text, width: 16, textAlign: "right" }}>
           {intensity ?? "—"}
+        </span>
+      </div>
+      {/* agrément — numérique (16/08, Maxence : "il manque le slider d'agrément pour
+          noter comme j'aime la matière en numérique") — remplace le tap-cycle
+          +/−/neutre (rapport chips 09/08), même échelle 0-10 que intensité/grades. */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, maxWidth: 320, margin: "10px auto 0" }}>
+        <span className="mono" style={{ fontSize: 10, color: C.faint, letterSpacing: ".08em" }}>agrément</span>
+        <DragSlider value={hedo ?? 5} onChange={setHedo} />
+        <span className="mono" style={{ fontSize: 11, color: hedo == null ? C.faint : C.text, width: 16, textAlign: "right" }}>
+          {hedo ?? "—"}
         </span>
       </div>
       {/* diffusion/netteté (15/08, fiche T0 point 3) — seulement à l'ouverture, les
@@ -1190,19 +1242,10 @@ function ParfumNotePicker({ chips, setChips, grades, setGrades, intensity, setIn
         </div>
       )}
       <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 18, marginTop: 10 }}>
-        {/* agrément — chip unique en tap-cycle neutre → + → − → neutre (rapport
-            chips 09/08, §5). */}
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <span className="mono" style={{ fontSize: 10, color: C.faint, letterSpacing: ".08em" }}>agrément</span>
-          <button className={`chip ${hedo != null ? "on" : ""}`}
-            onClick={() => setHedo((h) => (h == null ? 1 : h === 1 ? -1 : null))}
-            style={{ fontSize: 11, padding: "3px 9px", minWidth: 24 }}>
-            {hedo === 1 ? "+" : hedo === -1 ? "−" : "·"}
-          </button>
-        </div>
         {/* cortège — R9 compositionnel (09/08, catalogue olfactif) : le jugement
-            d'Ellena par l'usage, tient-elle seule ou a besoin d'un cortège ? Même
-            tap-cycle, même statut d'addition non demandée que l'agrément. */}
+            d'Ellena par l'usage, tient-elle seule ou a besoin d'un cortège ? Tap-cycle,
+            statut d'addition non demandée — pas de score numérique pertinent ici
+            (deux états, pas une intensité), contrairement à l'agrément ci-dessus. */}
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <span className="mono" style={{ fontSize: 10, color: C.faint, letterSpacing: ".08em" }}>cortège</span>
           <button className={`chip ${cortege != null ? "on" : ""}`}
@@ -2286,12 +2329,10 @@ function Throughline() {
   const [parfumHedo, setParfumHedo] = useState(null);
   // cortège — R9 compositionnel, même plomberie que hedo (voir ParfumNotePicker).
   const [parfumCortege, setParfumCortege] = useState(null);
-  // à froid (15/08, fiche papier T0 point 1) — jugement affectif/image/sensation,
-  // AVANT tout descripteur. Champ à part du "comment" générique (celui-ci reste le
-  // libre R8/personnel) : rendu seulement au round "direct", au-dessus du toggle
-  // vocabulaire (voir le JSX). Texte brut, l'app ne verrouille rien après coup —
-  // "ne pas corriger après coup" reste une consigne à lui, pas un mécanisme.
-  const [parfumAFroid, setParfumAFroid] = useState("");
+  // à froid retiré (16/08, Maxence : "ça je l'écris en commentaire") — le champ
+  // dédié faisait doublon avec le commentaire générique existant, jamais utile
+  // séparé. `afroid` reste lisible dans les vieilles sessions déjà loggées, plus
+  // écrit depuis ce commit.
   // diffusion/netteté (15/08, fiche T0 point 3) — tap-cycle 3 états comme
   // hedo/cortège, rendues seulement au round "direct" (les mesures de la fiche
   // vivent toutes à t0). Complexité n'a pas son propre contrôle : c'est
@@ -3068,7 +3109,7 @@ function Throughline() {
     setAlbumTitles([]); setAlbumIdx(0); setDescOpen(false); setRating(50);
     propose(log, activities, false, current ? current.activity.id : null);
   };
-  const resetFlow = (nextStage = "entry") => { setStage(nextStage); setCurrent(null); setRunning(false); setElapsedMs(0); setPaused(false); setComment(""); setItemNameInput(""); setParfumChips([]); setParfumGrades({}); setParfumIntensity(null); setParfumHedo(null); setParfumCortege(null); setParfumVoisines([]); setParfumVs({}); setParfumVsActive({}); setParfumAFroid(""); setParfumDiffusion(null); setParfumNettete(null); setParfumRole(null); setParfumDosage(null); setParfumRecall(null); setDescOpen(false); setVocabOpen(false); setSyncMsg(""); setSyncing(false); setAlbumTitles([]); setAlbumIdx(0); setRating(50); };
+  const resetFlow = (nextStage = "entry") => { setStage(nextStage); setCurrent(null); setRunning(false); setElapsedMs(0); setPaused(false); setComment(""); setItemNameInput(""); setParfumChips([]); setParfumGrades({}); setParfumIntensity(null); setParfumHedo(null); setParfumCortege(null); setParfumVoisines([]); setParfumVs({}); setParfumVsActive({}); setParfumDiffusion(null); setParfumNettete(null); setParfumRole(null); setParfumDosage(null); setParfumRecall(null); setDescOpen(false); setVocabOpen(false); setSyncMsg(""); setSyncing(false); setAlbumTitles([]); setAlbumIdx(0); setRating(50); };
   // Album de la semaine title-by-title appreciation (Maxence 16/07, item 4/5) —
   // isAlbumActivity gates the extra running-stage UI to that one activity only.
   const isAlbumActivity = !!(current && current.activity.id === "a_ecoute_album");
@@ -3423,7 +3464,7 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
         if (parsedManual > 0) { patch.min = parsedManual; patch.sec = parsedManual * 60; }
         if (text) patch.note = text;
         if (isRecoWithItem) patch.rating = rating;
-        if (isParfumMatiere) { patch.chips = parfumChips; patch.grades = parfumGrades; patch.intensity = parfumIntensity; patch.hedo = parfumHedo; patch.cortege = parfumCortege; patch.voisines = parfumVoisines; patch.afroid = parfumAFroid; patch.diffusion = parfumDiffusion; patch.nettete = parfumNettete; patch.role = parfumRole; patch.dosage = parfumDosage; patch.recall = parfumRecall; }
+        if (isParfumMatiere) { patch.chips = parfumChips; patch.grades = parfumGrades; patch.intensity = parfumIntensity; patch.hedo = parfumHedo; patch.cortege = parfumCortege; patch.voisines = parfumVoisines; patch.diffusion = parfumDiffusion; patch.nettete = parfumNettete; patch.role = parfumRole; patch.dosage = parfumDosage; patch.recall = parfumRecall; }
         if (isParfumDirectCmp) { patch.pfamFamily = action.pfamFamily; patch.pfamPair = action.pfamPair; patch.pfamRound = action.pfamRoundId; patch.pfamVs = parfumVs; }
         return { ...en, ...patch };
       }));
@@ -3465,7 +3506,7 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
           // revenue en révision — parfumDernierMot a besoin de borner sur le cycle
           // en cours (prepTs), donc d'un horodatage réel. realNow(), jamais
           // Date.now() : le sandbox décale l'horloge.
-          sessions: [...(it.sessions || []), { date: todayKey(), ts: realNow().getTime(), round: roundId, chips: parfumChips, grades: parfumGrades, intensity: parfumIntensity, hedo: parfumHedo, cortege: parfumCortege, voisines: parfumVoisines, afroid: parfumAFroid, diffusion: parfumDiffusion, nettete: parfumNettete, role: parfumRole, dosage: parfumDosage, recall: parfumRecall, note: text }],
+          sessions: [...(it.sessions || []), { date: todayKey(), ts: realNow().getTime(), round: roundId, chips: parfumChips, grades: parfumGrades, intensity: parfumIntensity, hedo: parfumHedo, cortege: parfumCortege, voisines: parfumVoisines, diffusion: parfumDiffusion, nettete: parfumNettete, role: parfumRole, dosage: parfumDosage, recall: parfumRecall, note: text }],
         })),
         // avance le curseur checkpoint × matière (voir PARFUM_ROUNDS/pickAging) — la
         // 2e note d'un round (paire, 15/08) fait passer au round suivant, doneInRound repart à 0.
@@ -4428,7 +4469,7 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
       setManualMin, setComment, setTab, applyDebugTime, simReseed, runSimBatch,
       parfumChips, setParfumChips, parfumGrades, setParfumGrades, parfumIntensity, setParfumIntensity, parfumHedo, setParfumHedo, parfumCortege, setParfumCortege, parfumVoisines, setParfumVoisines, parfumVs, setParfumVs, parfumVsActive, setParfumVsActive, ackParfum,
       parfumGuesses, setParfumGuesses, submitParfumGuess,
-      parfumAFroid, setParfumAFroid, parfumDiffusion, setParfumDiffusion, parfumNettete, setParfumNettete, parfumRole, setParfumRole, parfumDosage, setParfumDosage, parfumRecall, setParfumRecall,
+      parfumDiffusion, setParfumDiffusion, parfumNettete, setParfumNettete, parfumRole, setParfumRole, parfumDosage, setParfumDosage, parfumRecall, setParfumRecall,
       readReminders, scheduleReminder, cancelReminder, checkDueReminder,
       setLog, setActivities, setStage, setCurrent,
       albumTitles, albumIdx, setAlbumTitles, setAlbumIdx, advanceAlbumTitle,
@@ -5215,17 +5256,6 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                             flux normal (log + coachViaClaude, inchangés). */}
                         {current && current.action.id === "x_pf_matiere" && current.action.itemId && (
                           <div style={{ marginBottom: 18 }}>
-                            {/* à froid (15/08, fiche T0 point 1) — jugement affectif/image/
-                                sensation, AVANT tout descripteur. Seulement à l'ouverture. */}
-                            {current.action.parfumRound === "direct" && (
-                              <div style={{ maxWidth: 320, margin: "0 auto 18px" }}>
-                                <div className="mono" style={{ fontSize: 10, color: C.faint, letterSpacing: ".08em", textAlign: "center", marginBottom: 6 }}>à froid — agréable/repoussant/indifférent, une image, une sensation</div>
-                                <input className="in" value={parfumAFroid}
-                                  autoComplete="off" name="pf-afroid"
-                                  onChange={(e) => setParfumAFroid(e.target.value)}
-                                  style={{ fontFamily: "var(--mono)", fontSize: 13, textAlign: "center", display: "block", width: "100%", color: C.text, borderBottom: `1px solid ${C.line}` }} />
-                              </div>
-                            )}
                             {/* rappel J+1 (15/08, fiche "rappel en aveugle") — il a déjà senti une
                                 des deux touches de la veille au hasard et deviné, hors app ; ici
                                 juste le verdict. Score cumulé affiché à côté (parfumRecallScore). */}
@@ -5278,11 +5308,15 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                             throughout, same font/size as the activity text. No border under it
                             once done — the borderBottom read as a "big line" that didn't belong
                             once the session already ended (round 6, was here since round 1). */}
+                        {/* Enter ne valide plus rien ici (16/08, Maxence : "un commentaire ne valide
+                            jamais une activité, seulement toucher la ligne, sinon ça fait des
+                            galères parfois") — appuyer sur Entrée pendant la frappe pouvait
+                            soumettre par accident. Seule la ligne (tapAction → submitComment) reste
+                            la surface de validation, comme partout ailleurs dans l'app. */}
                         <div style={{ position: "relative", maxWidth: 360, margin: "0 auto" }}>
                           <input className="in" value={comment}
                             autoComplete="off" name="comment-done"
                             onChange={(e) => setComment(e.target.value)}
-                            onKeyDown={(e) => { if (e.key === "Enter") submitComment(); }}
                             style={{ fontFamily: "var(--mono)", fontSize: 13, textAlign: "center", display: "block", color: C.text }} />
                           {!comment && (
                             <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: COMMENT_HINT_MODE === "cursor" ? "flex-start" : "center", justifyContent: "center", gap: 6, pointerEvents: "none", fontFamily: "var(--mono)", fontSize: 13, color: C.faint }}>
