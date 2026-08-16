@@ -4972,8 +4972,18 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                     <div style={{ fontFamily: "var(--mono)", fontSize: 13, fontWeight: 400, lineHeight: 1.55, letterSpacing: ".02em", textTransform: "lowercase",
                       // couleur de matière (16/08-i) : le nom lui-même prend la teinte/
                       // saturation en direct pendant le drag — "on comprendra
-                      // intuitivement" (Maxence), pas besoin d'un aperçu séparé.
-                      color: colorActive && parfumColorH != null ? `hsl(${parfumColorH}, ${parfumColorS ?? 70}%, 62%)` : (stage === "done" ? C.mut : C.text) }}>
+                      // intuitivement" (Maxence), pas besoin d'un aperçu séparé. Bug
+                      // trouvé après coup (Maxence : "la saturation ne peut pas changer
+                      // en live la couleur ?") : la condition ne regardait que H — si on
+                      // tape la phase teinte SANS la toucher (neutre, jamais écrite) puis
+                      // drague la saturation, H reste null et rien ne s'affichait jamais.
+                      // Corrigé : n'importe laquelle des deux suffit à afficher un aperçu
+                      // (repli 0/70% pour celle pas encore touchée) — l'écriture réelle
+                      // sur l'item, elle, garde sa condition sur H (voir submitParfumColor,
+                      // teinte reste le signal qui décide s'il y a une couleur ou non).
+                      color: colorActive && (parfumColorH != null || parfumColorS != null)
+                        ? `hsl(${parfumColorH ?? 0}, ${parfumColorS ?? 70}%, 62%)`
+                        : (stage === "done" ? C.mut : C.text) }}>
                       {current.action.text}
                     </div>
                     {/* recommandeur (musique, film…): the line above is ONLY the title — what
