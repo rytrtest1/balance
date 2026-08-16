@@ -1007,21 +1007,28 @@ function ParfumVsPicker({ pair, sessA, sessB, active, setActive, vIdx, setVIdx }
   );
   const cur = seq[Math.min(vIdx, seq.length - 1)];
   const side = active[cur.key] || "a";
+  // 16/08-s (Maxence : "avant que soit écrite la mesure à comparer... les deux
+  // blanches... quand le reste apparaît une seule blanche l'autre grise") — tant
+  // que rien n'est décidé pour cette facette (ni tap, ni drag), les deux noms
+  // restent blancs ; pas de "a" par défaut qui prétendrait qu'un choix est déjà
+  // fait. Même logique que côté App pour la matière A (pfVsDecided).
+  const decided = active[cur.key] != null;
   // même taille/casse que le titre principal au-dessus de la ligne (16/08-p,
   // Maxence : "les deux en minuscules mais genre important... comme avant") —
   // matière B n'est plus une étiquette secondaire, elle est symétrique à A.
   const nameStyle = {
     fontFamily: "var(--mono)", fontSize: 13, fontWeight: 400, letterSpacing: ".02em", textTransform: "lowercase",
     padding: "2px 0", background: "none", border: "none",
-    color: side === "b" ? C.text : C.faint,
+    color: !decided || side === "b" ? C.text : C.faint,
   };
   return (
     <div onTouchStart={onTouchStart} onTouchEnd={onTouchEnd} style={{ marginTop: 4, textAlign: "center" }}>
       <button className="link" onClick={() => setActive((st) => ({ ...st, [cur.key]: "b" }))} style={nameStyle}>{b.name}</button>
-      {/* la facette EN COURS de comparaison — 16/08-q (Maxence : "on met intensité ou
-          autre sous la seconde matière, avec les points de navigation en dessous") —
-          même style que les autres étiquettes secondaires, juste au-dessus des points. */}
-      <div className="mono" style={{ fontSize: 10, letterSpacing: ".1em", textTransform: "uppercase", color: C.faint, marginTop: 10 }}>{cur.label}</div>
+      {/* la facette EN COURS de comparaison — bloc 3, séparé de la matière B/bloc 2
+          par un espacement plus large (16/08-s, "quatre blocs en espacement") — 16/08-q
+          (Maxence : "on met intensité ou autre sous la seconde matière, avec les points
+          de navigation en dessous"). */}
+      <div className="mono" style={{ fontSize: 10, letterSpacing: ".1em", textTransform: "uppercase", color: C.faint, marginTop: 22 }}>{cur.label}</div>
       {seq.length > 1 && (
         <div style={{ display: "flex", justifyContent: "center", gap: 6, marginTop: 8 }}>
           {seq.map((s, i) => (
@@ -3966,12 +3973,23 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
       : (parfumVs.facets?.[pfVsCur.key]?.[side] ?? (side === "a" ? pfVsSessA.grades?.[pfVsCur.key] : pfVsSessB.grades?.[pfVsCur.key]) ?? null);
   };
   const pfVsHeroActive = stage === "done" && !!pfVsCur;
+  // neutralité des noms (16/08-s, Maxence : "avant que soit écrite la mesure à
+  // comparer... les deux blanches, et quand le reste apparaît une seule blanche
+  // l'autre grise ça aide à comprendre") — tant qu'aucun côté n'a été choisi pour
+  // CETTE facette (ni tap sur un nom, ni drag), `parfumVsActive[cur.key]` est
+  // undefined : les deux noms restent blancs, pas de "a" par défaut qui
+  // prétendrait qu'un choix a déjà été fait. Voir nameStyle ici et dans
+  // ParfumVsPicker.
+  const pfVsDecided = pfVsCur ? parfumVsActive[pfVsCur.key] != null : false;
   const setPfVsFromPointer = (clientX) => {
     const el = lineRef.current;
     if (!el || clientX == null || !pfVsCur) return;
     const rect = el.getBoundingClientRect();
     const half = rect.width / 2 || 1;
     const v = Math.round(Math.max(0, Math.min(1, Math.abs(clientX - (rect.left + half)) / half)) * 100);
+    // draguer rend le côté choisi EXPLICITE (pas juste le repli "a") — c'est ce
+    // qui déclenche la bascule blanc/gris au moment où on agit vraiment.
+    if (parfumVsActive[pfVsCur.key] == null) setParfumVsActive((st) => ({ ...st, [pfVsCur.key]: pfVsSide }));
     setParfumVs((st) => pfVsCur.key === "__int"
       ? { ...st, intensity: { ...st.intensity, [pfVsSide]: v } }
       : { ...st, facets: { ...st.facets, [pfVsCur.key]: { ...st.facets?.[pfVsCur.key], [pfVsSide]: v } } });
@@ -5017,7 +5035,15 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
 
                 {(stage === "proposal" || stage === "running" || stage === "done") && current && (
                   <div className="fade">
-                    <div className="mono" style={{ fontSize: 10, letterSpacing: ".22em", textTransform: "uppercase", color: C.faint, marginBottom: 18 }}>
+                    {/* 4 blocs (16/08-s, Maxence : "il faut penser quatre blocs en
+                        espacement : PARFUM EXPLORATION avec COMPARER / la matière 1 et la
+                        ligne et la matière 2 / la mesure et les points de navigation / le
+                        bouton pause et le curseur") — scopé à pfVsHeroActive (comparer
+                        seulement) pour ne pas changer le rythme des autres écrans/activités,
+                        qui partagent ces mêmes divs. Intra-bloc serré (name↔"comparer"),
+                        inter-bloc plus large (bloc1↔bloc2, porté par le marginBottom de
+                        "comparer" juste en dessous). */}
+                    <div className="mono" style={{ fontSize: 10, letterSpacing: ".22em", textTransform: "uppercase", color: C.faint, marginBottom: pfVsHeroActive ? 8 : 18 }}>
                       {current.activity.name}
                     </div>
                     {/* sub-activity: shown whenever the main line no longer carries it — a
@@ -5026,7 +5052,7 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                         Comparer : "comparer" REVENU ici (16/08-q, après un aller-retour en
                         -n/-o avec la facette dynamique) — statique, posé par pickAging. */}
                     {current.action.baseText && current.action.baseText !== current.action.text && (
-                      <div className="mono" style={{ fontSize: 10, letterSpacing: ".1em", textTransform: "uppercase", color: C.faint, marginBottom: 8 }}>{current.action.baseText}</div>
+                      <div className="mono" style={{ fontSize: 10, letterSpacing: ".1em", textTransform: "uppercase", color: C.faint, marginBottom: pfVsHeroActive ? 20 : 8 }}>{current.action.baseText}</div>
                     )}
                     {/* the item shows immediately — for a recommandeur it's the real curated
                         library entry (already meaningful). If the (non-blocking) embellisher
@@ -5046,10 +5072,13 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                       // teinte reste le signal qui décide s'il y a une couleur ou non).
                       color: colorActive && (parfumColorH != null || parfumColorS != null)
                         ? `hsl(${parfumColorH ?? 0}, ${parfumColorS ?? 70}%, 62%)`
-                        // comparer (16/08-p, Maxence : "quand on touche le texte de la
-                        // matière elle se sélectionne en blanc, l'autre en gris, vice versa,
-                        // comme avant") — blanc si côté "a" actif, gris sinon.
-                        : pfVsHeroActive ? (pfVsSide === "a" ? C.text : C.faint)
+                        // comparer (16/08-p, affiné 16/08-s, Maxence : "quand on touche le
+                        // texte de la matière elle se sélectionne en blanc, l'autre en gris...
+                        // avant que soit écrite la mesure à comparer... les deux blanches") —
+                        // tant que rien n'est décidé pour cette facette (pfVsDecided), les
+                        // deux matières restent blanches ; blanc/gris ne se sépare qu'une
+                        // fois un vrai choix fait (tap sur un nom, ou drag).
+                        : pfVsHeroActive ? (!pfVsDecided || pfVsSide === "a" ? C.text : C.faint)
                         : (stage === "done" ? C.mut : C.text),
                       cursor: pfVsHeroActive ? "pointer" : "default" }}
                       // comparer (16/08-p, Maxence : "juste la matière 1 au-dessus de la
