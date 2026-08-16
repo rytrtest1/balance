@@ -531,6 +531,15 @@ function pickItemsLRU(a, log, n) {
   // session, ou personne dans la fenêtre ne partage rien) ça retombe tel quel sur
   // l'ordre LRU déjà posé au-dessus — "voisines" au sens le plus simple qui reste
   // disponible : la famille de la semaine, sans rien de plus fin à offrir.
+  // Amorti par pfamCompares (16/08, Maxence : "il est capital que les propositions
+  // soient cohérentes" — vérifié en sandbox : sans amortissement, une fois la phase
+  // de couverture passée, le LRU pur est parfaitement périodique et l'argmax de
+  // recouvrement retombe donc TOUJOURS sur exactement le même partenaire pour une
+  // matière donnée — cycle figé, jamais de variation. `pfamCompares` était déjà
+  // écrit à chaque x_pf_direct_cmp mais jamais relu par le tirage : corrigé ici,
+  // même logique que l'ancien pickVoisinesFamille (score/(1+déjà comparées)) mais
+  // sur LE COUPLE précis, pas le total par matière — une paire souvent confrontée
+  // cède la place à une autre combinaison sans jamais tomber à zéro de chance.
   if (n === 2 && picks.length === 2) {
     const [first] = picks;
     const firstTally = itemFacetTally(first);
@@ -541,7 +550,10 @@ function pickItemsLRU(a, log, n) {
       for (const it of window) {
         const tally = itemFacetTally(it);
         const shared = Object.keys(firstTally).filter((f) => tally[f]);
-        const score = shared.reduce((sum, f) => sum + Math.min(firstTally[f], tally[f]), 0);
+        const raw = shared.reduce((sum, f) => sum + Math.min(firstTally[f], tally[f]), 0);
+        if (!raw) continue;
+        const pairCompares = (first.pfamCompares || []).filter((c) => c.against === it.id).length;
+        const score = raw / (1 + pairCompares);
         if (score > bestScore) { bestScore = score; best = it; }
       }
       if (best) picks[1] = best;
