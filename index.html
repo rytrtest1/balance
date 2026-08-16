@@ -1064,8 +1064,10 @@ function ParfumVsPicker({ pair, roundLabel, sessA, sessB, active, setActive, vId
 // que les familles (single-select, retaper enlève). "avec quoi" reste du texte
 // libre dans le champ aide existant, pas un champ de plus.
 const PARFUM_ROLES = ["note principale", "modificateur", "fixateur", "volume/liant", "autre"];
-// Refonte one-by-one (16/08-i, affinée 16/08-k). Deux phases séquentielles, une
-// seule mesure/facette FOCALISÉE à la fois (mIdx/fIdx, remontés dans App) :
+// Refonte one-by-one (16/08-i, affinée 16/08-k, unifiée en une seule séquence
+// 16/08-l). Une seule mesure/facette FOCALISÉE à la fois (mIdx, remonté dans
+// App, index continu à travers les deux "phases" ci-dessous — plus de bouton de
+// transition, voir pfSeq) :
 // 1) MESURES — intensité, agrément, (diffusion/netteté à l'ouverture), cortège,
 //    (dosage aux rounds direct/final) — toutes éditées par drag sur la ligne héro
 //    (voir pfMeasureActive dans App, plus de slider ici), navigation par les points
@@ -1084,7 +1086,7 @@ const PARFUM_ROLES = ["note principale", "modificateur", "fixateur", "volume/lia
 // Registres : "comme quoi" (sources) supprimé ("si on a une idée on la met en
 // commentaire") ; "comme si" (sensible) réservé au round final (touche fraîche +
 // touche vieille = le moment de la vue globale) — tabs visibles seulement là.
-function ParfumNotePicker({ chips, setChips, grades, setGrades, intensity, setIntensity, hedo, setHedo, cortege, setCortege, items, currentItemId, voisines, setVoisines, diffusion, setDiffusion, nettete, setNettete, role, setRole, dosage, setDosage, showMesures, full, finalRound, mIdx, setMIdx, fIdx, setFIdx }) {
+function ParfumNotePicker({ chips, setChips, grades, setGrades, intensity, setIntensity, hedo, setHedo, cortege, setCortege, items, currentItemId, voisines, setVoisines, diffusion, setDiffusion, nettete, setNettete, role, setRole, dosage, setDosage, showMesures, full, finalRound, mIdx, setMIdx }) {
   const [gridOpen, setGridOpen] = useState(chips.length === 0);
   const [registre, setRegistre] = useState("olfactif");
   const [open, setOpen] = useState(null);
@@ -1092,23 +1094,25 @@ function ParfumNotePicker({ chips, setChips, grades, setGrades, intensity, setIn
   const longTimer = useRef(null);
   const longFired = useRef(false);
   const mesures = [
-    { key: "intensité", val: intensity, set: setIntensity },
-    { key: "agrément", val: hedo, set: setHedo },
-    ...(showMesures ? [
-      { key: "diffusion", val: diffusion, set: setDiffusion },
-      { key: "netteté", val: nettete, set: setNettete },
-    ] : []),
-    { key: "cortège", val: cortege, set: setCortege },
-    ...(full ? [{ key: "dosage", val: dosage, set: setDosage }] : []),
+    { kind: "mesure", key: "intensité" },
+    { kind: "mesure", key: "agrément" },
+    ...(showMesures ? [{ kind: "mesure", key: "diffusion" }, { kind: "mesure", key: "netteté" }] : []),
+    { kind: "mesure", key: "cortège" },
+    ...(full ? [{ kind: "mesure", key: "dosage" }] : []),
   ];
-  const inMesures = mIdx < mesures.length;
+  // séquence UNIQUE mesures puis facettes (16/08-l, Maxence : "enlève le
+  // 'facettes' avec la flèche là ça sert à rien") — un seul index continu (mIdx,
+  // remonté dans App où le même calcul pilote le drag sur la ligne héro, voir
+  // pfSeq) plutôt que deux phases séparées par un bouton de transition.
+  const seq = [...mesures, ...chips.map((w) => ({ kind: "facette", key: w }))];
+  const curIdx = seq.length ? Math.min(mIdx, seq.length - 1) : 0;
+  const cur = seq[curIdx] || null;
+  const curChip = cur && cur.kind === "facette" ? cur.key : null;
   const regs = finalRound ? PARFUM_REGISTRES : PARFUM_REGISTRES.filter((r) => r.key === "olfactif");
   const familles = (regs.find((r) => r.key === registre) || regs[0]).familles;
   const removeChip = (w) => {
-    const i = chips.indexOf(w);
     setChips((arr) => arr.filter((x) => x !== w));
     setGrades((g) => { if (!(w in g)) return g; const { [w]: _drop, ...rest } = g; return rest; });
-    setFIdx((f) => Math.max(0, i >= 0 && f >= i ? f - 1 : f));
   };
   // famille — la longue-pression choisit la famille ELLE-MÊME comme facette, un
   // toggle immédiat (add/remove) : elle ne vit jamais dans la grille qu'on retape
@@ -1116,7 +1120,7 @@ function ParfumNotePicker({ chips, setChips, grades, setGrades, intensity, setIn
   const toggleChip = (w) => {
     if (chips.includes(w)) { removeChip(w); return; }
     setChips((arr) => [...arr, w]);
-    setFIdx(chips.length);
+    setMIdx(mesures.length + chips.length);
   };
   const famDown = (f) => {
     longFired.current = false;
@@ -1130,7 +1134,7 @@ function ParfumNotePicker({ chips, setChips, grades, setGrades, intensity, setIn
   // sélectionnée pour modifier l'intensité, il faut installer le système de hold
   // pour désélectionner seulement"). Retaper une facette DÉJÀ choisie ramenait son
   // slider — impossible d'y revenir pour ajuster. Maintenant : tap sur une facette
-  // choisie = juste la refocaliser (fIdx), retirer devient un hold, même seuil
+  // choisie = juste la refocaliser (mIdx), retirer devient un hold, même seuil
   // 450ms que les familles.
   const subDown = (w) => {
     longFired.current = false;
@@ -1139,17 +1143,21 @@ function ParfumNotePicker({ chips, setChips, grades, setGrades, intensity, setIn
   const subUp = (w) => {
     clearTimeout(longTimer.current);
     if (longFired.current) return;
-    if (chips.includes(w)) { setFIdx(chips.indexOf(w)); return; }
+    if (chips.includes(w)) { setMIdx(mesures.length + chips.indexOf(w)); return; }
     setChips((arr) => [...arr, w]);
-    setFIdx(chips.length);
+    setMIdx(mesures.length + chips.length);
   };
   const famLit = (f) => chips.includes(f.key) || (f.facets || []).some((w) => chips.includes(w));
-  const curFIdx = Math.min(fIdx, chips.length - 1);
-  const curChip = chips.length ? chips[curFIdx] : null;
   const row = { display: "flex", flexWrap: "wrap", justifyContent: "center", gap: 6, maxWidth: 320, margin: "0 auto" };
   // légende + points — plus de ligne ici (16/08-k) : le drag édite directement la
   // ligne héro au-dessus (voir pfMeasureActive dans App), ces points ne font plus
-  // que naviguer entre mesures/facettes (mIdx/fIdx remontés dans App).
+  // que naviguer dans la séquence (mIdx remonté dans App). Le nom de l'ÉTAPE
+  // ("mesure"/"facette", 16/08-l — Maxence : "nomme bien l'étape") au-dessus des
+  // points, le nom précis de CE qui est mesuré ("intensité", "santalé"…) en
+  // dessous.
+  const stepLabel = (text) => (
+    <div className="mono" style={{ fontSize: 10, color: C.faint, letterSpacing: ".08em", textAlign: "center" }}>{text}</div>
+  );
   const caption = (text) => (
     <div className="mono" style={{ fontSize: 9, letterSpacing: ".15em", color: C.faint, textTransform: "uppercase", textAlign: "center", marginTop: 8 }}>{text}</div>
   );
@@ -1163,26 +1171,15 @@ function ParfumNotePicker({ chips, setChips, grades, setGrades, intensity, setIn
   );
   return (
     <div>
-      {inMesures ? (
+      {cur && (
         <div style={{ margin: "18px auto 0" }}>
-          {dots(mesures.length, mIdx, setMIdx)}
-          {caption(mesures[mIdx].key)}
-          {/* passage aux facettes — plus de tap-sur-la-ligne pour avancer (16/08-k, la
-              ligne héro ne fait plus que draguer) donc il faut un geste explicite pour
-              quitter la phase mesures ; les points ne couvrent que 0..mesures.length-1. */}
-          <div style={{ textAlign: "center", marginTop: 12 }}>
-            <button className="link" onClick={() => setMIdx(mesures.length)} style={{ fontSize: 11 }}>facettes →</button>
-          </div>
+          {stepLabel(cur.kind === "mesure" ? "mesure" : "facette")}
+          {dots(seq.length, curIdx, setMIdx)}
+          {caption(cur.key)}
         </div>
-      ) : (
-        <>
-          {curChip && (
-            <div style={{ margin: "18px auto 0" }}>
-              {dots(chips.length, curFIdx, setFIdx)}
-              {caption(curChip)}
-            </div>
-          )}
-          <div style={{ textAlign: "center", marginTop: curChip ? 10 : 18 }}>
+      )}
+      <>
+          <div style={{ textAlign: "center", marginTop: cur ? 10 : 18 }}>
             <button className="link" onClick={() => setGridOpen((o) => !o)} style={{ fontSize: 13 }}>{gridOpen ? "−" : "+"}</button>
           </div>
           {gridOpen && (
@@ -1238,8 +1235,7 @@ function ParfumNotePicker({ chips, setChips, grades, setGrades, intensity, setIn
             <button className="link" onClick={() => setVoisineOpen((o) => !o)}>{voisineOpen ? "cacher les voisines" : "voisine"}</button>
           </div>
           {voisineOpen && <VoisinePicker items={items} currentItemId={currentItemId} voisines={voisines} setVoisines={setVoisines} />}
-        </>
-      )}
+      </>
     </div>
   );
 }
@@ -1685,8 +1681,11 @@ function pickAging(activities, log, place, options = {}) {
               { id: idA, num: pf.pf3.nums[0], name: pf.pf3.names[0] },
               { id: idB, num: pf.pf3.nums[1], name: pf.pf3.names[1] },
             ];
+            // texte réduit au nom de l'étape (16/08-l, Maxence : "nomme bien l'étape...
+            // comparer") — les deux matières + le round vivent déjà dans la légende de
+            // ParfumVsPicker juste en dessous, les répéter dans le titre faisait doublon.
             drawn = { activity: pf, action: { ...matAction, id: "x_pf_direct_cmp",
-              text: `comparer — ${roundDef.label} — ${nameList}`,
+              text: "comparer", baseText: roundDef.label,
               pfamFamily: parfumWeekFamille(), pfamPair: pair, pfamRoundId: roundDef.id,
               desc: "les deux côte à côte : où en est chacune sur ce qu'elle montre ?" } };
             break;
@@ -1723,7 +1722,7 @@ function pickAging(activities, log, place, options = {}) {
             const cIdx = pf.pf3.order.findIndex((id) => !colored.includes(id));
             if (cIdx >= 0) {
               return resolveDraw({ activity: pf, action: { ...matAction, id: "x_pf_couleur",
-                text: `couleur — ${pf.pf3.names[cIdx]}`, itemId: pf.pf3.order[cIdx],
+                text: pf.pf3.names[cIdx], baseText: "couleur", itemId: pf.pf3.order[cIdx],
                 parfumColor: true, pfColorName: pf.pf3.names[cIdx],
                 desc: "quelle couleur est cette matière ? drag = teinte, tap = saturation, tap = garder. ne rien toucher + tap-tap = pas de couleur." } }, log);
             }
@@ -1750,9 +1749,14 @@ function pickAging(activities, log, place, options = {}) {
             if (!floorOk) break; // pas encore l'heure — retombe sur le tirage normal.
             const stillOpen = isNextDay ? daysSince < 2 : hoursSince < roundDef.maxHoursSincePrep + PARFUM_ROUND_GRACE_HOURS;
             if (stillOpen) {
+              // texte = la matière elle-même (16/08-l, Maxence : "nomme bien la matière
+              // première en cours au-dessus de la ligne principale") — avant, le nom
+              // était noyé au milieu d'une phrase ("sentir matières premières — ouverture
+              // — orris imperial (1/2)"). baseText porte le contexte (round + position),
+              // rendu plus petit juste au-dessus (voir current.action.baseText dans le JSX).
               const label = PARFUM_BLIND ? `#${pf.pf3.nums[pf.pf3.doneInRound]}` : pf.pf3.names[pf.pf3.doneInRound];
               return resolveDraw({ activity: pf, action: { ...matAction,
-                text: `sentir matières premières — ${roundDef.label} — ${label} (${pf.pf3.doneInRound + 1}/2)`,
+                text: label, baseText: `${roundDef.label} · ${pf.pf3.doneInRound + 1}/2`,
                 itemId: pf.pf3.order[pf.pf3.doneInRound], parfumRound: roundDef.id, desc: parfumAide(roundDef.id) } }, log);
             }
             // fenêtre fermée (ratée) : round suivant, sans carte pour celui-ci.
@@ -2325,9 +2329,9 @@ function Throughline() {
   // ces mesures ! c'est stupide de dupliquer") — remontées ici depuis
   // ParfumNotePicker/ParfumVsPicker (qui n'ont plus leur propre slider, juste des
   // points de nav qui écrivent ici) pour que la ligne héro elle-même (voir
-  // pfMeasureActive/pfVsHeroActive plus bas) sache quoi éditer au drag.
+  // pfMeasureActive/pfVsHeroActive plus bas) sache quoi éditer au drag. Un seul
+  // index pour mesures+facettes (16/08-l) — plus de fIdx séparé, voir pfSeq.
   const [parfumMIdx, setParfumMIdx] = useState(0);
-  const [parfumFIdx, setParfumFIdx] = useState(0);
   const [parfumVIdx, setParfumVIdx] = useState(0);
   // parfum — les 3 réponses posées sur la carte "avant de savoir", juste avant la
   // révélation (voir pickAging). Éphémère comme itemNameInput : rien de tapé ici
@@ -3085,7 +3089,7 @@ function Throughline() {
     setAlbumTitles([]); setAlbumIdx(0); setDescOpen(false); setRating(50);
     propose(log, activities, false, current ? current.activity.id : null);
   };
-  const resetFlow = (nextStage = "entry") => { setStage(nextStage); setCurrent(null); setRunning(false); setElapsedMs(0); setPaused(false); setComment(""); setItemNameInput(""); setParfumChips([]); setParfumGrades({}); setParfumIntensity(null); setParfumHedo(null); setParfumCortege(null); setParfumVoisines([]); setParfumVs({}); setParfumVsActive({}); setParfumColorH(null); setParfumColorS(null); setParfumColorPhase("hue"); setParfumDiffusion(null); setParfumNettete(null); setParfumRole(null); setParfumDosage(null); setParfumRecall(null); setParfumMIdx(0); setParfumFIdx(0); setParfumVIdx(0); setDescOpen(false); setVocabOpen(false); setSyncMsg(""); setSyncing(false); setAlbumTitles([]); setAlbumIdx(0); setRating(50); };
+  const resetFlow = (nextStage = "entry") => { setStage(nextStage); setCurrent(null); setRunning(false); setElapsedMs(0); setPaused(false); setComment(""); setItemNameInput(""); setParfumChips([]); setParfumGrades({}); setParfumIntensity(null); setParfumHedo(null); setParfumCortege(null); setParfumVoisines([]); setParfumVs({}); setParfumVsActive({}); setParfumColorH(null); setParfumColorS(null); setParfumColorPhase("hue"); setParfumDiffusion(null); setParfumNettete(null); setParfumRole(null); setParfumDosage(null); setParfumRecall(null); setParfumMIdx(0); setParfumVIdx(0); setDescOpen(false); setVocabOpen(false); setSyncMsg(""); setSyncing(false); setAlbumTitles([]); setAlbumIdx(0); setRating(50); };
   // Album de la semaine title-by-title appreciation (Maxence 16/07, item 4/5) —
   // isAlbumActivity gates the extra running-stage UI to that one activity only.
   const isAlbumActivity = !!(current && current.activity.id === "a_ecoute_album");
@@ -3950,31 +3954,36 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
   // points sous la ligne (déjà là), plus de tap-pour-avancer sur la ligne
   // elle-même (redondant). `vocabOpen` replié = la ligne redevient la ligne
   // "done" normale, submit direct au tap, comme n'importe quelle autre activité.
+  // Séquence UNIQUE mesures puis facettes (16/08-l, Maxence : "enlève le 'facettes'
+  // avec la flèche là ça sert à rien" — plus de bouton de transition explicite : un
+  // seul index continu, les facettes suivent juste les mesures dans les mêmes
+  // points de nav, ajoutées au fur et à mesure qu'on les choisit dans la grille).
   const pfShowMesures = current?.action?.parfumRound === "direct";
   const pfFull = current?.action?.parfumRound === "direct" || current?.action?.parfumRound === "final";
   const pfMesures = (current && current.action.id === "x_pf_matiere" && current.action.itemId) ? [
-    { key: "intensité", val: parfumIntensity, set: setParfumIntensity },
-    { key: "agrément", val: parfumHedo, set: setParfumHedo },
+    { kind: "mesure", key: "intensité", val: parfumIntensity, set: setParfumIntensity },
+    { kind: "mesure", key: "agrément", val: parfumHedo, set: setParfumHedo },
     ...(pfShowMesures ? [
-      { key: "diffusion", val: parfumDiffusion, set: setParfumDiffusion },
-      { key: "netteté", val: parfumNettete, set: setParfumNettete },
+      { kind: "mesure", key: "diffusion", val: parfumDiffusion, set: setParfumDiffusion },
+      { kind: "mesure", key: "netteté", val: parfumNettete, set: setParfumNettete },
     ] : []),
-    { key: "cortège", val: parfumCortege, set: setParfumCortege },
-    ...(pfFull ? [{ key: "dosage", val: parfumDosage, set: setParfumDosage }] : []),
+    { kind: "mesure", key: "cortège", val: parfumCortege, set: setParfumCortege },
+    ...(pfFull ? [{ kind: "mesure", key: "dosage", val: parfumDosage, set: setParfumDosage }] : []),
   ] : [];
-  const pfInMesures = vocabOpen && parfumMIdx < pfMesures.length;
-  const pfCurFIdx = Math.min(parfumFIdx, parfumChips.length - 1);
-  const pfCurChip = (!pfInMesures && vocabOpen && parfumChips.length) ? parfumChips[pfCurFIdx] : null;
-  const pfMeasureActive = stage === "done" && (pfInMesures || !!pfCurChip);
-  const pfMeasureVal = pfInMesures ? pfMesures[parfumMIdx].val : (pfCurChip ? (parfumGrades[pfCurChip] ?? null) : null);
+  const pfSeq = pfMesures.length ? [
+    ...pfMesures,
+    ...parfumChips.map((w) => ({ kind: "facette", key: w, val: parfumGrades[w] ?? null, set: (v) => setParfumGrades((g) => ({ ...g, [w]: v })) })),
+  ] : [];
+  const pfCur = (vocabOpen && pfSeq.length) ? pfSeq[Math.min(parfumMIdx, pfSeq.length - 1)] : null;
+  const pfMeasureActive = stage === "done" && !!pfCur;
+  const pfMeasureVal = pfCur ? pfCur.val : null;
   const setPfMeasureFromPointer = (clientX) => {
     const el = lineRef.current;
-    if (!el || clientX == null) return;
+    if (!el || clientX == null || !pfCur) return;
     const rect = el.getBoundingClientRect();
     const half = rect.width / 2 || 1;
     const v = Math.round(Math.max(0, Math.min(1, Math.abs(clientX - (rect.left + half)) / half)) * 100);
-    if (pfInMesures) pfMesures[parfumMIdx].set(v);
-    else if (pfCurChip) setParfumGrades((g) => ({ ...g, [pfCurChip]: v }));
+    pfCur.set(v);
   };
   // vs (x_pf_direct_cmp) — même ligne, double jauge (voir le JSX de remplissage
   // plus bas) : l'active se drag comme pfMeasureActive, l'autre matière reste
@@ -5439,36 +5448,15 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
 
                 {stage === "done" && (
                   <div className="fade">
-                    {/* undo — only reachable here, gone the instant the flow returns to
-                        the waiting screen (see undoLast()). */}
-                    {doneEntryId && (
-                      <div style={{ marginBottom: 14 }}>
-                        <button className="link" style={{ fontSize: 11, color: C.faint }} onClick={undoLast}>annuler</button>
-                      </div>
-                    )}
-                    {/* hero-line slider's number dropped (Maxence 20/07) — now that a plain
-                        tap confirms distinctly from a drag, the fill position on the line is
-                        legible enough on its own. */}
+                    {/* "annuler" et "temps réel" retirés temporairement (16/08-l, Maxence :
+                        "j'ai besoin de voir exactement comment ça sera in app... ça perturbe
+                        juste. on le remettra après") — pour une revue visuelle propre du flux
+                        parfum sans le bruit du harnais de test. undoLast/manualMin restent
+                        intacts (juste plus rendus), à remettre dès que la revue est faite. */}
                     {(syncing || syncMsg) ? (
                       <div className="mono" style={{ fontSize: 11, color: C.bone, letterSpacing: ".06em", lineHeight: 1.6 }}>{syncMsg || "…"}</div>
                     ) : (
                       <>
-                        {/* duration is always logged in data (finish() records the real elapsed
-                            minutes) — the readout is sandbox-only now: prod never shows the time
-                            spent (Maxence 13/07), the session just ends on the comment line. */}
-                        {SIM && (
-                          <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, marginBottom: 18 }}>
-                            <span className="mono" style={{ fontSize: 10, color: C.faint, letterSpacing: ".1em" }}>temps réel :</span>
-                            <input
-                              type="number" min="1" className="in mono"
-                              value={manualMin}
-                              placeholder={String(Math.max(1, Math.round(actDurMin)))}
-                              onChange={(e) => setManualMin(e.target.value)}
-                              style={{ width: 44, fontSize: 12, textAlign: "center", borderBottom: `1px solid ${C.line}`, color: C.mut }}
-                            />
-                            <span className="mono" style={{ fontSize: 10, color: C.faint }}>min</span>
-                          </div>
-                        )}
                         {/* le ressenti en mots simples d'abord, la mesure ensuite (16/08-j,
                             Maxence : "à l'ouverture premier sniff on dit d'abord notre ressenti
                             en mots simples juste en commentaire. ensuite il y a bien intensité
@@ -5478,6 +5466,12 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                             ici (16/08, Maxence : "un commentaire ne valide jamais une activité,
                             seulement toucher la ligne, sinon ça fait des galères parfois") — seule
                             la ligne (tapAction → submitComment) reste la surface de validation. */}
+                        {/* nom d'étape (16/08-l, Maxence : "nomme bien l'étape genre commentaire
+                            libre, mesure, facettes, comparer") — seulement pour le protocole
+                            parfum, les autres activités n'ont qu'un commentaire, pas d'étapes. */}
+                        {current && current.activity.id === "a_parfum_explo" && (
+                          <div className="mono" style={{ fontSize: 10, color: C.faint, letterSpacing: ".08em", textAlign: "center", marginBottom: 8 }}>commentaire libre</div>
+                        )}
                         <div style={{ position: "relative", maxWidth: 360, margin: "0 auto 18px" }}>
                           <input className="in" value={comment}
                             autoComplete="off" name="comment-done"
@@ -5519,7 +5513,7 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                             <div style={{ textAlign: "center", marginBottom: vocabOpen ? 0 : 8 }}>
                               <button className="link" onClick={() => setVocabOpen((o) => !o)}>{vocabOpen ? "cacher le vocabulaire" : "vocabulaire"}</button>
                             </div>
-                            {vocabOpen && <ParfumNotePicker chips={parfumChips} setChips={setParfumChips} grades={parfumGrades} setGrades={setParfumGrades} intensity={parfumIntensity} setIntensity={setParfumIntensity} hedo={parfumHedo} setHedo={setParfumHedo} cortege={parfumCortege} setCortege={setParfumCortege} items={current.activity.items} currentItemId={current.action.itemId} voisines={parfumVoisines} setVoisines={setParfumVoisines} diffusion={parfumDiffusion} setDiffusion={setParfumDiffusion} nettete={parfumNettete} setNettete={setParfumNettete} role={parfumRole} setRole={setParfumRole} dosage={parfumDosage} setDosage={setParfumDosage} showMesures={current.action.parfumRound === "direct"} full={current.action.parfumRound === "direct" || current.action.parfumRound === "final"} finalRound={current.action.parfumRound === "final"} mIdx={parfumMIdx} setMIdx={setParfumMIdx} fIdx={parfumFIdx} setFIdx={setParfumFIdx} />}
+                            {vocabOpen && <ParfumNotePicker chips={parfumChips} setChips={setParfumChips} grades={parfumGrades} setGrades={setParfumGrades} intensity={parfumIntensity} setIntensity={setParfumIntensity} hedo={parfumHedo} setHedo={setParfumHedo} cortege={parfumCortege} setCortege={setParfumCortege} items={current.activity.items} currentItemId={current.action.itemId} voisines={parfumVoisines} setVoisines={setParfumVoisines} diffusion={parfumDiffusion} setDiffusion={setParfumDiffusion} nettete={parfumNettete} setNettete={setParfumNettete} role={parfumRole} setRole={setParfumRole} dosage={parfumDosage} setDosage={setParfumDosage} showMesures={current.action.parfumRound === "direct"} full={current.action.parfumRound === "direct" || current.action.parfumRound === "final"} finalRound={current.action.parfumRound === "final"} mIdx={parfumMIdx} setMIdx={setParfumMIdx} />}
                           </div>
                         )}
                         {/* vs — comparaison répétée à chaque round (x_pf_direct_cmp, 16/08 v2) :
