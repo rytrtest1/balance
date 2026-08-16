@@ -5028,13 +5028,15 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                   pointerEvents off while faded so a stray tap can't land on a hidden
                   button instead of just waking the screen. */}
               <div style={{ minHeight: 130, display: "flex", flexDirection: "column", justifyContent: "flex-end", textAlign: "center",
-                // 16/08-u (Maxence, correction de -q/-t : "garde l'espacement de base
-                // restons uniformes sur l'app... si un bloc est pas assez clair espace les
-                // autres plutôt que de modifier l'espacement des éléments d'un même bloc")
-                // — cette marge (matière → ligne, intra-bloc2) reste la valeur de base
-                // partout, jamais retouchée par activité/étape. La séparation se fait
-                // ailleurs, en ESPAÇANT le voisinage (voir baseText plus bas), pas ici.
-                marginBottom: 30,
+                // 16/08-u : cette marge (matière → ligne, intra-bloc2) reste la valeur de
+                // base (30) pour toutes les activités et toutes les étapes — SAUF
+                // exception explicite 16/08-v (Maxence : "je pense qu'on peut juste diviser
+                // par 2 l'espacement entre les deux matières comparées") : demande ciblée
+                // et quantifiée, pas un resserrement au jugé comme -t — donc reprise ici,
+                // scopée à pfVsHeroActive (comparer) seulement. Le calcul tient compte de
+                // la zone tactile invisible de 21px autour du vrai trait (mesurée en -t) :
+                // écart de base réel = 30+21 = 51 ; moitié ≈ 25 ; marge = 25-21 = ~5.
+                marginBottom: pfVsHeroActive ? 5 : 30,
                 opacity: ambient ? 0 : 1, pointerEvents: ambient ? "none" : "auto",
                 transition: `opacity ${ambient ? AMBIENT_FADE_OUT_MS : AMBIENT_FADE_IN_MS}ms ease` }}>
 
@@ -5285,11 +5287,10 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
 
               {/* ---------- below the line: controls ---------- */}
               {/* ambient: fades (slow out, quick back in) rather than unmounting — same
-                  reasoning as the block above the line. 16/08-u: valeur de base (30),
-                  jamais retouchée — voir le commentaire au-dessus de la ligne. Pour
-                  comparer c'est aussi le bon écart intra-bloc2 (ligne → matière B), donc
-                  rien à changer ici pour ce cas non plus. */}
-              <div style={{ minHeight: 130, marginTop: 30, textAlign: "center",
+                  reasoning as the block above the line. 16/08-v : même exception ciblée
+                  que juste au-dessus (moitié de l'écart de base, matière B ↔ ligne), voir
+                  le commentaire au-dessus de la ligne pour le calcul. */}
+              <div style={{ minHeight: 130, marginTop: pfVsHeroActive ? 5 : 30, textAlign: "center",
                 opacity: ambient ? 0 : 1, pointerEvents: ambient ? "none" : "auto",
                 transition: `opacity ${ambient ? AMBIENT_FADE_OUT_MS : AMBIENT_FADE_IN_MS}ms ease` }}>
 
