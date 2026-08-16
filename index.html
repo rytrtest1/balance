@@ -930,14 +930,29 @@ function VoisinesComparePicker({ pair, facets, cmp, setCmp }) {
 // libre dans le champ aide existant, pas un champ de plus.
 const PARFUM_ROLES = ["note principale", "modificateur", "fixateur", "volume/liant", "autre"];
 const PARFUM_DOSAGES = ["traces", "effet", "central", "structurant"];
-function ParfumNotePicker({ chips, setChips, grades, setGrades, intensity, setIntensity, hedo, setHedo, cortege, setCortege, items, currentItemId, voisines, setVoisines, diffusion, setDiffusion, nettete, setNettete, role, setRole, dosage, setDosage, showMesures }) {
+// `full` = round direct/final (16/08, revue du protocole — voir NOW.md Aug 16-d) :
+// registres sensible/sources + rôle/dosage RÉSERVÉS à l'ouverture et au rappel,
+// masqués sur les 3 rounds intermédiaires (légers/transition/fond). Pas une
+// question de valeur (ces jugements restent réels, cf. Ellena pour sensible/
+// sources, la fiche papier pour rôle/dosage) mais de TIMING : les rounds
+// intermédiaires n'existent QUE pour suivre l'évolution olfactive dans le temps
+// (chips famille + intensité + agrément, ce que le recouvrement de tenue mesure
+// réellement en parfumerie — vérifié par recherche, pas supposé) ; rejuger "a-t-elle
+// besoin d'un cortège" ou parcourir 15 familles sensibles à CHAQUE checkpoint
+// n'ajoute aucune donnée nouvelle, juste de la friction répétée 3x/matière/jour —
+// exactement le risque de surcharge qui tue une habitude quotidienne. rôle/dosage
+// disponibles à l'ouverture (hypothèse) ET au rappel (révisée une fois toute la
+// courbe vue) plutôt qu'une seule fois, cortège/agrément restent partout (1 tap,
+// coût nul, évolution potentiellement réelle dans le temps).
+function ParfumNotePicker({ chips, setChips, grades, setGrades, intensity, setIntensity, hedo, setHedo, cortege, setCortege, items, currentItemId, voisines, setVoisines, diffusion, setDiffusion, nettete, setNettete, role, setRole, dosage, setDosage, showMesures, full }) {
   // registre actif (olfactif par défaut — c'est le réflexe déjà acquis) + famille
   // ouverte DANS ce registre ; changer de registre referme la famille ouverte
   // (sinon un "open" resté sur une clé d'un autre registre pointerait dans le vide).
   const [registre, setRegistre] = useState("olfactif");
   const [open, setOpen] = useState(null);
   const [voisineOpen, setVoisineOpen] = useState(false);
-  const familles = (PARFUM_REGISTRES.find((r) => r.key === registre) || PARFUM_REGISTRES[0]).familles;
+  const activeRegistre = full ? registre : "olfactif";
+  const familles = (PARFUM_REGISTRES.find((r) => r.key === activeRegistre) || PARFUM_REGISTRES[0]).familles;
   const addChip = (w) => setChips((arr) => (arr.includes(w) ? arr : [...arr, w]));
   // retrait — TOUJOURS direct en 1 tap. La grille (tap ci-dessous) ne fait plus
   // qu'ajouter — le grade se règle exclusivement au slider de la rangée de rappel
@@ -970,14 +985,17 @@ function ParfumNotePicker({ chips, setChips, grades, setGrades, intensity, setIn
       {/* registre — 3 onglets au-dessus des familles (09/08, catalogue olfactif) :
           quelle QUESTION on pose, avant quelle famille dans cette question. Séparé
           de la rangée de familles pour ne pas doubler le coût de décision de la
-          même rangée (Hick's law). */}
-      <div style={{ ...row, marginTop: 18, gap: 8 }}>
-        {PARFUM_REGISTRES.map((r) => (
-          <button key={r.key} className={`chip ${registre === r.key ? "on" : ""}`}
-            onClick={() => { setRegistre(r.key); setOpen(null); }}
-            style={{ fontSize: 10, padding: "3px 10px", letterSpacing: ".04em" }}>{r.label}</button>
-        ))}
-      </div>
+          même rangée (Hick's law). Masqué sur les rounds intermédiaires (16/08) :
+          un seul registre actif (olfactif), pas de tabs à décider en plus. */}
+      {full && (
+        <div style={{ ...row, marginTop: 18, gap: 8 }}>
+          {PARFUM_REGISTRES.map((r) => (
+            <button key={r.key} className={`chip ${registre === r.key ? "on" : ""}`}
+              onClick={() => { setRegistre(r.key); setOpen(null); }}
+              style={{ fontSize: 10, padding: "3px 10px", letterSpacing: ".04em" }}>{r.label}</button>
+          ))}
+        </div>
+      )}
       <div style={{ ...row, marginTop: 12 }}>
         {familles.map((f) => (
           <button key={f.key} className={`chip ${chips.includes(f.key) ? "on" : ""}`}
@@ -1048,26 +1066,34 @@ function ParfumNotePicker({ chips, setChips, grades, setGrades, intensity, setIn
           </button>
         </div>
       </div>
-      {/* rôle & dosage (15/08, fiche) — hypothèse d'usage en composition, pas gatée
-          à un round : se décide quand ça devient clair. Un seul choix par ligne. */}
-      <div style={{ marginTop: 14 }}>
-        <div className="mono" style={{ fontSize: 10, color: C.faint, letterSpacing: ".08em", textAlign: "center", marginBottom: 6 }}>rôle</div>
-        <div style={row}>
-          {PARFUM_ROLES.map((r) => (
-            <button key={r} className={`chip ${role === r ? "on" : ""}`} onClick={() => setRole((cur) => (cur === r ? null : r))}
-              style={{ fontSize: 11, padding: "3px 9px" }}>{r}</button>
-          ))}
-        </div>
-      </div>
-      <div style={{ marginTop: 10 }}>
-        <div className="mono" style={{ fontSize: 10, color: C.faint, letterSpacing: ".08em", textAlign: "center", marginBottom: 6 }}>dosage</div>
-        <div style={row}>
-          {PARFUM_DOSAGES.map((d) => (
-            <button key={d} className={`chip ${dosage === d ? "on" : ""}`} onClick={() => setDosage((cur) => (cur === d ? null : d))}
-              style={{ fontSize: 11, padding: "3px 9px" }}>{d}</button>
-          ))}
-        </div>
-      </div>
+      {/* rôle & dosage (15/08, fiche ; réservé à direct/final 16/08) — hypothèse
+          d'usage en composition : posée à l'ouverture (première impression) et
+          révisable au rappel (une fois toute la courbe vue, le moment le mieux
+          informé pour trancher fixateur/volatile) — pas sur les 3 rounds
+          intermédiaires, où rien de nouveau ne justifie de la retrancher. Un seul
+          choix par ligne. */}
+      {full && (
+        <>
+          <div style={{ marginTop: 14 }}>
+            <div className="mono" style={{ fontSize: 10, color: C.faint, letterSpacing: ".08em", textAlign: "center", marginBottom: 6 }}>rôle</div>
+            <div style={row}>
+              {PARFUM_ROLES.map((r) => (
+                <button key={r} className={`chip ${role === r ? "on" : ""}`} onClick={() => setRole((cur) => (cur === r ? null : r))}
+                  style={{ fontSize: 11, padding: "3px 9px" }}>{r}</button>
+              ))}
+            </div>
+          </div>
+          <div style={{ marginTop: 10 }}>
+            <div className="mono" style={{ fontSize: 10, color: C.faint, letterSpacing: ".08em", textAlign: "center", marginBottom: 6 }}>dosage</div>
+            <div style={row}>
+              {PARFUM_DOSAGES.map((d) => (
+                <button key={d} className={`chip ${dosage === d ? "on" : ""}`} onClick={() => setDosage((cur) => (cur === d ? null : d))}
+                  style={{ fontSize: 11, padding: "3px 9px" }}>{d}</button>
+              ))}
+            </div>
+          </div>
+        </>
+      )}
       {/* voisine — repliée par défaut, même geste que le toggle "vocabulaire" qui
           enveloppe tout ce composant : 164 matières d'un coup serait trop, même
           groupées. */}
@@ -5024,7 +5050,7 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                             <div style={{ textAlign: "center", marginBottom: vocabOpen ? 0 : 8 }}>
                               <button className="link" onClick={() => setVocabOpen((o) => !o)}>{vocabOpen ? "cacher le vocabulaire" : "vocabulaire"}</button>
                             </div>
-                            {vocabOpen && <ParfumNotePicker chips={parfumChips} setChips={setParfumChips} grades={parfumGrades} setGrades={setParfumGrades} intensity={parfumIntensity} setIntensity={setParfumIntensity} hedo={parfumHedo} setHedo={setParfumHedo} cortege={parfumCortege} setCortege={setParfumCortege} items={current.activity.items} currentItemId={current.action.itemId} voisines={parfumVoisines} setVoisines={setParfumVoisines} diffusion={parfumDiffusion} setDiffusion={setParfumDiffusion} nettete={parfumNettete} setNettete={setParfumNettete} role={parfumRole} setRole={setParfumRole} dosage={parfumDosage} setDosage={setParfumDosage} showMesures={current.action.parfumRound === "direct"} />}
+                            {vocabOpen && <ParfumNotePicker chips={parfumChips} setChips={setParfumChips} grades={parfumGrades} setGrades={setParfumGrades} intensity={parfumIntensity} setIntensity={setParfumIntensity} hedo={parfumHedo} setHedo={setParfumHedo} cortege={parfumCortege} setCortege={setParfumCortege} items={current.activity.items} currentItemId={current.action.itemId} voisines={parfumVoisines} setVoisines={setParfumVoisines} diffusion={parfumDiffusion} setDiffusion={setParfumDiffusion} nettete={parfumNettete} setNettete={setParfumNettete} role={parfumRole} setRole={setParfumRole} dosage={parfumDosage} setDosage={setParfumDosage} showMesures={current.action.parfumRound === "direct"} full={current.action.parfumRound === "direct" || current.action.parfumRound === "final"} />}
                           </div>
                         )}
                         {/* voisines olfactives — différentiel d'Arctander posé chaque jour
