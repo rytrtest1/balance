@@ -226,6 +226,29 @@ const extractLocalProgress = (text) => {
   if (m) return `ch.${m[1]}`;
   return null;
 };
+// 17/08 (Maxence, Queue) : coachViaClaude se déclenchait pour TOUT commentaire non
+// vide sur une action singleItem, même quand il n'y a rien à en tirer au-delà du
+// repère déjà capturé ci-dessus (ex: "page 105/833" tout seul — pas d'observation à
+// faire grandir, item_done ne peut pas être vrai pour un simple numéro de page).
+// Retire du texte tout ce qu'extractLocalProgress reconnaît déjà ; s'il ne reste rien
+// de substantiel, le commentaire ne dit RIEN de plus que ce repère → pas la peine de
+// payer l'appel API pour ça. Un commentaire qui ajoute ne serait-ce qu'un mot de plus
+// (ressenti, remarque) continue de passer par Claude normalement.
+const isPureProgressMarker = (text) => {
+  const t = (text || "").trim();
+  if (!t || !extractLocalProgress(t)) return false;
+  const stripped = t
+    .replace(/page\s*\d+\s*\/\s*\d+/gi, "")
+    .replace(/\bp\.?\s*\d+\s*\/\s*\d+\b/gi, "")
+    .replace(/\b\d+\s*\/\s*\d+\b/g, "")
+    .replace(/page\s*\d+\b/gi, "")
+    .replace(/\bp\.?\s*\d+\b/gi, "")
+    .replace(/(?:épisode|episode|ép\.?|ep\.?)\s*\d+\b/gi, "")
+    .replace(/chapitre\s*\d+\b/gi, "")
+    .replace(/[.,;:!?"'«»]/g, "")
+    .trim();
+  return stripped === "";
+};
 // same "works without a call" spirit as extractLocalProgress above, applied to
 // naming a fresh continuous-pipeline piece (16/08 refonte) — a quoted title is unambiguous,
 // no need to wait on/spend an API call just to notice it. Only guillemets/quotes
@@ -2013,6 +2036,88 @@ function buildHat(activities, log, place) {
   }));
 }
 
+// ---------- import : fusion catalogue vs restauration ----------
+// Un fichier d'import joue deux rôles très différents, confondus jusqu'ici par un
+// `setActivities(o.activities)` sec (applyImport) :
+//   - SAUVEGARDE (défaut, fichier exporté par l'app) : il porte le vécu le PLUS
+//     récent, il doit tout remplacer — sinon "load" ne restaure plus rien.
+//   - CATALOGUE (fichier édité à la main sur PC puis passé par OneDrive, marqué
+//     `"merge": "catalogue"` à la racine) : il porte la structure fraîche (nouveaux
+//     items, textes, profils `note`, targets) mais un vécu périmé — le sien date de
+//     son export d'origine (exportedAt figé au 23/07 alors que le fichier est réédité
+//     à la main depuis). Le remplacement sec effaçait donc tout ce que l'app avait
+//     appris depuis : ratings, positions de pipeline, sessions parfum.
+// Ça tenait tant qu'un humain recopiait le vécu dans le fichier avant de le renvoyer
+// (la revue conversationnelle FAISAIT la fusion à la main) ; ça ne peut plus tenir dès
+// que le recommandeur écrit dans items[] tout seul — voir NOW.md 17/08.
+// Règle : le FICHIER est maître de la structure, le LOCAL est maître du vécu.
+const LIVED_ITEM_FIELDS = ["status", "rating", "pos", "done", "progress", "sessions", "pfamCompares", "stage"];
+const LIVED_ACT_FIELDS = ["observations", "pf3", "done"];
+function mergeCatalogue(fileActs, localActs) {
+  const localById = new Map((localActs || []).map((a) => [a.id, a]));
+  const merged = (fileActs || []).map((fa) => {
+    const la = localById.get(fa.id);
+    if (!la) return fa; // activité nouvelle côté fichier → entre telle quelle
+    const out = { ...fa };
+    for (const f of LIVED_ACT_FIELDS) if (la[f] !== undefined) out[f] = la[f];
+    if (fa.items || la.items) {
+      const localItems = new Map((la.items || []).map((it) => [it.id, it]));
+      const seen = new Set();
+      const items = (fa.items || []).map((fi) => {
+        seen.add(fi.id);
+        const li = localItems.get(fi.id);
+        if (!li) return fi;
+        const m = { ...fi };
+        for (const f of LIVED_ITEM_FIELDS) if (li[f] !== undefined) m[f] = li[f];
+        if (!m.text && li.text) m.text = li.text; // pièce nommée in-app, restée vide côté fichier
+        return m;
+      });
+      // items NÉS dans l'app (pièce fraîche d'un pipeline, candidat promu plus tard) :
+      // absents du fichier par construction, donc jamais supprimés par un import. Le
+      // retrait d'un item passe par un `status` explicite écrit dans le fichier, pas
+      // par la suppression de sa ligne — sinon toute pièce créée en session
+      // disparaîtrait au premier sync.
+      for (const li of la.items || []) if (!seen.has(li.id)) items.push(li);
+      out.items = items;
+    }
+    return out;
+  });
+  const fileIds = new Set((fileActs || []).map((a) => a.id));
+  for (const la of localActs || []) if (!fileIds.has(la.id)) merged.push(la); // idem au niveau activité
+  return merged;
+}
+
+// ---------- réconciliation status/rating depuis le log (17/08) ----------
+// Avant le fix ① (import non destructif), un import de catalogue écrasait
+// `items[]` en entier — un item déjà écouté et noté restait `status:"doing"`
+// dans items[], son vrai rating survivant seulement dans le log. mergeCatalogue
+// ne répare pas ces cas déjà en place (le local reste maître de status/rating,
+// donc rien ne les corrige à la fusion) : cette passe lit le log — source de
+// vérité pour ce qui a réellement été noté — et referme les items qu'il montre
+// déjà terminés. Idempotente (relue à chaque chargement, pas un flag "déjà migré")
+// : un item déjà `status:"done"` n'est jamais touché.
+function reconcileLivedStatus(activities, log) {
+  const byItem = new Map();
+  for (const en of log) {
+    if (en.type !== "done" || !en.itemId || en.rating == null) continue;
+    const prev = byItem.get(en.itemId);
+    if (!prev || en.ts > prev.ts) byItem.set(en.itemId, en);
+  }
+  if (!byItem.size) return activities;
+  return activities.map((a) => {
+    if (!a.items) return a;
+    let changed = false;
+    const items = a.items.map((it) => {
+      if (it.status === "done") return it;
+      const en = byItem.get(it.id);
+      if (!en) return it;
+      changed = true;
+      return { ...it, status: "done", rating: en.rating };
+    });
+    return changed ? { ...a, items } : a;
+  });
+}
+
 // ---------- Claude bridge (shared) ----------
 // One direct browser→Messages-API call returning structured JSON. Both the pipeline
 // advancer and the practice/recommandeur coach go through here, so the transport,
@@ -2619,7 +2724,6 @@ function Throughline() {
   const [reportHolding, setReportHolding] = useState(false);
   const reportHoldTimer = useRef(null);
   const reportHoldStartX = useRef(0);
-  const [logOpen, setLogOpen] = useState(false);
   const [logText, setLogText] = useState("");
   const [logBusy, setLogBusy] = useState(false);
   // "tap to begin" — shown exactly once, on the very first launch ever, then
@@ -3012,8 +3116,9 @@ function Throughline() {
       medReminderShownRef.current = await store.get(NS("tlx_medReminderDate"));
       try { const raw = await store.get(NS("tlx_lastLoadRef")); lastLoadRef.current = raw ? JSON.parse(raw) : null; } catch { lastLoadRef.current = null; }
       if (!alive) return;
-      setActivities(migrateSingleItemActivities(migratePickerActions(a ?? SEED)));
-      setLog(l ?? []);
+      const loadedLog = l ?? [];
+      setActivities(reconcileLivedStatus(migrateSingleItemActivities(migratePickerActions(a ?? SEED)), loadedLog));
+      setLog(loadedLog);
       setApiKey(k || "");
       if (hs && hs.date === todayKey()) { setHoldMs(hs.ms); setHoldDate(hs.date); } // same day → keep the accumulated penalty
       else { setHoldMs(BASE_HOLD_MS); setHoldDate(todayKey()); }                    // new day → back to 10s
@@ -3814,7 +3919,32 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
     // current.activity/current.action synchronously on their first line, before their
     // first await, so moving on immediately is safe: the API round-trip keeps updating
     // observations/items in the background regardless of what's on screen by then.
-    const wantsClaude = !!text && (kind === "pipeline" || kind === "practice");
+    // singleItem practice (Livre, Podcast, Sudoku vidéo, Parfum livre/vidéo…) dont le
+    // commentaire n'est QUE le repère de progression déjà capturé localement plus haut
+    // dans coachViaClaude (ou ici même si jamais appelée) — voir isPureProgressMarker.
+    const isSingleItemPractice = kind === "practice" && !!action.singleItem && !!action.itemId;
+    const pureProgressOnly = isSingleItemPractice && !!text && isPureProgressMarker(text);
+    // 17/08 (M., "réinterroge cette fonctionnalité") : coachViaClaude ne fait, pour une
+    // activité chore, QUE grandir `observations` — jamais lu par le moteur, le rapport,
+    // le recommandeur, ni affiché ailleurs qu'un textarea de l'éditeur catalogue. Payer
+    // un appel Opus par commentaire de vaisselle pour une mémoire que personne ne
+    // consulte n'a pas de retour repérable — le commentaire brut reste dans le log de
+    // toute façon, rien n'est perdu en sautant l'appel. Gardé pour le reste (créatif/
+    // apprentissage/mind/rest) où la nuance qualitative accumulée a un vrai usage futur.
+    const isChorePractice = kind === "practice" && act.domain === "chore";
+    const wantsClaude = !!text && (kind === "pipeline" || kind === "practice") && !pureProgressOnly && !isChorePractice;
+    if (pureProgressOnly) {
+      const localProgress = extractLocalProgress(text);
+      const aid0 = act.id, itemId0 = action.itemId;
+      setActivities((arr) => arr.map((a) => (a.id !== aid0 ? a : {
+        ...a,
+        items: (a.items || []).map((it) => (it.id === itemId0 ? { ...it, progress: localProgress } : it)),
+      })));
+      setSyncMsg("repère de progression noté — rien d'autre à lire, pas d'appel Claude");
+      setTimeout(() => setSyncMsg(""), 2200);
+      finishFlow(text);
+      return;
+    }
     if (wantsClaude) {
       const key = (await store.get("tlx_apiKey")) || "";
       if (key) {
@@ -3873,6 +4003,13 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
     setLog((L) => [...L, {
       id: uid(), date: todayKey(), ts: realNow().getTime(), type: "note",
       activityId: current.activity.id, actionId: current.action.id, actionText: current.action.text,
+      // parentId + itemId (17/08) : sans ça, un commentaire tapé en cours d'écoute
+      // n'est reliable ni à l'entrée "done" finale (rating) ni à l'item précis —
+      // c'était la note la plus riche (attributs aimés/pas aimés) et elle finissait
+      // orpheline. doneEntryId est posé par begin() dès le départ de la session,
+      // pas seulement à la fin, précisément pour être déjà là ici.
+      ...(doneEntryId ? { parentId: doneEntryId } : {}),
+      ...(current.action.itemId ? { itemId: current.action.itemId } : {}),
       note: text,
     }]);
     setComment("");
@@ -4041,6 +4178,14 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
     setAlbumTitles(isAlbumActivity ? [{ id: uid(), text: "", rating: 50 }] : []);
     setAlbumIdx(0);
     setRunning(true); setStage("running");
+    // sessionId généré ici (pas à finish()) : les commentaires tapés PENDANT
+    // l'écoute (submitRunningComment) ont besoin de le référencer en parentId
+    // pour que le rating final (posé sur l'entrée "done" créée par finish(),
+    // qui réutilise ce même id) retrouve le commentaire riche qui allait avec —
+    // sinon l'entrée notée finit avec une note vide et le vécu (attributs
+    // aimés/pas aimés) est perdu (17/08, cas réel du 08/08 : 8 commentaires en
+    // cours d'écoute puis une entrée finale item+rating sans aucune note).
+    setDoneEntryId(uid());
     // renforce l'autoplay : play() directement dans ce vrai tap utilisateur, en
     // plus de l'effect stage/paused (certains WebView Android sont plus stricts
     // que Chrome desktop sur ce qui compte comme "déclenché par un tap").
@@ -4141,7 +4286,10 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
     const e = {
       // realNow() not Date.now(): identical in prod (no debug clock), but in the
       // sandbox this must track the simulated clock (see comment on the fix below).
-      id: uid(), date: todayKey(), ts: realNow().getTime(), type: "done",
+      // id = doneEntryId posé par begin(), pas un nouveau uid() : c'est ce qui
+      // permet à submitRunningComment (pendant l'écoute) de référencer cette
+      // entrée par parentId avant même qu'elle existe — voir le commentaire dans begin().
+      id: doneEntryId || uid(), date: todayKey(), ts: realNow().getTime(), type: "done",
       activityId: aid, actionId: current.action.id, actionText: current.action.text,
       min: minLogged, sec: minLogged * 60, domain: current.activity.domain, note: "",
       ...(current.action.itemId ? { itemId: current.action.itemId } : {}),
@@ -4636,7 +4784,7 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
       } else {
         setMsg("a_parfum_explo introuvable ou pool insuffisant"); setTimeout(() => setMsg(""), 1800);
       }
-      setLogText(""); setLogOpen(false);
+      setLogText("");
       return;
     }
     // lancer une activité depuis le log, en tapant son nom (Maxence 16/08 : "à bien
@@ -4682,12 +4830,12 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
               } catch (e) {}
             })();
           }
-          setLogText(""); setLogOpen(false);
+          setLogText("");
           setMsg(`${exact.name} proposé`); setTimeout(() => setMsg(""), 1800);
           return;
         }
         setMsg(`${exact.name} : rien à tirer (pool vide ?)`); setTimeout(() => setMsg(""), 2200);
-        setLogText(""); setLogOpen(false);
+        setLogText("");
         return;
       }
     }
@@ -4696,7 +4844,7 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
       // no key: can't classify freely, kept as a note rather than silently dropped
       // or force-matched without any real reading of the text.
       setLog((L) => [...L, { id: uid(), date: todayKey(), ts: realNow().getTime(), type: "note", note: text }]);
-      setMsg("noté — pas de clé API pour lire plus finement"); setLogText(""); setLogOpen(false);
+      setMsg("noté — pas de clé API pour lire plus finement"); setLogText("");
       setTimeout(() => setMsg(""), 2400);
       return;
     }
@@ -4755,7 +4903,7 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
               } catch (e) {}
             })();
           }
-          setLogText(""); setLogOpen(false);
+          setLogText("");
           setMsg(`${ta.name} proposé`);
           return;
         }
@@ -4767,7 +4915,7 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
         // didn't launch anything. Distinguishing message kept broad since the exact
         // failure (bad id vs empty pool) isn't worth surfacing in the UI.
         setLog((L) => [...L, { id: uid(), date: todayKey(), ts: realNow().getTime(), type: "note", note: out.note || text }]);
-        setLogText(""); setLogOpen(false);
+        setLogText("");
         setMsg(`n'a pas pu démarrer "${ta ? ta.name : out.activity_id}" — noté à la place`);
         return;
       }
@@ -4800,7 +4948,7 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
         setLog((L) => [...L, { id: uid(), date: todayKey(), ts: realNow().getTime(), type: "note", note: out.note || text }]);
         setMsg("noté");
       }
-      setLogText(""); setLogOpen(false);
+      setLogText("");
     } catch (err) {
       setMsg("lecture impossible (" + (err.message || "erreur") + ")");
     } finally {
@@ -5085,13 +5233,19 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
       // But when the live log is empty (fresh session — e.g. recovering after a
       // lost session), a real backup file's log should come back too, or "load"
       // can never actually restore history (Maxence 13/07).
-      setActivities(o.activities);
-      if (log.length === 0 && Array.isArray(o.log) && o.log.length > 0) setLog(o.log);
+      // `merge: "catalogue"` → fusion (structure du fichier + vécu local), voir
+      // mergeCatalogue. Absent → remplacement sec, le comportement d'une vraie
+      // restauration de sauvegarde, inchangé.
+      const isCatalogue = o.merge === "catalogue";
+      setActivities(isCatalogue ? mergeCatalogue(o.activities, activities) : o.activities);
+      // un catalogue ne restaure jamais d'historique : son `log` est vide par
+      // construction, et le vécu local est justement ce qu'on protège ici.
+      if (!isCatalogue && log.length === 0 && Array.isArray(o.log) && o.log.length > 0) setLog(o.log);
       if (o.exportedAt) {
         lastLoadRef.current = { date: todayKey(), exportedAt: o.exportedAt };
         store.set(NS("tlx_lastLoadRef"), JSON.stringify(lastLoadRef.current));
       }
-      setMsg("loaded ✓"); setTab("now"); setStage("entry");
+      setMsg(isCatalogue ? "catalogue fusionné ✓" : "loaded ✓"); setTab("now"); setStage("entry");
     } catch { setMsg("couldn't read that — check the file/text"); }
     setTimeout(() => setMsg(""), 2200);
   };
@@ -6339,20 +6493,18 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
               <input type="file" accept="application/json,.json,text/plain,.txt" onChange={onFile} style={{ display: "none" }} />
             </label>
           </div>
-          <div style={{ marginTop: 14 }}>
-            <button className="link" onClick={() => setLogOpen((o) => !o)}>log</button>
-          </div>
-          {logOpen && (
-            <div style={{ marginTop: 18, maxWidth: 320, marginLeft: "auto", marginRight: "auto" }}>
-              <input className="in" value={logText} placeholder="qu'as-tu fait ?"
-                autoComplete="off" name="freelog"
-                onChange={(e) => setLogText(e.target.value.toLowerCase())}
-                onKeyDown={(e) => { if (e.key === "Enter") submitFreeLog(); }}
-                disabled={logBusy}
-                style={{ fontSize: 14, textAlign: "center", borderBottom: `1px solid ${C.line}`, paddingBottom: 8, fontStyle: logText ? "normal" : "italic", color: logText ? C.text : C.faint }} />
-              {logBusy && <div className="mono" style={{ fontSize: 10, color: C.faint, marginTop: 10 }}>…</div>}
+          <div style={{ marginTop: 14, position: "relative", maxWidth: 320, marginLeft: "auto", marginRight: "auto" }}>
+            <input className="in" value={logText}
+              autoComplete="off" name="freelog"
+              onChange={(e) => setLogText(e.target.value.toLowerCase())}
+              onKeyDown={(e) => { if (e.key === "Enter") submitFreeLog(); }}
+              disabled={logBusy}
+              style={{ fontSize: 14, textAlign: "center", borderBottom: `1px solid ${C.line}`, paddingBottom: 8, color: C.text }} />
+            <div style={{ position: "absolute", right: 0, bottom: 8, pointerEvents: "none" }}>
+              <span className="hintcursor" />
             </div>
-          )}
+            {logBusy && <div className="mono" style={{ fontSize: 10, color: C.faint, marginTop: 10 }}>…</div>}
+          </div>
           <div style={{ marginTop: 14 }}>
             <button className="link" onClick={() => setKeyOpen((o) => !o)}>key{apiKey ? " ·" : ""}</button>
           </div>
