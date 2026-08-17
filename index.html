@@ -474,6 +474,12 @@ function pickItemLRU(a, log, base) {
     for (const e of log) if (e.activityId === a.id && isDone(e) && e.itemId === it.id && (!last || e.date > last)) last = e.date;
     return { it, w: (last ? daysBetween(last, todayKey()) : 999) * (0.7 + Math.random() * 0.6) };
   });
+  // ④ (choix arbitré) codé puis retiré le 17/08 : un pool correctement tenu (retrait
+  // des items qui ne collent plus, greffé sur refreshMusicProfileViaClaude) ne
+  // contient plus de mauvais candidats à filtrer au moment du tirage — arbitrer
+  // entre du bon et du bon n'ajoutait rien, et un LLM qui choisit "le meilleur" à
+  // chaque tirage érode la variété que le tirage aléatoire est censé garantir
+  // (cf throughline-no-recognizable-pattern). Tirage pondéré pur, comme avant ④.
   const chosen = scored.sort((x, y) => y.w - x.w)[0].it;
   return { id: base.id, text: chosen.text, min: base.min, dur: base.dur, itemId: chosen.id };
 }
@@ -2060,6 +2066,12 @@ function mergeCatalogue(fileActs, localActs) {
     if (!la) return fa; // activité nouvelle côté fichier → entre telle quelle
     const out = { ...fa };
     for (const f of LIVED_ACT_FIELDS) if (la[f] !== undefined) out[f] = la[f];
+    // note d'un recommandeur (17/08, ③) : l'app la réécrit elle-même en arrière-plan
+    // après chaque session (refreshProfileViaClaude) — si le fichier gagnait comme pour
+    // les autres activités, le prochain sync catalogue (même pour une tout autre raison)
+    // effacerait cette réécriture. Seulement recommandeur : les autres `note` restent
+    // de la doc que j'édite à la main sur PC, le fichier doit continuer à y faire foi.
+    if (fa.kind === "recommandeur" && la.note !== undefined) out.note = la.note;
     if (fa.items || la.items) {
       const localItems = new Map((la.items || []).map((it) => [it.id, it]));
       const seen = new Set();
@@ -2122,7 +2134,15 @@ function reconcileLivedStatus(activities, log) {
 // One direct browser→Messages-API call returning structured JSON. Both the pipeline
 // advancer and the practice/recommandeur coach go through here, so the transport,
 // model and JSON-parsing live in one place.
-async function claudeJSON(key, prompt, schema, maxTokens = 400, tools = null) {
+// modèle par défaut Sonnet (17/08) : comparé en vrai contre Opus sur la tâche la
+// plus exigeante de l'app (refreshProfileViaClaude — synthèse + recherche de
+// contre-exemples, pas juste de la classification) sur les vraies données —
+// citations aussi précises, mêmes nuances trouvées, ~7x moins cher. Les autres
+// appels (classification d'intent, avancement de pipeline, titre de reco) sont
+// tous plus simples que celui-là, jamais testés un par un séparément — si l'un
+// d'eux régresse à l'usage, le repasser en "claude-opus-4-8" au cas par cas plutôt
+// que douter du choix par défaut.
+async function claudeJSON(key, prompt, schema, maxTokens = 400, tools = null, model = "claude-sonnet-4-5") {
   // web_search calls are heavier than plain generation and hit transient 429/5xx
   // capacity errors noticeably more often — retry those a couple of times with
   // backoff rather than let the caller's catch(e){} silently drop the whole
@@ -2140,7 +2160,7 @@ async function claudeJSON(key, prompt, schema, maxTokens = 400, tools = null) {
         "content-type": "application/json",
       },
       body: JSON.stringify({
-        model: "claude-opus-4-8",
+        model,
         max_tokens: maxTokens,
         messages: [{ role: "user", content: prompt }],
         output_config: { format: { type: "json_schema", schema } },
@@ -2155,7 +2175,15 @@ async function claudeJSON(key, prompt, schema, maxTokens = 400, tools = null) {
       throw new Error("http " + res.status + (detail ? " — " + detail : ""));
     }
     const data = await res.json();
-    const txt = (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("");
+    // avec `tools` (web_search) la réponse peut contenir plusieurs blocs texte —
+    // un préambule avant/entre les recherches, puis le JSON final après. Les
+    // joindre TOUS (l'ancien code) concatène le préambule au JSON et casse le
+    // parse (bug connu depuis le 17/08, jamais déclenché avant ③b : aucun appelant
+    // ne passait encore de tools). Le dernier bloc texte est la réponse finale —
+    // web_search s'exécute côté serveur DANS ce même tour, jamais un round-trip
+    // client séparé, donc pas besoin de rejouer l'appel avec un tool_result.
+    const textBlocks = (data.content || []).filter((b) => b.type === "text");
+    const txt = textBlocks.length ? textBlocks[textBlocks.length - 1].text : "";
     return JSON.parse(txt);
   }
 }
@@ -2206,6 +2234,223 @@ Réponds avec un titre court (nom de l'œuvre, du plat, du morceau…) et un sou
   // title/desc kept separate (not pre-joined) — the "now" line shows only the title,
   // subtitle (artist/director/note) lives in the collapsible description below it.
   return { title: out.title, desc: out.subtitle || "" };
+}
+
+// ---------- recommandeur: passe de profil, réécrit `note` depuis le vrai log (17/08, ②) ----------
+// Rassemble les vraies sessions (commentaires + rating, groupées par proximité
+// temporelle pour l'historique déjà orphelin — un commentaire mid-session avec
+// parentId, une fois le fix (a) déployé, sera groupé directement) et demande à
+// Claude la MÊME synthèse que je ferais en conversation, dans le code, avec sa
+// vraie clé — pas une analyse faite à côté puis recopiée à la main (le point que
+// M. a soulevé le 17/08 : ça ne teste rien si ce n'est pas fait in-app).
+function buildProfileSessions(activity, log) {
+  const itemById = new Map((activity.items || []).map((it) => [it.id, it]));
+  const entries = log.filter((e) => e.activityId === activity.id).sort((a, b) => a.ts - b.ts);
+  const dones = entries.filter((e) => e.type === "done");
+  const sessions = [];
+  let prevTs = -Infinity;
+  for (const d of dones) {
+    const midNotes = entries.filter((e) => e.type === "note" && e.ts > prevTs && e.ts <= d.ts && (e.parentId ? e.parentId === d.id : true));
+    sessions.push({
+      itemText: d.itemId ? (itemById.get(d.itemId) || {}).text : null,
+      rating: d.rating,
+      comments: [...midNotes.map((n) => n.note), d.note].filter(Boolean),
+    });
+    prevTs = d.ts;
+  }
+  return sessions.filter((s) => s.rating != null || s.comments.length);
+}
+
+async function refreshProfileViaClaude(key, activity, log) {
+  const sessions = buildProfileSessions(activity, log);
+  const body = sessions.map((s) =>
+    `- « ${s.itemText || "?"} » — note: ${s.rating ?? "?"}/100. Commentaires: ${s.comments.length ? s.comments.map((c) => `"${c}"`).join(" / ") : "(aucun)"}`
+  ).join("\n");
+  const prompt = `Tu réécris le champ "note" (profil de goût) de l'activité recommandeur « ${activity.name} » à partir des vraies sessions de Maxence ci-dessous — ${sessions.length} sessions.
+
+${body}
+
+Structure attendue, 3 blocs denses, sans remplissage, chaque affirmation sourcée par une citation ET une note précise :
+1. CE QU'IL CHERCHE — directions et attributs récurrents qui reviennent dans plusieurs sessions bien notées, du plus confirmé au moins.
+2. PRÉCAUTIONS — tendances observées dans les notes basses, avec leur réserve explicite : une tendance générale n'exclut jamais un cas qui plaît quand même malgré elle (cherche activement un contre-exemple dans les données avant d'écrire une précaution, et mentionne-le s'il existe).
+3. HISTOIRE DU POOL — laisse ce bloc court ou vide s'il n'y a rien de solide à en dire.
+
+Écris en français, dense, aucune généralité vague ("il aime la belle musique") — uniquement ce que les commentaires montrent vraiment, avec leurs mots.`;
+  const out = await claudeJSON(key, prompt, {
+    type: "object",
+    properties: { note: { type: "string" } },
+    required: ["note"],
+    additionalProperties: false,
+  }, 4000);
+  return out.note;
+}
+
+// ---------- recommandeur musical: profil PARTAGÉ Titre+Album, retrait greffé (17/08, révision) ----------
+// M. (17/08) : Titre et Album, c'est le même goût musical, pas deux profils
+// séparés — confirmé empiriquement (simulation Aug 17-k/l : les deux profils
+// convergeaient indépendamment sur les mêmes thèmes, signal dupliqué pour rien).
+// Une seule synthèse, sur les sessions combinées des deux pools, écrite à
+// l'identique sur les deux `note`. Le retrait est greffé ICI (même appel, pas un
+// passage séparé) parce qu'il ne coûte rien de plus : juger qu'un item ne colle
+// plus au profil à jour ne demande aucune recherche — contrairement à l'ajout
+// (③b ci-dessous, qui reste sur seuil car web_search est le seul poste vraiment
+// coûteux, mesuré ~0,18$/passe le 17/08).
+const MUSIC_PROFILE_ACTIVITY_IDS = ["a_ecoute_titre", "a_ecoute_album"];
+async function refreshMusicProfileViaClaude(key, titreAct, albumAct, log) {
+  const titreSessions = buildProfileSessions(titreAct, log).map((s) => ({ ...s, format: "titre" }));
+  const albumSessions = buildProfileSessions(albumAct, log).map((s) => ({ ...s, format: "album" }));
+  const allSessions = [...titreSessions, ...albumSessions];
+  const body = allSessions.map((s) =>
+    `- [${s.format}] « ${s.itemText || "?"} » — note: ${s.rating ?? "?"}/100. Commentaires: ${s.comments.length ? s.comments.map((c) => `"${c}"`).join(" / ") : "(aucun)"}`
+  ).join("\n");
+  // les items exploratoires (17/08, replenishPoolViaClaude) ne sont PAS
+  // intouchables (M., 17/08 : "il ne faut pas proposer en élargissement quelque
+  // chose que je n'aime pas") — mais leur motif de retrait est différent de celui
+  // d'un item normal : jamais retirés pour "ne confirme pas encore le profil"
+  // (c'est le but, attendu), retirables seulement si l'exploration était en fait
+  // une erreur de catégorisation — un item qui correspond déjà à une précaution
+  // nette du profil (ex: reproposer du théâtral déjà rejeté), pas une vraie
+  // inconnue. Visibles dans la liste avec [exploration] pour que la distinction
+  // soit faite consciemment, pas juste devinée.
+  const titreDoing = (titreAct.items || []).filter((it) => it.status === "doing").map((it) => `[titre]${it.explore ? "[exploration]" : ""} ${it.id}: ${it.text}`);
+  const albumDoing = (albumAct.items || []).filter((it) => it.status === "doing").map((it) => `[album]${it.explore ? "[exploration]" : ""} ${it.id}: ${it.text}`);
+  const prompt = `Tu réécris le profil de goût musical de Maxence — UN SEUL profil partagé entre « titre du jour » (morceaux courts, 5 min) et « album de la semaine » (œuvres complètes, 45 min) : c'est le même goût, pas deux profils séparés, seule la durée du format change ce qui compte (sur un album : la linéarité sur la durée, la prise de risque du projet dans son ensemble).
+
+${allSessions.length} sessions au total, [titre] et [album] mélangées :
+${body}
+
+Structure attendue, 4 blocs denses, sans remplissage, chaque affirmation sourcée par une citation ET une note précise (garde [titre]/[album] visible quand c'est utile de distinguer) :
+1. CE QU'IL CHERCHE — directions et attributs récurrents.
+2. PRÉCAUTIONS — tendances dans les notes basses, avec leur réserve explicite (cherche activement un contre-exemple avant d'écrire une précaution — une tendance générale n'exclut jamais un cas qui plaît quand même malgré elle).
+3. SPÉCIFICITÉS ALBUM — ce qui ne s'applique qu'au format long (linéarité sur la durée, prise de risque du projet) — court ou vide si rien de solide.
+4. HISTOIRE DU POOL — court ou vide si rien de solide.
+
+Ensuite, retraits éventuels parmi les items ci-dessous (jamais essayés, "doing") — juge sur la force du signal disponible (tout l'historique ci-dessus, pas un nombre minimum de sessions à atteindre), pas sur un seuil arbitraire : dans le doute, ne retire rien, mais un signal déjà net n'a pas besoin d'attendre. Un pool déjà cohérent avec le profil peut très bien ne donner aucun retrait, c'est le cas normal, pas une anomalie à corriger. Deux motifs de retrait différents selon le type d'item, ET DEUX QUOTAS SÉPARÉS (les [exploration] ne doivent jamais être évincés par un arriéré d'items normaux à nettoyer — les deux tombent proportionnellement à ce qu'il y a vraiment à corriger dans chaque groupe, pas un seul quota partagé où le plus nombreux gagne toujours) :
+- item normal (jusqu'à 3 par pool) : ne colle clairement plus au profil que tu viens d'écrire.
+- item [exploration] (jusqu'à 2 par pool, quota indépendant du précédent) : jamais retiré simplement parce qu'il ne confirme pas encore le profil (c'est voulu) — retirable UNIQUEMENT s'il correspond en fait à une précaution déjà nette (l'exploration était une erreur de catégorisation, pas une vraie inconnue à tester). Examine cette liste EN PLUS de la liste normale, pas seulement si de la place reste sur le quota normal.
+Un chevauchement thématique entre les deux pools (l'album dont vient un titre déjà aimé, par exemple) n'est jamais un motif de retrait — c'est cohérent, pas un doublon.
+
+Items "doing" actuels :
+${[...titreDoing, ...albumDoing].join("\n") || "(aucun)"}
+
+Écris en français, dense, aucune généralité vague — uniquement ce que les commentaires montrent vraiment, avec leurs mots.`;
+  const out = await claudeJSON(key, prompt, {
+    type: "object",
+    properties: {
+      note: { type: "string" },
+      removeTitreIds: { type: "array", items: { type: "string" } },
+      removeAlbumIds: { type: "array", items: { type: "string" } },
+    },
+    required: ["note", "removeTitreIds", "removeAlbumIds"],
+    additionalProperties: false,
+  }, 4500);
+  // quotas séparés appliqués ici, pas seulement demandés dans le prompt (17/08,
+  // M. : "il faut que proportionnellement ils tombent aussi") — un modèle qui
+  // remplirait le quota normal en premier ne doit pas pouvoir manger celui des
+  // [exploration] par la bande ; chaque catégorie est plafonnée indépendamment
+  // après coup, pas juste espérée respectée dans la réponse.
+  const capByCategory = (ids, act) => {
+    const exploreIds = new Set((act.items || []).filter((it) => it.explore).map((it) => it.id));
+    const normal = ids.filter((id) => !exploreIds.has(id)).slice(0, 3);
+    const explore = ids.filter((id) => exploreIds.has(id)).slice(0, 2);
+    return [...normal, ...explore];
+  };
+  return {
+    note: out.note,
+    removeTitreIds: capByCategory(out.removeTitreIds || [], titreAct),
+    removeAlbumIds: capByCategory(out.removeAlbumIds || [], albumAct),
+  };
+}
+
+// ---------- recommandeur: réapprovisionnement du pool (17/08, ③b) ----------
+// Seuil bas → réapprovisionne, simplement (M., 17/08) : l'autonomie se mesure en
+// SEMAINES de tirage restant (doing/rythme), jamais en nombre d'items brut — un
+// même compte d'items veut dire des mois pour Film et des jours pour Titre (cf
+// audit du 17/08). Dessous de POOL_LOW_WEEKS → réapprovisionne jusqu'à
+// POOL_TARGET_WEEKS, plafonné à POOL_MAX_ADD par passe (jamais un seul gros ajout
+// qui écraserait la variété d'un coup).
+const POOL_LOW_WEEKS = 4, POOL_TARGET_WEEKS = 8, POOL_MAX_ADD = 15;
+function weeklyDrawRate(activity) {
+  // target/period vit soit sur l'activité (a_film), soit sur sa seule action
+  // (a_ecoute_titre/album) — pas de convention unique dans le catalogue actuel.
+  const src = (activity.target && activity.period) ? activity : (activity.actions || [])[0];
+  if (!src || !src.target || !src.period) return null;
+  if (src.period === "day") return src.target * 7;
+  if (src.period === "week") return src.target;
+  return null;
+}
+function poolAutonomyWeeks(activity) {
+  const rate = weeklyDrawRate(activity);
+  if (!rate) return null;
+  const doing = (activity.items || []).filter((it) => it.status === "doing").length;
+  return doing / rate;
+}
+// items[] à partir du résultat {core, explore} de replenishPoolViaClaude — les
+// exploratoires portent `explore:true` pour que refreshMusicProfileViaClaude les
+// laisse tranquilles tant qu'ils n'ont pas été essayés une fois (17/08 : un pari
+// délibérément hors profil confirmé se ferait sinon retirer avant d'avoir eu sa chance).
+function buildNewPoolItems(result) {
+  if (!result) return [];
+  const core = (result.core || []).map((t) => ({ id: uid(), text: t, status: "doing" }));
+  const explore = (result.explore || []).map((t) => ({ id: uid(), text: t, status: "doing", explore: true }));
+  return [...core, ...explore];
+}
+// Le jugement propose (sur les ATTRIBUTS du profil, pas le genre), la recherche
+// vérifie (existence réelle, titre/auteur exacts) — inversion actée le 17/08 :
+// une recherche PAR attribut ("graves de piano") ne marche pas, le web n'est pas
+// indexé comme ça ; mais Claude peut PROPOSER sur cette base puis VÉRIFIER
+// l'existence, question binaire et fiable pour web_search.
+async function replenishPoolViaClaude(key, activity, log, siblingActivity = null) {
+  const rate = weeklyDrawRate(activity);
+  const autonomy = poolAutonomyWeeks(activity);
+  if (autonomy == null || autonomy >= POOL_LOW_WEEKS) return null;
+  const needed = Math.max(3, Math.min(POOL_MAX_ADD, Math.ceil((POOL_TARGET_WEEKS - autonomy) * rate)));
+  // ~2/3 confirment le profil, ~1/3 élargit délibérément l'horizon (M., 17/08 —
+  // "ne pas négliger la volonté d'élargissement, à traiter différemment"). Sans
+  // ça, ajout + retrait combinés ne font QUE converger vers ce qui est déjà
+  // confirmé — exactement le rétrécissement que le fil directeur "très varié"
+  // interdit depuis le début du projet. Minimum 1 exploration dès que needed≥2.
+  const exploreCount = needed >= 2 ? Math.max(1, Math.round(needed / 3)) : 0;
+  const coreCount = needed - exploreCount;
+  // le pool jumeau compte aussi (17/08, profil partagé) pour ne pas reproposer le
+  // MÊME morceau/la MÊME œuvre — mais un chevauchement thématique (l'album dont
+  // vient un titre aimé, un titre extrait d'un album aimé) est cohérent et
+  // bienvenu, pas un doublon (M., 17/08 : "toujours faire preuve de nuance").
+  const known = [...(activity.items || []), ...((siblingActivity && siblingActivity.items) || [])].map((it) => it.text);
+  // durée cible tirée du code (fait structurel, pas une nuance de goût) — sans
+  // ça une passe Titre (sessions 5 min) a réellement proposé la Symphonie n°3 de
+  // Górecki, déjà présente comme ALBUM (~40 min) : bon fond artistique, mauvais
+  // format, trouvé en testant le 17/08.
+  const dur = (activity.actions || [])[0]?.dur;
+  const prompt = `Tu élargis le pool de « ${activity.name} » — le stock d'items pas encore essayés (status "doing") descend sous ${POOL_LOW_WEEKS} semaines d'autonomie (${autonomy.toFixed(1)} actuellement, à ${rate}/semaine).
+${dur ? `\nFormat de la session : environ ${dur} min. Pas une œuvre longue (symphonie complète, opéra entier, album) si ${dur} min est court — ce format-là appartient à un autre pool de l'app.\n` : ""}
+Profil de goût (ce qu'il cherche, ses précautions AVEC leur réserve explicite — jamais un filtre dur, juge chaque candidat au cas par cas plutôt que d'exclure mécaniquement) :
+"""
+${activity.note || "(pas de profil)"}
+"""
+
+Déjà dans le pool, à ne PAS reproposer À L'IDENTIQUE (essayé ou non) :
+${known.map((t) => "- " + t).join("\n")}
+Un chevauchement thématique n'est PAS un doublon à éviter : proposer l'album dont vient un titre déjà aimé, ou un titre extrait d'un album déjà aimé, est cohérent et bienvenu — seule l'œuvre strictement identique (même titre, même auteur) doit être évitée.
+
+Propose deux groupes distincts :
+1. coreItems (${coreCount}) — correspondent aux ATTRIBUTS précis déjà confirmés (le grain d'une voix, un piano qui évolue plutôt que boucle, etc), pas à un genre large.
+2. exploreItems (${exploreCount}) — élargissent VRAIMENT l'horizon vers du territoire jamais testé (un genre à peine ou pas exploré, une approche différente) — PAS un pari raisonné sur une direction déjà confirmée sous un autre angle, et SURTOUT PAS un retour sur une précaution déjà nette du profil : si le théâtral démonstratif est déjà clairement rejeté, ce n'est pas une zone d'incertitude à sonder, c'est une réponse déjà donnée — proposer encore de l'opéra pour "tester la limite" ne serait pas de l'exploration, ce serait insister sur un refus déjà exprimé. Un vrai pari d'exploration va voir ailleurs : un genre entièrement différent, une approche structurellement autre — pas la même question posée différemment.
+
+Utilise la recherche web pour vérifier que chaque titre existe réellement sous ce nom exact, par cet artiste/auteur exact — laisse tomber un candidat que tu ne peux pas confirmer plutôt que d'inventer. Même format que les items existants : "artiste – titre" en minuscules.`;
+  const out = await claudeJSON(key, prompt, {
+    type: "object",
+    properties: {
+      coreItems: { type: "array", items: { type: "string" } },
+      exploreItems: { type: "array", items: { type: "string" } },
+    },
+    required: ["coreItems", "exploreItems"],
+    additionalProperties: false,
+  }, 2200, [{ type: "web_search_20250305", name: "web_search", max_uses: 10 }]);
+  return {
+    core: (out.coreItems || []).filter(Boolean),
+    explore: (out.exploreItems || []).filter(Boolean),
+  };
 }
 
 // ---------- palette / css ----------
@@ -3117,7 +3362,8 @@ function Throughline() {
       try { const raw = await store.get(NS("tlx_lastLoadRef")); lastLoadRef.current = raw ? JSON.parse(raw) : null; } catch { lastLoadRef.current = null; }
       if (!alive) return;
       const loadedLog = l ?? [];
-      setActivities(reconcileLivedStatus(migrateSingleItemActivities(migratePickerActions(a ?? SEED)), loadedLog));
+      const loadedActivities = reconcileLivedStatus(migrateSingleItemActivities(migratePickerActions(a ?? SEED)), loadedLog);
+      setActivities(loadedActivities);
       setLog(loadedLog);
       setApiKey(k || "");
       if (hs && hs.date === todayKey()) { setHoldMs(hs.ms); setHoldDate(hs.date); } // same day → keep the accumulated penalty
@@ -3144,6 +3390,32 @@ function Throughline() {
       }
       setLoading(false);
       loaded.current = true;
+      // ③b, arrière-plan, une fois par jour (17/08) : vérifier l'autonomie coûte
+      // rien (arithmétique pure), mais réessayer le réapprovisionnement à chaque
+      // ouverture d'app le même jour serait redondant si un premier passage a déjà
+      // échoué à suffisamment remplir — donc gardé au même rythme que les autres
+      // vérifications journalières de ce bloc (tlx_hintSeen, tlx_medReminderDate).
+      (async () => {
+        if (!k) return;
+        const today = todayKey();
+        const lastCheck = await store.get(NS("tlx_poolCheckDate"));
+        if (lastCheck === today) return;
+        store.set(NS("tlx_poolCheckDate"), today);
+        for (const act of loadedActivities) {
+          if (act.kind !== "recommandeur") continue;
+          // pool jumeau (17/08, profil partagé) : Titre/Album ne doivent pas se
+          // reproposer mutuellement une œuvre déjà présente chez l'autre.
+          const siblingId = act.id === "a_ecoute_titre" ? "a_ecoute_album" : act.id === "a_ecoute_album" ? "a_ecoute_titre" : null;
+          const sibling = siblingId ? loadedActivities.find((a2) => a2.id === siblingId) : null;
+          try {
+            const result = await replenishPoolViaClaude(k, act, loadedLog, sibling);
+            const newItems = buildNewPoolItems(result);
+            if (newItems.length) {
+              setActivities((arr) => arr.map((a2) => (a2.id === act.id ? { ...a2, items: [...(a2.items || []), ...newItems] } : a2)));
+            }
+          } catch (e) {}
+        }
+      })();
     })();
     return () => { alive = false; };
   }, []);
@@ -3192,7 +3464,8 @@ function Throughline() {
           const key = (await store.get("tlx_apiKey")) || "";
           if (!key) return;
           try {
-            const { title, desc } = await generateReco(key, p.activity, p.action, logUse);
+            const action = p.action;
+            const { title, desc } = await generateReco(key, p.activity, action, logUse);
             // baseText: the underlying sub-action (e.g. "écouter un titre" vs "écouter un
             // album") — Claude's generated title replaces `text` entirely, which used to
             // erase which sub-action was actually drawn (Maxence 12/07: espagnol/musique
@@ -3810,6 +4083,55 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
       setActivities((arr) => arr.map((a) => (a.id === aid
         ? { ...a, items: (a.items || []).map((it) => (it.id === itemId ? { ...it, status: "done", rating } : it)) }
         : a)));
+      // ③, arrière-plan (17/08, M. : "pourquoi ne pas affiner à chaque fois ?") — pas
+      // de seuil à compter : à cette fréquence (Titre 1/jour, Album 1/semaine) un appel
+      // de plus ne coûte rien, et un commentaire se généralise tout de suite (voir sa
+      // correction du 17/08, feedback-dont-harden-nuance-into-rules). `log`/`current.activity`
+      // capturés ici reflètent encore l'état d'AVANT cette session (les setLog/setActivities
+      // ci-dessus sont en file d'attente, pas encore appliqués) — patchés localement à la
+      // main pour que la synthèse voie bien CETTE session, sans attendre le re-render.
+      // N'écrit note QUE si l'appel réussit — un item déjà fermé au-dessus, jamais annulé
+      // si Claude échoue ou si la clé manque.
+      (async () => {
+        const key = (await store.get("tlx_apiKey")) || "";
+        if (!key) return;
+        const patchedLog = log.map((en) => (en.id === doneEntryId ? { ...en, rating, note: text || en.note } : en));
+        const updatedActivity = {
+          ...current.activity,
+          items: (current.activity.items || []).map((it) => (it.id === itemId ? { ...it, status: "done", rating } : it)),
+        };
+        try {
+          if (MUSIC_PROFILE_ACTIVITY_IDS.includes(aid)) {
+            // profil partagé Titre+Album (17/08, révision post-simulation) : même
+            // goût musical, une seule synthèse sur les deux, retrait greffé dessus
+            // (aucune recherche nécessaire pour juger qu'un item ne colle plus).
+            const siblingId = aid === "a_ecoute_titre" ? "a_ecoute_album" : "a_ecoute_titre";
+            const sibling = activities.find((a) => a.id === siblingId) || updatedActivity;
+            const titreAct = aid === "a_ecoute_titre" ? updatedActivity : sibling;
+            const albumAct = aid === "a_ecoute_album" ? updatedActivity : sibling;
+            const { note, removeTitreIds, removeAlbumIds } = await refreshMusicProfileViaClaude(key, titreAct, albumAct, patchedLog);
+            const applyRemoval = (act, ids) => ({ ...act, note, items: (act.items || []).map((it) => (ids.includes(it.id) && it.status === "doing" ? { ...it, status: "out" } : it)) });
+            const freshTitre = applyRemoval(titreAct, removeTitreIds);
+            const freshAlbum = applyRemoval(albumAct, removeAlbumIds);
+            setActivities((arr) => arr.map((a) => (a.id === "a_ecoute_titre" ? freshTitre : a.id === "a_ecoute_album" ? freshAlbum : a)));
+            // réapprovisionnement tout de suite après un retrait éventuel — plus
+            // réactif que le seul check quotidien au chargement (gardé comme filet
+            // de sécurité si aucune session n'a eu lieu depuis un moment). Chaque
+            // appel est quasi gratuit tant que l'autonomie reste correcte (retour
+            // immédiat, pas de recherche déclenchée) — voir replenishPoolViaClaude.
+            for (const [act, sib] of [[freshTitre, freshAlbum], [freshAlbum, freshTitre]]) {
+              const result = await replenishPoolViaClaude(key, act, patchedLog, sib);
+              const newItems = buildNewPoolItems(result);
+              if (newItems.length) {
+                setActivities((arr) => arr.map((a) => (a.id === act.id ? { ...a, items: [...(a.items || []), ...newItems] } : a)));
+              }
+            }
+          } else {
+            const note = await refreshProfileViaClaude(key, updatedActivity, patchedLog);
+            setActivities((arr) => arr.map((a) => (a.id === aid ? { ...a, note } : a)));
+          }
+        } catch (e) {}
+      })();
     }
     if (isParfumMatiere) {
       const itemId = action.itemId;
@@ -5313,6 +5635,35 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
       traceIdx, setTraceIdx,
       gameQueue, gameIdx, startGame,
       debugNow: () => (_debugDate || new Date()).toString(),
+      // ② test en conditions réelles (17/08) : vraie clé (store.get, partagée avec
+      // prod), vrai log/activities du sandbox, vrai appel Claude — pas une analyse
+      // faite à côté. N'écrit rien nulle part, retourne juste le texte pour lecture.
+      refreshProfile: async (activityId) => {
+        const key = (await store.get("tlx_apiKey")) || "";
+        const a = activities.find((x) => x.id === activityId);
+        if (!key || !a) return { error: !key ? "pas de clé" : "activité introuvable" };
+        return { note: await refreshProfileViaClaude(key, a, log) };
+      },
+      // profil partagé Titre+Album (17/08, révision) — mêmes principes de test.
+      refreshMusicProfile: async () => {
+        const key = (await store.get("tlx_apiKey")) || "";
+        const titreAct = activities.find((x) => x.id === "a_ecoute_titre");
+        const albumAct = activities.find((x) => x.id === "a_ecoute_album");
+        if (!key || !titreAct || !albumAct) return { error: !key ? "pas de clé" : "activité introuvable" };
+        return await refreshMusicProfileViaClaude(key, titreAct, albumAct, log);
+      },
+      // ③b test en conditions réelles (17/08) — mêmes principes que refreshProfile
+      // ci-dessus. N'écrit rien nulle part (contrairement au vrai déclencheur au
+      // chargement), retourne juste les candidats + l'autonomie pour lecture.
+      replenishPool: async (activityId) => {
+        const key = (await store.get("tlx_apiKey")) || "";
+        const a = activities.find((x) => x.id === activityId);
+        if (!key || !a) return { error: !key ? "pas de clé" : "activité introuvable" };
+        const siblingId = activityId === "a_ecoute_titre" ? "a_ecoute_album" : activityId === "a_ecoute_album" ? "a_ecoute_titre" : null;
+        const sibling = siblingId ? activities.find((x) => x.id === siblingId) : null;
+        return { autonomy: poolAutonomyWeeks(a), result: await replenishPoolViaClaude(key, a, log, sibling) };
+      },
+      poolAutonomyWeeks,
     };
   });
 
