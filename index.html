@@ -3590,7 +3590,12 @@ function Throughline() {
     saveJSON(NS("tlx_hold"), { date: today, ms: next });
     setPaused(false); setComment(""); setManualMin(""); setDoneEntryId(null);
     setAlbumTitles([]); setAlbumIdx(0); setDescOpen(false); setRating(50); setPipelinePos(0);
-    propose(log, activities, false, current ? current.activity.id : null);
+    // Maxence 20/08 (log libre) : "quand on skip, ne pas reproposer une activité
+    // direct, juste remettre à l'écran principal ligne qui respire" — un skip ne
+    // relance plus automatiquement propose(), il rend juste la main sur l'écran
+    // idle ; le prochain tap (tapAction → start → propose) tire une nouvelle
+    // proposition normalement, avec le coût de hold déjà doublé ci-dessus.
+    setCurrent(null); setStage("entry");
   };
   const resetFlow = (nextStage = "entry") => { setStage(nextStage); setCurrent(null); setRunning(false); setElapsedMs(0); setPaused(false); setComment(""); setItemNameInput(""); setParfumChips([]); setParfumGrades({}); setParfumIntensity(null); setParfumHedo(null); setParfumCortege(null); setParfumVs({}); setParfumVsActive({}); setParfumColorH(null); setParfumColorS(null); setParfumColorPhase("hue"); setParfumDiffusion(null); setParfumNettete(null); setParfumDosage(null); setParfumRecall(null); setParfumMIdx(0); setParfumVIdx(0); setDescOpen(false); setSyncMsg(""); setSyncing(false); setAlbumTitles([]); setAlbumIdx(0); setRating(50); setPipelinePos(0); };
   // Album de la semaine title-by-title appreciation (Maxence 16/07, item 4/5) —
@@ -6913,23 +6918,32 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
           <div>
             <button className="link" onClick={toggleOut}>{computePlace().toUpperCase()}</button>
           </div>
-          <div style={{ marginTop: 14, display: "flex", justifyContent: "center", alignItems: "center", gap: 26 }}>
-            <button className="link" onClick={shareBackup}>save</button>
-            <label className="link" style={{ cursor: "pointer" }}>load
-              <input type="file" accept="application/json,.json,text/plain,.txt" onChange={onFile} style={{ display: "none" }} />
-            </label>
-          </div>
+          {/* ordre pied de page (Maxence 17/08, "out en bas puis le curseur ensuite save
+              et load ensuite key") : champ log remonté avant save/load. */}
           <div style={{ marginTop: 14, position: "relative", maxWidth: 320, marginLeft: "auto", marginRight: "auto" }}>
             <input className="in" value={logText}
               autoComplete="off" name="freelog"
               onChange={(e) => setLogText(e.target.value.toLowerCase())}
               onKeyDown={(e) => { if (e.key === "Enter") submitFreeLog(); }}
               disabled={logBusy}
-              style={{ fontSize: 14, textAlign: "center", borderBottom: `1px solid ${C.line}`, paddingBottom: 8, color: C.text }} />
-            <div style={{ position: "absolute", right: 0, bottom: 8, pointerEvents: "none" }}>
-              <span className="hintcursor" />
-            </div>
+              style={{ fontSize: 14, textAlign: "center", paddingBottom: 8, color: C.text }} />
+            {!logText && (
+              // Maxence 17/08 (log libre) : le hintcursor manquait le garde `!value` que
+              // les 3 autres usages ont déjà (voir item-name plus haut) — restait affiché
+              // même une fois du texte tapé. Repositionné centré (comme les 3 autres,
+              // ex. item-name) au lieu de collé à droite, cohérent avec le texte centré
+              // du champ. Ligne horizontale (borderBottom) retirée sur ce champ.
+              <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "flex-end", justifyContent: "center", paddingBottom: 8, pointerEvents: "none" }}>
+                <span className="hintcursor" />
+              </div>
+            )}
             {logBusy && <div className="mono" style={{ fontSize: 10, color: C.faint, marginTop: 10 }}>…</div>}
+          </div>
+          <div style={{ marginTop: 14, display: "flex", justifyContent: "center", alignItems: "center", gap: 26 }}>
+            <button className="link" onClick={shareBackup}>save</button>
+            <label className="link" style={{ cursor: "pointer" }}>load
+              <input type="file" accept="application/json,.json,text/plain,.txt" onChange={onFile} style={{ display: "none" }} />
+            </label>
           </div>
           <div style={{ marginTop: 14 }}>
             <button className="link" onClick={() => setKeyOpen((o) => !o)}>key{apiKey ? " ·" : ""}</button>
