@@ -466,8 +466,13 @@ function hasDoingItems(a) {
 }
 // shared LRU: among items[status=doing], pick the one least recently logged (by
 // itemId in the log) — weighted so longer-idle items are favoured, not fixed.
-function pickItemLRU(a, log, base) {
-  const doing = (a.items || []).filter((it) => it.status === "doing");
+// avoidItemId (21/08, "skip album") : exclut un item précis du tirage — utilisé
+// pour reproposer un AUTRE item du même pool sans jamais retomber sur celui
+// qu'on vient de refuser. Ignoré si le pool n'a qu'un seul item (rien d'autre à
+// proposer) plutôt que de renvoyer `base` sans itemId.
+function pickItemLRU(a, log, base, avoidItemId) {
+  let doing = (a.items || []).filter((it) => it.status === "doing");
+  if (avoidItemId && doing.length > 1) doing = doing.filter((it) => it.id !== avoidItemId);
   if (!doing.length) return base;
   const scored = doing.map((it) => {
     let last = null;
@@ -2071,7 +2076,18 @@ function mergeCatalogue(fileActs, localActs) {
     // les autres activités, le prochain sync catalogue (même pour une tout autre raison)
     // effacerait cette réécriture. Seulement recommandeur : les autres `note` restent
     // de la doc que j'édite à la main sur PC, le fichier doit continuer à y faire foi.
-    if (fa.kind === "recommandeur" && la.note !== undefined) out.note = la.note;
+    // Bootstrap unique (21/08) : refreshProfileViaClaude écrit toujours ses 3 blocs avec
+    // l'en-tête "CE QU'IL CHERCHE" — un local qui ne l'a pas encore n'a jamais été
+    // réécrit par une vraie session et reste la doc générique d'avant le chantier du
+    // 17/08 ; si le fichier, lui, a déjà cet en-tête (profil réel écrit à la main une
+    // fois, cf. Aug 17-f), on le laisse passer CETTE fois. Dès qu'une vraie session
+    // réécrit le local, il porte l'en-tête à son tour et cette branche n'a plus jamais
+    // d'effet (idempotent par construction, pas un flag "déjà migré" à maintenir).
+    const localIsProfiled = /CE QU'IL CHERCHE/.test(la.note || "");
+    const fileIsProfiled = /CE QU'IL CHERCHE/.test(fa.note || "");
+    if (fa.kind === "recommandeur") {
+      out.note = (!localIsProfiled && fileIsProfiled) ? fa.note : (la.note !== undefined ? la.note : fa.note);
+    }
     if (fa.items || la.items) {
       const localItems = new Map((la.items || []).map((it) => [it.id, it]));
       const seen = new Set();
@@ -3535,6 +3551,38 @@ function Throughline() {
     // la carte "avant de savoir" non plus : la tenir = sécher, ce qui est une
     // réponse valable — on soumet ce qu'il y a (souvent rien) et on révèle.
     if (current?.action?.parfumGuess) { submitParfumGuess(); return; }
+    // "skip album" (Maxence 21/08) : refuser CE film/titre/album/plat précis avant
+    // même de commencer ne doit pas jeter dans une activité totalement différente —
+    // le swap générique ci-dessous exclut current.activity.id du tirage (avoidId),
+    // donc holder sur un album proposait systématiquement autre chose qu'un album.
+    // Ici on reste dans le MÊME pool, on tire juste un autre item dedans (même coût
+    // de hold croissant que le swap générique, pour ne pas pouvoir re-rouler
+    // gratuitement). Seulement au stade "proposal" — en "running" le hold reste un
+    // abandon complet (recommencer un autre morceau alors qu'on écoute déjà n'a pas
+    // le même sens qu'un refus avant d'engager quoi que ce soit).
+    if (stage === "proposal" && current?.activity?.kind === "recommandeur" && current.action?.itemId) {
+      const a = current.activity;
+      const nextItem = pickItemLRU(a, log, current.action, current.action.itemId);
+      if (nextItem.itemId && nextItem.itemId !== current.action.itemId) {
+        const todayR = todayKey();
+        const curR = holdDate === todayR ? holdMs : BASE_HOLD_MS;
+        setHoldMs(curR * 2); setHoldDate(todayR);
+        saveJSON(NS("tlx_hold"), { date: todayR, ms: curR * 2 });
+        proposedAtRef.current = Date.now();
+        setCurrent({ activity: a, action: { ...nextItem, baseText: nextItem.text } });
+        if (a.note) {
+          (async () => {
+            const key = (await store.get("tlx_apiKey")) || "";
+            if (!key) return;
+            try {
+              const { title, desc } = await generateReco(key, a, nextItem, log);
+              setCurrent((c) => (c && c.activity.id === a.id ? { ...c, action: { ...c.action, baseText: c.action.baseText || c.action.text, text: title, desc } } : c));
+            } catch (e) {}
+          })();
+        }
+        return;
+      }
+    }
     const today = todayKey();
     const cur = holdDate === today ? holdMs : BASE_HOLD_MS; // fresh day → start from 10s
     const next = cur * 2; // every skip doubles the next hold
@@ -5568,7 +5616,25 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
       // mergeCatalogue. Absent → remplacement sec, le comportement d'une vraie
       // restauration de sauvegarde, inchangé.
       const isCatalogue = o.merge === "catalogue";
-      setActivities(isCatalogue ? mergeCatalogue(o.activities, activities) : o.activities);
+      let nextActs = isCatalogue ? mergeCatalogue(o.activities, activities) : o.activities;
+      // reset ponctuel du vécu d'un pool (21/08, demande M. sur Parfum matières) :
+      // "resetPoolSessions" à la racine du fichier liste des activityId dont TOUS
+      // les items reviennent à status="doing"/sessions=[] — un seul déclenchement
+      // par activité (flag localStorage, même idiome que tlx_poolCheckDate), sinon
+      // chaque resync ultérieur du même fichier effacerait aussi les vraies
+      // sessions faites APRÈS le reset. L'ancien vécu n'est jamais perdu : archivé
+      // côté fichier avant d'ajouter la clé (fait hors app, pas par ce mécanisme).
+      if (isCatalogue && Array.isArray(o.resetPoolSessions) && o.resetPoolSessions.length) {
+        const flagKey = (id) => NS("tlx_poolReset_" + id);
+        const todo = o.resetPoolSessions.filter((id) => !localStorage.getItem(flagKey(id)));
+        if (todo.length) {
+          nextActs = nextActs.map((a) => (todo.includes(a.id)
+            ? { ...a, items: (a.items || []).map((it) => ({ ...it, status: "doing", sessions: [] })) }
+            : a));
+          for (const id of todo) localStorage.setItem(flagKey(id), "1");
+        }
+      }
+      setActivities(nextActs);
       // un catalogue ne restaure jamais d'historique : son `log` est vide par
       // construction, et le vécu local est justement ce qu'on protège ici.
       if (!isCatalogue && log.length === 0 && Array.isArray(o.log) && o.log.length > 0) setLog(o.log);
