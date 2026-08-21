@@ -5189,17 +5189,71 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
     //      un texte plus long que ce qu'on tape pour juste lancer quelque chose.
     if (stage === "entry") {
       const normName = (s) => s.toLowerCase().trim().replace(/[—–-]/g, " ").replace(/\s+/g, " ").trim();
-      const typedNorm = normName(text);
-      let exact = activities.find((a) => normName(a.name) === typedNorm);
-      if (!exact && typedNorm.length >= 3) {
-        const prefixed = activities.filter((a) => {
-          const n = normName(a.name);
-          return n.length > typedNorm.length && n.startsWith(typedNorm) && n[typedNorm.length] === " ";
-        });
-        if (prefixed.length === 1) exact = prefixed[0];
+      const deaccent = (s) => s.normalize("NFD").replace(/[̀-ͯ]/g, "");
+      let typedNorm = normName(text);
+      // "0" en fin de texte (Maxence 21/08) : force le mode "de zéro" sur les
+      // activités à picker de-zéro/continuer (free poetry, minuscules) — sans le
+      // "0", "continuer" par défaut. Remplace le tirage 50/50 sur ce chemin
+      // (celui du tirage naturel de l'app, lui, reste un vrai tirage au hasard —
+      // seul le déclenchement explicite par nom devient déterministe).
+      let forceZero = false;
+      if (typedNorm.endsWith("0")) { forceZero = true; typedNorm = typedNorm.slice(0, -1).trim(); }
+      // alias table (Maxence 21/08) : phrases qui ne dérivent pas du nom catalogue
+      // (ordre des mots inversé, sous-action précise à distinguer, raccourci voulu
+      // plutôt que le nom exact). Comparées sans accent (clavier mobile). Vérifiées
+      // avant la logique générique nom-exact/préfixe ci-dessous, jamais à la place.
+      const ALIASES = [
+        { t: "notice", id: "a_noticing" }, { t: "noticing", id: "a_noticing" },
+        { t: "poetry", id: "a_freepo" }, { t: "poesie", id: "a_freepo" }, { t: "pensee", id: "a_freepo" },
+        { t: "minuscule", id: "a_minuscules" },
+        { t: "cuisine", id: "a_cuisiner" },
+        { t: "mealprep", id: "a_mealprep" },
+        { t: "piano repertoire", id: "a_repertoire" },
+        { t: "espagnol conversation", id: "a_espagnol", action: "x_es_conv" },
+        { t: "espagnol anki", id: "a_espagnol", action: "x_es_anki" },
+        { t: "parfum matieres", id: "a_parfum_explo", action: "x_pf_matiere" },
+        { t: "parfum touche", id: "a_parfum_explo", action: "x_pf_touche" },
+        { t: "parfum livre", id: "a_parfum_explo", action: "x_pf_livre" },
+        { t: "parfum video", id: "a_parfum_explo", action: "x_pf_video" },
+        { t: "parfum forum", id: "a_parfum_explo", action: "x_pf_forum" },
+      ];
+      const typedFlat = deaccent(typedNorm);
+      const aliasHit = ALIASES.find((al) => deaccent(al.t) === typedFlat);
+      let exact = null, forcedActionId = null;
+      if (aliasHit) {
+        exact = activities.find((a) => a.id === aliasHit.id);
+        forcedActionId = aliasHit.action || null;
+      } else {
+        exact = activities.find((a) => normName(a.name) === typedNorm);
+        if (!exact && typedNorm.length >= 3) {
+          const prefixed = activities.filter((a) => {
+            const n = normName(a.name);
+            return n.length > typedNorm.length && n.startsWith(typedNorm) && n[typedNorm.length] === " ";
+          });
+          if (prefixed.length === 1) exact = prefixed[0];
+        }
       }
       if (exact) {
-        const p = resolveDraw({ activity: exact, action: null }, log);
+        // picker de-zéro/continuer (voir forceZero plus haut) : construit une
+        // action forcée avec le texte déjà choisi et sans `picker`, pour que
+        // resolveDraw (qui retire toujours 50/50 s'il voit un `picker`) ne
+        // retire plus rien ici — même mécanisme que forcedActionId ci-dessous.
+        let forcedAction = forcedActionId ? (exact.actions || []).find((x) => x.id === forcedActionId) || null : null;
+        const zeroRe = /de z.ro/i;
+        if (forceZero) {
+          const pa = forcedAction || (exact.actions || []).find((x) => x.picker && x.picker.length);
+          if (pa && pa.picker && pa.picker.length) {
+            const zeroText = pa.picker.find((p) => zeroRe.test(deaccent(p))) || pa.picker[0];
+            forcedAction = { ...pa, text: zeroText, picker: undefined };
+          }
+        } else if (!forcedAction) {
+          const pa = (exact.actions || []).find((x) => x.picker && x.picker.length && x.picker.some((p) => zeroRe.test(deaccent(p))));
+          if (pa) {
+            const contText = pa.picker.find((p) => !zeroRe.test(deaccent(p))) || pa.picker[1];
+            forcedAction = { ...pa, text: contText, picker: undefined };
+          }
+        }
+        const p = resolveDraw({ activity: exact, action: forcedAction }, log);
         if (p) {
           proposedAtRef.current = Date.now();
           setRunning(false); setElapsedMs(0);
