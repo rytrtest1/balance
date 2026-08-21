@@ -5171,6 +5171,15 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
       setLogText("");
       return;
     }
+    // "log " en préfixe (Maxence 21/08) : jamais un démarrage, toujours une
+    // activité faite EN DEHORS de l'app à enregistrer comme si elle avait été
+    // faite in-app (temps/commentaires en direct restent le rôle du déclenchement
+    // normal ci-dessous — "log" ne le remplace pas, il couvre juste ce qu'aucune
+    // session in-app n'a capté). Coupe court toute ambiguïté : le bloc nom→démarrage
+    // juste en dessous est entièrement sauté, et le classifieur Claude plus bas n'a
+    // plus à deviner "start" vs "activity" pour ce texte — il sait déjà lequel.
+    const forceLogged = /^log\s+/.test(text);
+    const bodyText = forceLogged ? text.replace(/^log\s+/, "").trim() : text;
     // lancer une activité depuis le log, en tapant son nom (Maxence 16/08 : "à bien
     // vérifier pour chaque activité si ça fonctionne, et quel mot le plus simple
     // pour être sûr que ça marche" — puis 16/08 confirmé : "piano pièce" sans le
@@ -5187,7 +5196,7 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
     //      ou toute description d'une session déjà faite sur le chemin normal plus
     //      bas (intent "activity" via Claude), puisqu'aucun nom du catalogue n'est
     //      un texte plus long que ce qu'on tape pour juste lancer quelque chose.
-    if (stage === "entry") {
+    if (stage === "entry" && !forceLogged) {
       const normName = (s) => s.toLowerCase().trim().replace(/[—–-]/g, " ").replace(/\s+/g, " ").trim();
       const deaccent = (s) => s.normalize("NFD").replace(/[̀-ͯ]/g, "");
       let typedNorm = normName(text);
@@ -5281,7 +5290,7 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
     if (!key) {
       // no key: can't classify freely, kept as a note rather than silently dropped
       // or force-matched without any real reading of the text.
-      setLog((L) => [...L, { id: uid(), date: todayKey(), ts: realNow().getTime(), type: "note", note: text }]);
+      setLog((L) => [...L, { id: uid(), date: todayKey(), ts: realNow().getTime(), type: "note", note: bodyText }]);
       setMsg("noté — pas de clé API pour lire plus finement"); setLogText("");
       setTimeout(() => setMsg(""), 2400);
       return;
@@ -5291,7 +5300,25 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
       const acts = (a.actions || []).map((ac) => `${ac.id}: ${ac.text}`).join(" · ") || "(pas d'action fixe)";
       return `${a.id} — ${a.name} (${a.domain}) : ${acts}`;
     }).join("\n");
-    const prompt = `Tu lis ce que Maxence vient de taper dans la case "log" de BALANCE, et tu détermines son intention.
+    // forceLogged (préfixe "log ") : plus besoin de deviner start vs activity —
+    // l'intent est déjà connu, un choix de moins pour Claude, jamais de branche
+    // "start" possible ici (schema aussi restreint en conséquence).
+    const prompt = forceLogged
+      ? `Tu lis ce que Maxence vient de taper dans la case "log" de BALANCE, préfixé "log" : il décrit une activité qu'il vient de faire EN DEHORS de l'app (pas de session in-app en cours), à enregistrer comme si elle avait été faite ici.
+
+Catalogue (id — nom (domaine) : actions[id: texte]) :
+${catalogue}
+
+Ce qu'il a tapé (préfixe "log" déjà retiré) :
+« ${bodyText} »
+
+Détermine intent :
+- "activity" si le texte décrit une activité qui correspond à une ligne précise du catalogue.
+- "note" si ça ne colle à aucune activité précise — une pensée, un fait à garder. Ne force JAMAIS un match approximatif : dans le doute, "note".
+
+Si intent = "activity" : activity_id = l'id exact du catalogue qui correspond le mieux. action_id = l'id de l'action qui correspond si le texte permet de la déduire, omets-le sinon. min = durée en minutes déduite du texte, estimation raisonnable si non précisée.
+note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de commentaire loggé).`
+      : `Tu lis ce que Maxence vient de taper dans la case "log" de BALANCE, et tu détermines son intention.
 
 Catalogue (id — nom (domaine) : actions[id: texte]) :
 ${catalogue}
@@ -5310,7 +5337,7 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
       const out = await claudeJSON(key, prompt, {
         type: "object",
         properties: {
-          intent: { type: "string", enum: ["activity", "note", "start"] },
+          intent: forceLogged ? { type: "string", enum: ["activity", "note"] } : { type: "string", enum: ["activity", "note", "start"] },
           // structured-outputs strict mode requires every property in `required` —
           // nullable type + explicit null is how an LLM field stays optional under that
           // constraint. Omitting these from `required` was producing the http 400 on
@@ -5352,7 +5379,7 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
         // read differently from a genuine note, or there's no way to notice it silently
         // didn't launch anything. Distinguishing message kept broad since the exact
         // failure (bad id vs empty pool) isn't worth surfacing in the UI.
-        setLog((L) => [...L, { id: uid(), date: todayKey(), ts: realNow().getTime(), type: "note", note: out.note || text }]);
+        setLog((L) => [...L, { id: uid(), date: todayKey(), ts: realNow().getTime(), type: "note", note: out.note || bodyText }]);
         setLogText("");
         setMsg(`n'a pas pu démarrer "${ta ? ta.name : out.activity_id}" — noté à la place`);
         return;
@@ -5365,7 +5392,7 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
           id: uid(), date: todayKey(), ts: realNow().getTime(), type: "done",
           activityId: a.id, actionId: action ? action.id : null,
           actionText: action ? action.text : a.name,
-          min: m, sec: m * 60, domain: a.domain, note: out.note || text,
+          min: m, sec: m * 60, domain: a.domain, note: out.note || bodyText,
         };
         if (a.kind === "task") setActivities((arr) => arr.map((x) => (x.id === a.id ? { ...x, done: true } : x)));
         setLog((L) => [...L, e]);
@@ -5379,11 +5406,11 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
         // corrupt their pos-based items — advanceContinuousPipelineFromLog reasons
         // in bands instead, same "explicit correction primes over default"
         // contract, no live drag needed.
-        if (isContinuousPipelineId(a.id)) advanceContinuousPipelineFromLog(key, a, out.note || text, e.id);
-        else if (a.kind === "pipeline") advancePipelineFromLog(key, a, out.note || text, e.id);
+        if (isContinuousPipelineId(a.id)) advanceContinuousPipelineFromLog(key, a, out.note || bodyText, e.id);
+        else if (a.kind === "pipeline") advancePipelineFromLog(key, a, out.note || bodyText, e.id);
         setMsg(`logged: ${e.actionText}`);
       } else {
-        setLog((L) => [...L, { id: uid(), date: todayKey(), ts: realNow().getTime(), type: "note", note: out.note || text }]);
+        setLog((L) => [...L, { id: uid(), date: todayKey(), ts: realNow().getTime(), type: "note", note: out.note || bodyText }]);
         setMsg("noté");
       }
       setLogText("");
