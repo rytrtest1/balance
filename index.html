@@ -105,12 +105,16 @@ const KINDS = ["practice", "task", "pipeline", "recommandeur"];
 const ERASURE_STAGES = ["accroches", "mots favoris", "groupes", "poème", "forme"];
 const mkStages = (labels) => labels.map((t) => ({ id: uid(), text: t }));
 // continuous-position pipelines (16/08 refonte, Erasure proven first — see
-// NOW.md Queue "Refonte pipelines" — Piano/Cover ported 17/08 once the
-// mechanism held up). Deliberately an explicit id list, not a generic catalogue
-// flag — same precedent as isAlbumActivity/a_parfum_explo elsewhere in this
-// file: every pipeline still using the discrete stage[] index (any future one
-// not in this list) keeps the old Claude-driven advance untouched.
-const CONTINUOUS_PIPELINE_IDS = new Set(["a_erasure", "a_piano", "a_cover"]);
+// NOW.md Queue "Refonte pipelines" — Piano/Cover ported 17/08, Parfum créer
+// ported 21/08 once M. pointed out it had never actually gotten a live drag
+// gesture either — nothing about the discrete stage[] index was more precise
+// for it than a continuous position would be, so there was no reason left to
+// keep it apart. Deliberately still an explicit id list, not a generic
+// catalogue flag (same precedent as isAlbumActivity/a_parfum_explo elsewhere
+// in this file) — covers every current pipeline, kept explicit rather than
+// derived from `kind==="pipeline"` so a future genuinely-discrete pipeline
+// (if one is ever needed) has somewhere to opt out.
+const CONTINUOUS_PIPELINE_IDS = new Set(["a_erasure", "a_piano", "a_cover", "a_parfum_crea"]);
 const isContinuousPipelineId = (id) => CONTINUOUS_PIPELINE_IDS.has(id);
 
 // ---------- seed (everything editable) ----------
@@ -259,6 +263,27 @@ const isPureProgressMarker = (text) => {
 const extractQuotedName = (text) => {
   const m = (text || "").match(/[«"“]([^»"”]{2,80})[»"”]/);
   return m ? m[1].trim() : null;
+};
+// même logique qu'extractQuotedName ci-dessus, appliquée au nom d'ÉTAPE plutôt
+// qu'au nom de la pièce (Maxence 21/08, log libre pipeline : "la pièce mentionnée
+// adopte l'étape mentionnée, c'est plus simple") — si le texte nomme explicitement
+// une étape du funnel (ou dit fini/terminé), c'est un fait local sans ambiguïté,
+// pas la peine d'attendre Claude pour ça. L'étape la plus longue qui matche gagne
+// (évite qu'un mot court comme "choisir" masque une étape plus spécifique aussi
+// présente dans le texte). Retourne stages.length pour "fini"/"terminé" — même
+// convention que "dernière étape + 1" utilisée par les deux appelants.
+const extractStageMention = (stages, text) => {
+  const deaccent = (s) => s.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
+  const flat = deaccent(text || "");
+  if (/\b(fini|finie|termine|terminee)\b/.test(flat)) return stages.length;
+  let best = -1, bestLen = 0;
+  stages.forEach((s, i) => {
+    const st = deaccent(s.text);
+    if (st.length < 3) return;
+    const re = new RegExp(`\\b${st.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`);
+    if (re.test(flat) && st.length > bestLen) { best = i; bestLen = st.length; }
+  });
+  return best >= 0 ? best : null;
 };
 // affichage seulement (voir resolveSingleItem) — ép./chapitre sont des unités
 // finies : le repère utile à revoir est celui d'après, pas celui qu'on vient de
@@ -3826,70 +3851,16 @@ updated_observations = les observations réécrites en y intégrant ce qu'apport
     }
   };
 
-  // ----- same stage-advance as advanceViaClaude, but reachable from the free-log
-  // box (submitFreeLog) instead of a live session. There's no `current.action` to
-  // read pieceId/pieceStage/fresh from, so the piece is resolved the same way
-  // simComplete does it (sandbox quick-complete): the most-live piece (highest
-  // stage still <= last), or a fresh one if none exists.
-  const advancePipelineFromLog = async (key, act, text, entryId) => {
-    const stages = act.stages || [];
-    const last = stages.length - 1;
-    const pieces = (act.items || []).filter((it) => typeof it.stage === "number");
-    const live = pieces.filter((p) => p.stage <= last).sort((u, v) => v.stage - u.stage)[0] || null;
-    const ctx = live
-      ? `Pièce existante : « ${live.text} », à l'étape ${live.stage} (${(stages[live.stage] || {}).text || "?"}).`
-      : `Aucune pièce en cours — ce texte démarre potentiellement une pièce FRAÎCHE (pas encore de nom).`;
-    const prompt = `Tu suis l'avancement d'une pièce dans un funnel « ${act.name} » (domaine : ${act.domain}), à partir d'un log libre (pas de session minutée en cours, juste un texte tapé après coup).
-Étapes du funnel (index: nom) :
-${stages.map((s, i) => `${i}: ${s.text}`).join("\n")}
-
-${ctx}
-
-Ce qu'il a tapé :
-« ${text} »
-
-Détermine où en est la pièce APRÈS ce qui est décrit. Par défaut new_stage = index (0 à ${last}) de l'étape courante : si une étape vient d'être finie, avance à la suivante, sinon garde l'étape (${live ? live.stage : 0} si le texte ne décrit pas d'avancée claire). Mais si le texte indique EXPLICITEMENT à quelle étape la pièce en est réellement — nomme une étape du funnel, dit qu'elle est plus ou moins avancée que prévu, ou dit qu'elle est finie/terminée — prends new_stage directement à cette étape précise (${last + 1} pour terminée), peu importe l'écart : une correction explicite prime toujours sur la progression pas-à-pas par défaut. piece_name = nom court (existant, ou tiré du texte si fraîche). progressed = true si le texte décrit un vrai pas en avant, false sinon.`;
-    try {
-      const out = await claudeJSON(key, prompt, {
-        type: "object",
-        properties: { piece_name: { type: "string" }, new_stage: { type: "integer" }, progressed: { type: "boolean" } },
-        required: ["piece_name", "new_stage", "progressed"],
-        additionalProperties: false,
-      });
-      const ns = Math.max(0, Math.min(last + 1, parseInt(out.new_stage)));
-      const pieceName = out.piece_name || (live ? live.text : "(sans nom)");
-      const prevStage = live ? live.stage : 0;
-      const justFinished = ns > last && prevStage <= last;
-      const justGraduated = act.graduatesTo && justFinished;
-      setActivities((arr) => arr.map((a2) => {
-        if (a2.id === act.id) {
-          let items = a2.items || [];
-          items = live ? items.map((it) => (it.id === live.id ? { ...it, stage: ns } : it)) : [...items, { id: uid(), text: pieceName, stage: ns }];
-          return { ...a2, items };
-        }
-        if (justGraduated && a2.id === act.graduatesTo) {
-          return { ...a2, items: [...(a2.items || []), { id: uid(), text: pieceName, status: "doing" }] };
-        }
-        return a2;
-      }));
-      if (entryId) setLog((L) => L.map((en) => (en.id === entryId ? { ...en, finished: justFinished, progressed: !!out.progressed } : en)));
-    } catch (err) {
-      // the "done" entry is already logged (min/note) regardless — only the funnel
-      // position fails to update this time, same fail-safe spirit as advanceViaClaude.
-    }
-  };
-
-  // ----- continuous pipeline (16/08 refonte, Erasure/Piano/Cover) from the
-  // free-log box — fills the gap left when advancePipelineFromLog was excluded
-  // for these activities (no live drag to read a position from here, so it needs
-  // its own inference). Same "explicit correction primes over default" contract
-  // as advancePipelineFromLog above, just in band terms (0 to n-1, n = terminé)
-  // instead of a discrete stage index that happens to already be the funnel's
-  // real shape — Claude reasons in bands because that's what the text can
-  // actually convey ("à l'étape poème"), the hero-line drag remains the only
-  // source of a PRECISE pos during a real session. A resolved band writes the
-  // midpoint of that band so the live label reads unambiguously inside it, not
-  // sitting right on a threshold.
+  // ----- pipeline advance from the free-log box (16/08 refonte pour Erasure/
+  // Piano/Cover, généralisé à tous les pipelines 21/08 quand Parfum créer est
+  // passé continu aussi — plus aucun pipeline discret, une seule fonction). Pas
+  // de live drag à lire ici (pas de session minutée en cours, juste un texte
+  // tapé après coup), donc soit le court-circuit local ci-dessus (étape nommée
+  // explicitement) tranche direct, soit Claude infère en bandes — c'est ce que
+  // le texte peut réellement transmettre ("à l'étape poème"), le drag reste la
+  // seule source de position PRÉCISE pendant une vraie session. Une bande
+  // résolue écrit le milieu de cette bande pour que le label live tombe
+  // clairement dedans, pas pile sur un seuil.
   const advanceContinuousPipelineFromLog = async (key, act, text, entryId) => {
     const live = (act.items || []).find((it) => typeof it.pos === "number" && !it.done);
     const stages = act.stages || [];
@@ -3897,6 +3868,34 @@ Détermine où en est la pièce APRÈS ce qui est décrit. Par défaut new_stage
     const bandWidth = 100 / n;
     const currentBand = live ? Math.min(n - 1, Math.floor(live.pos / bandWidth)) : 0;
     const quotedName = extractQuotedName(text);
+    // court-circuit local (Maxence 21/08) : étape nommée explicitement + pièce
+    // identifiable (en cours, ou fraîche mais nommée entre guillemets) → écrit
+    // direct, aucun appel Claude. Sans étape nommée ou sans pièce identifiable,
+    // retombe sur le raisonnement Claude ci-dessous (statu quo par défaut, ou
+    // pièce fraîche à nommer par inférence).
+    const localStage = extractStageMention(stages, text);
+    if (localStage != null && (live || quotedName)) {
+      const band = Math.max(0, Math.min(n, localStage));
+      const pos = Math.min(100, band * bandWidth + bandWidth / 2);
+      const done = band >= n - 1;
+      const name = quotedName || (live && live.text) || "";
+      const justGraduated = done && !!act.graduatesTo;
+      setActivities((arr) => arr.map((a2) => {
+        if (a2.id === act.id) {
+          let items = a2.items || [];
+          items = live
+            ? items.map((it) => (it.id === live.id ? { ...it, pos, done, text: (!it.text && name) ? name : it.text } : it))
+            : [...items, { id: uid(), text: name, pos, done }];
+          return { ...a2, items };
+        }
+        if (justGraduated && a2.id === act.graduatesTo) {
+          return { ...a2, items: [...(a2.items || []), { id: uid(), text: name, status: "doing" }] };
+        }
+        return a2;
+      }));
+      if (entryId) setLog((L) => L.map((en) => (en.id === entryId ? { ...en, pipelinePos: pos } : en)));
+      return;
+    }
     const ctx = live
       ? `Pièce existante : « ${live.text || "sans titre"} », à l'étape ${currentBand} (${(stages[currentBand] || {}).text || "?"}).`
       : `Aucune pièce en cours — ce texte démarre potentiellement une pièce FRAÎCHE (pas encore de nom).`;
@@ -3939,11 +3938,10 @@ Détermine à quelle étape (bande, 0 à ${n - 1}) la pièce en est APRÈS ce qu
       if (entryId) setLog((L) => L.map((en) => (en.id === entryId ? { ...en, pipelinePos: pos } : en)));
     } catch (err) {
       // the "done" entry is already logged (min/note) regardless — only the band
-      // reasoning fails this time, same fail-safe spirit as advancePipelineFromLog.
-      // A quoted name can still be applied to an EXISTING live piece without the
-      // API (same guaranteed-locally precedent as extractQuotedName elsewhere) —
-      // but a fresh piece has nothing to attach it to yet, it simply isn't created
-      // this time (same degradation as advancePipelineFromLog's own catch).
+      // reasoning fails this time. A quoted name can still be applied to an
+      // EXISTING live piece without the API (same guaranteed-locally precedent as
+      // extractQuotedName elsewhere) — but a fresh piece has nothing to attach it
+      // to yet, it simply isn't created this time.
       if (quotedName && live) {
         setActivities((arr) => arr.map((a2) => (a2.id !== act.id ? a2 : {
           ...a2,
@@ -5396,18 +5394,15 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
         };
         if (a.kind === "task") setActivities((arr) => arr.map((x) => (x.id === a.id ? { ...x, done: true } : x)));
         setLog((L) => [...L, e]);
-        // pipelines (Erasure/Piano/Cover/Parfum) aren't just logged — the funnel
-        // piece itself needs to move, same Claude-driven read as a normal session's
-        // after-finish comment (advanceViaClaude), just resolving the piece from the
-        // catalogue instead of a live `current.action` (17/07, was a known gap: the
-        // free-log box only ever wrote a plain "done" entry for these, funnel never moved).
-        // Continuous pipelines routed separately (16/08 refonte, wired 17/08):
-        // advancePipelineFromLog assumes the old discrete it.stage shape and would
-        // corrupt their pos-based items — advanceContinuousPipelineFromLog reasons
-        // in bands instead, same "explicit correction primes over default"
-        // contract, no live drag needed.
-        if (isContinuousPipelineId(a.id)) advanceContinuousPipelineFromLog(key, a, out.note || bodyText, e.id);
-        else if (a.kind === "pipeline") advancePipelineFromLog(key, a, out.note || bodyText, e.id);
+        // pipelines (Erasure/Piano/Cover/Parfum créer) aren't just logged — the
+        // funnel piece itself needs to move, same Claude-driven read as a normal
+        // session's after-finish comment (advanceViaClaude), just resolving the
+        // piece from the catalogue instead of a live `current.action` (17/07, was
+        // a known gap: the free-log box only ever wrote a plain "done" entry for
+        // these, funnel never moved). All 4 pipelines are continuous since 21/08
+        // (Parfum créer ported alongside Erasure/Piano/Cover, see
+        // CONTINUOUS_PIPELINE_IDS) — one function for all of them now.
+        if (a.kind === "pipeline") advanceContinuousPipelineFromLog(key, a, out.note || bodyText, e.id);
         setMsg(`logged: ${e.actionText}`);
       } else {
         setLog((L) => [...L, { id: uid(), date: todayKey(), ts: realNow().getTime(), type: "note", note: out.note || bodyText }]);
