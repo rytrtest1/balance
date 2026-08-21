@@ -4319,9 +4319,18 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
   // session — same "note" shape as the album titles (isDone/isClick skip it, it's
   // not a completion). Ending the session is still only the line tap (finish());
   // the field stays open afterward on "done" for a last word, untouched by this.
+  // double-soumission (trouvé Aug16-w, save réel 24/07→15/08, ~10 occurrences) : le
+  // même texte loggé deux fois à 1-4s d'écart, plusieurs activités — pas de garde sur
+  // ce bouton, un double-tap (doigt ou clavier+bouton) crée deux entrées identiques.
+  // Garde par contenu+délai plutôt que par ref bouton : couvre tap ET Enter.
+  const lastRunningNoteRef = useRef(null);
   const submitRunningComment = () => {
     const text = comment.trim();
     if (!text || !current) return;
+    const now = realNow().getTime();
+    const lastNote = lastRunningNoteRef.current;
+    if (lastNote && lastNote.text === text && (now - lastNote.ts) < 3000) return;
+    lastRunningNoteRef.current = { text, ts: now };
     setLog((L) => [...L, {
       id: uid(), date: todayKey(), ts: realNow().getTime(), type: "note",
       activityId: current.activity.id, actionId: current.action.id, actionText: current.action.text,
