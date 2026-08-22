@@ -296,7 +296,13 @@ const nextProgressHint = (p) => {
   if (m) return `prochain ch.${parseInt(m[1], 10) + 1}`;
   return p;
 };
-const isDone = (e) => e.type !== "note";
+// "skip" (21/08) exclu au même titre que "note" : une proposition refusée n'est
+// PAS une séance faite. Sans cette exclusion, un refus compterait comme une
+// complétion partout (quotas de la loterie, rapport de fin de journée, terme
+// d'ancienneté du tirage) — un refus suffirait à considérer l'activité comme
+// remplie pour la journée. Aucune donnée existante ne porte ce type, donc
+// l'exclusion ne change rien à l'historique.
+const isDone = (e) => e.type !== "note" && e.type !== "skip";
 // a real completion, as opposed to a free-text "note" entry (submitFreeLog) — used
 // wherever "clics" are counted (rapport gate, sandbox banners) so jotting a note
 // never inflates the count of activities actually done.
@@ -495,22 +501,125 @@ function hasDoingItems(a) {
 // pour reproposer un AUTRE item du même pool sans jamais retomber sur celui
 // qu'on vient de refuser. Ignoré si le pool n'a qu'un seul item (rien d'autre à
 // proposer) plutôt que de renvoyer `base` sans itemId.
+// --- couloirs de tirage (21/08) ---------------------------------------------
+// Mesuré en simulation sur les 18 vraies notes : un tirage UNIFORME sur un pool
+// de 127 sert une note moyenne de 62 avec 27% de propositions sous 50 ; pondéré
+// par l'adéquation, 81 avec 2% — mais la part exploratoire servie s'effondre de
+// 33% à 2%, c'est-à-dire que la découverte meurt. D'où les couloirs : le couloir
+// est tiré selon un quota STRUCTUREL (jamais influencé par les résultats, même
+// forme que l'ε-greedy de Spotify), et la pondération ne joue qu'À L'INTÉRIEUR.
+// Résultat mesuré : 80,0 de moyenne ET 33% d'exploration préservée.
+//
+// Le point capital : le poids ne veut pas dire la même chose selon le couloir.
+//   core  → `fit`  : adéquation au profil. Le meilleur de ce qui lui ressemble.
+//   widen → `door` : qualité de PORTE D'ENTRÉE vers un territoire adjacent,
+//                    l'adéquation est délibérément ignorée (sinon on ne fait que
+//                    de la confirmation déguisée). Répond à sa demande du 07/08 :
+//                    « arrêter de me proposer que les sons les plus écoutés ».
+//   terra → `door` aussi, mais jugé sur les termes du territoire lui-même, pas
+//                    sur son goût — un monde dont il n'a RIEN dit ne peut pas
+//                    être noté « proche de son profil » par construction.
+// terra a son propre couloir et pas un simple quota à l'ajout : mesuré, une
+// garantie posée à la composition s'évapore au tirage (1,0 sortie contre 15,6 à
+// quota dédié, et pire encore dès que le modèle sous-note l'inconnu — ce qu'il
+// fait forcément puisqu'il ne peut le relier à rien).
+// fenêtre pendant laquelle un log libre écrit juste après un refus est compris
+// comme la RAISON de ce refus (et non une note sans rapport). Assez large pour
+// laisser le temps de formuler, assez courte pour ne pas capturer une note écrite
+// bien plus tard dans la journée.
+const SKIP_NOTE_WINDOW_MS = 3 * 60 * 1000;
+const LANE_QUOTAS = { core: 0.5, widen: 0.3, terra: 0.2 };
+// registre : axe ORTHOGONAL au couloir, Cuisiner seul pour l'instant (22/08).
+// Même leçon que les exclusions alimentaires : demander au prompt de "mélanger
+// sans séparer" les deux registres ne garantit rien en pratique (mesuré : zéro
+// finedining sur un lot widen/terra entier malgré la consigne) — il faut un
+// vrai quota structurel, comme pour le couloir. Dégradation gracieuse si
+// `register` est absent des items (toutes les autres activités) : `registers`
+// reste vide, cette étape ne fait rien.
+const REGISTER_QUOTAS = { homefood: 0.5, finedining: 0.5 };
+const LANE_ALPHA = 6; // dureté de la pondération intra-couloir (mesurée : 6 ≈ 80,0)
+const DIR_DAMP = 0.5;    // amortissement de la taille d une direction (racine : 4x d items -> 2x de tirages)
+const DIR_FIT_POW = 2;   // poids de la qualite moyenne d une direction (doux, contre LANE_ALPHA=6 a l interieur)
+const laneOf = (it) => (LANE_QUOTAS[it.lane] ? it.lane : "core");
+// Un item sans score (legacy, ou activité kind:"practice" qui partage ce picker)
+// vaut 50 partout : (50/100)^ALPHA est alors un facteur constant, donc le tirage
+// redevient exactement l'ancien tirage pondéré par l'ancienneté. Dégradation
+// gracieuse voulue — rien ne change tant que les scores ne sont pas posés.
+const laneScore = (it, lane) => {
+  const v = lane === "core" ? it.fit : it.door;
+  return typeof v === "number" ? Math.max(1, Math.min(100, v)) : 50;
+};
 function pickItemLRU(a, log, base, avoidItemId) {
   let doing = (a.items || []).filter((it) => it.status === "doing");
   if (avoidItemId && doing.length > 1) doing = doing.filter((it) => it.id !== avoidItemId);
   if (!doing.length) return base;
+  // ⓪ registre tiré AVANT le couloir, même mécanique qu'① (quota structurel,
+  // renormalisé sur les seuls registres qui ont des candidats). Un item SANS
+  // `register` (tout le pool core d'avant ce chantier) est neutre, pas exclu —
+  // même convention que fit/door absents ailleurs (silence ≠ valeur) : bug
+  // trouvé en testant une semaine simulée le 22/08, les 14 items core de
+  // Cuisiner étaient devenus totalement inatteignables dès qu'un seul item
+  // widen/terra portait un registre.
+  const byRegister = {};
+  const untagged = [];
+  for (const it of doing) (it.register ? (byRegister[it.register] = byRegister[it.register] || []).push(it) : untagged.push(it));
+  const registers = Object.keys(byRegister);
+  if (registers.length > 1) {
+    const rtot = registers.reduce((sum, r) => sum + (REGISTER_QUOTAS[r] || 0), 0);
+    let rr = Math.random() * rtot, register = registers[registers.length - 1];
+    for (const r of registers) { rr -= REGISTER_QUOTAS[r] || 0; if (rr <= 0) { register = r; break; } }
+    doing = [...byRegister[register], ...untagged];
+  }
   const scored = doing.map((it) => {
     let last = null;
     for (const e of log) if (e.activityId === a.id && isDone(e) && e.itemId === it.id && (!last || e.date > last)) last = e.date;
-    return { it, w: (last ? daysBetween(last, todayKey()) : 999) * (0.7 + Math.random() * 0.6) };
+    // terme d'ancienneté inchangé (999 pour un item jamais tiré) : il porte le
+    // damping de récence qui existait déjà, la pondération vient EN PLUS.
+    return { it, age: (last ? daysBetween(last, todayKey()) : 999) * (0.7 + Math.random() * 0.6) };
   });
-  // ④ (choix arbitré) codé puis retiré le 17/08 : un pool correctement tenu (retrait
-  // des items qui ne collent plus, greffé sur refreshMusicProfileViaClaude) ne
-  // contient plus de mauvais candidats à filtrer au moment du tirage — arbitrer
-  // entre du bon et du bon n'ajoutait rien, et un LLM qui choisit "le meilleur" à
-  // chaque tirage érode la variété que le tirage aléatoire est censé garantir
-  // (cf throughline-no-recognizable-pattern). Tirage pondéré pur, comme avant ④.
-  const chosen = scored.sort((x, y) => y.w - x.w)[0].it;
+  // ① couloir tiré selon les quotas, renormalisés sur les seuls couloirs qui ont
+  // des candidats — un couloir vide ne bloque jamais le tirage, il cède sa part.
+  const byLane = {};
+  for (const s of scored) (byLane[laneOf(s.it)] = byLane[laneOf(s.it)] || []).push(s);
+  const lanes = Object.keys(byLane);
+  const total = lanes.reduce((sum, l) => sum + (LANE_QUOTAS[l] || 0), 0);
+  let r = Math.random() * total, lane = lanes[lanes.length - 1];
+  for (const l of lanes) { r -= LANE_QUOTAS[l] || 0; if (r <= 0) { lane = l; break; } }
+  // ② calibration par direction, DANS le couloir (Steck/Netflix, "Calibrated
+  // Recommendations") — seule technique de diversité qui tienne à ce volume de
+  // données, parce qu'elle ne demande que des proportions, jamais des
+  // similarités apprises. Nécessaire ici : mesuré, un fit de 95 sort 98× plus
+  // qu'un fit de 45, donc sans contrepoids les items les mieux notés — qui se
+  // ressemblent par construction — mangeraient tout le couloir. Une direction
+  // 4× plus fournie ne pèse que 2× plus (amortissement en racine), au lieu de
+  // 4×. Sans `dir` sur les items, cette étape est neutre (une seule direction).
+  let cand = byLane[lane];
+  const byDir = {};
+  for (const s of cand) (byDir[s.it.dir || "—"] = byDir[s.it.dir || "—"] || []).push(s);
+  const dirs = Object.keys(byDir);
+  if (dirs.length > 1) {
+    // taille amortie × qualité moyenne de la direction, elle aussi amortie
+    // (DIR_FIT_POW=2 contre LANE_ALPHA=6 à l'intérieur) : une direction qu'il
+    // rejette recule nettement sans jamais tomber à zéro — c'est la condition
+    // pour que le cas Mascagni reste possible (l'opéra orchestral survit à un
+    // rejet portant en fait sur la voix lyrique solo).
+    const dw = (d) => {
+      const mean = byDir[d].reduce((acc, s) => acc + laneScore(s.it, lane), 0) / byDir[d].length;
+      return Math.pow(byDir[d].length, DIR_DAMP) * Math.pow(mean / 100, DIR_FIT_POW);
+    };
+    const dtot = dirs.reduce((acc, d) => acc + dw(d), 0);
+    let y = Math.random() * dtot, pickedDir = dirs[dirs.length - 1];
+    for (const d of dirs) { y -= dw(d); if (y <= 0) { pickedDir = d; break; } }
+    cand = byDir[pickedDir];
+  }
+  // ③ item tiré DANS la direction, pondéré par le score propre au couloir.
+  // Toujours un tirage, jamais un argmax : ④ (choix arbitré par le LLM) a été
+  // codé puis retiré le 17/08 parce qu'un modèle qui choisit « le meilleur » à
+  // chaque fois érode la variété (cf throughline-no-recognizable-pattern).
+  const w = (s) => Math.pow(laneScore(s.it, lane) / 100, LANE_ALPHA) * s.age;
+  const sum = cand.reduce((acc, s) => acc + w(s), 0);
+  let x = Math.random() * sum, chosen = cand[cand.length - 1].it;
+  for (const s of cand) { x -= w(s); if (x <= 0) { chosen = s.it; break; } }
   return { id: base.id, text: chosen.text, min: base.min, dur: base.dur, itemId: chosen.id };
 }
 function itemStep(a, log) {
@@ -2170,6 +2279,21 @@ function reconcileLivedStatus(activities, log) {
     return changed ? { ...a, items } : a;
   });
 }
+// "liked"/"neutral" -> "ref" (21/08) : deux labels que rien dans le code ne
+// lisait jamais (juste "pas doing") fusionnés en un seul statut porteur de sens,
+// avec une note personnelle en remplacement du label binaire. Idempotente
+// (aucun item déjà "ref" n'est retouché), migration one-way — un ancien
+// "liked" garde sa signification positive tant qu'aucune note n'est donnée
+// (traité comme "pas encore noté", jamais comme un 0).
+function migrateRefStatus(activities) {
+  let changed = false;
+  const next = activities.map((a) => {
+    if (!a.items || !a.items.some((it) => it.status === "liked" || it.status === "neutral")) return a;
+    changed = true;
+    return { ...a, items: a.items.map((it) => (it.status === "liked" || it.status === "neutral" ? { ...it, status: "ref" } : it)) };
+  });
+  return changed ? next : activities;
+}
 
 // ---------- Claude bridge (shared) ----------
 // One direct browser→Messages-API call returning structured JSON. Both the pipeline
@@ -2225,7 +2349,19 @@ async function claudeJSON(key, prompt, schema, maxTokens = 400, tools = null, mo
     // client séparé, donc pas besoin de rejouer l'appel avec un tool_result.
     const textBlocks = (data.content || []).filter((b) => b.type === "text");
     const txt = textBlocks.length ? textBlocks[textBlocks.length - 1].text : "";
-    return JSON.parse(txt);
+    // raté transitoire trouvé le 22/08 en testant en vrai : une réponse 200 sans
+    // aucun bloc texte exploitable (donc txt vide, ou pas du JSON), jamais
+    // reproduite en rejouant le même appel — pas une erreur HTTP donc jamais
+    // rattrapée par le retry ci-dessus, plantait tout le pipeline en aval pour un
+    // simple accident isolé. Même traitement que 429/5xx : retenter avant
+    // d'abandonner.
+    try {
+      if (!txt) throw new Error("réponse sans texte exploitable");
+      return JSON.parse(txt);
+    } catch (e) {
+      if (attempt < maxAttempts - 1) continue;
+      throw new Error("réponse invalide après " + maxAttempts + " tentatives — " + e.message);
+    }
   }
 }
 
@@ -2294,6 +2430,9 @@ function buildProfileSessions(activity, log) {
     const midNotes = entries.filter((e) => e.type === "note" && e.ts > prevTs && e.ts <= d.ts && (e.parentId ? e.parentId === d.id : true));
     sessions.push({
       itemText: d.itemId ? (itemById.get(d.itemId) || {}).text : null,
+      // registre (homefood/finedining, Cuisiner seul) — undefined ailleurs,
+      // ignoré silencieusement par le prompt générique.
+      register: d.itemId ? (itemById.get(d.itemId) || {}).register : undefined,
       rating: d.rating,
       comments: [...midNotes.map((n) => n.note), d.note].filter(Boolean),
     });
@@ -2302,28 +2441,126 @@ function buildProfileSessions(activity, log) {
   return sessions.filter((s) => s.rating != null || s.comments.length);
 }
 
+// Règle de retrait, partagée mot pour mot par les deux chemins de profil
+// (générique et musical) : elle est trop importante pour diverger entre les deux.
+// Le retrait est le vrai moteur de bulle du système — c'est lui qui rétrécit
+// explicitement, alors que la littérature ne mesure d'ordinaire qu'un
+// rétrécissement émergent. D'où la règle de l'ATTRIBUT : elle est ce qui rend le
+// rétrécissement réversible.
+const REMOVAL_RULES = `RÈGLE ABSOLUE sur le motif d'un retrait : il ne peut invoquer qu'un ATTRIBUT précis, jamais une direction ou un genre entier. « Contient une voix lyrique solo démonstrative, qu'il rejette en toutes lettres » est un motif valide ; « c'est de l'opéra, il n'aime pas l'opéra » n'en est pas un — il a noté l'intermezzo de Cavalleria Rusticana 79/100, qui est un opéra. Vider un territoire entier sur la foi d'un attribut qui n'en concerne qu'une partie est l'erreur exacte à ne pas commettre : elle est irréversible en pratique, puisque plus rien de ce territoire ne reviendra jamais être testé.
+Juge sur la force du signal disponible, pas sur un nombre minimum de sessions : dans le doute ne retire rien, mais un signal déjà net n'a pas besoin d'attendre. Un pool déjà cohérent peut très bien ne donner AUCUN retrait — c'est le cas normal, pas une anomalie à corriger.
+Deux motifs différents selon le type d'item, et DEUX QUOTAS SÉPARÉS (les [exploration] ne doivent jamais être évincés par un arriéré d'items normaux à nettoyer) :
+- item normal (jusqu'à 3) : ne colle clairement plus au profil que tu viens d'écrire.
+- item [exploration] (jusqu'à 2, quota indépendant) : jamais retiré simplement parce qu'il ne confirme pas encore le profil — c'est le but, c'est attendu. Retirable UNIQUEMENT s'il correspond en fait à une précaution déjà nette, c'est-à-dire si l'exploration était une erreur de catégorisation et pas une vraie inconnue à tester.`;
+// Plafonds appliqués APRÈS coup, jamais seulement demandés dans le prompt (un
+// modèle qui remplit le quota normal en premier ne doit pas pouvoir manger celui
+// des explorations par la bande), + le garde-fou de sûreté par couloir.
+function capRemovals(ids, act) {
+  const counts = laneCounts(act);
+  const itemById = new Map((act.items || []).map((it) => [it.id, it]));
+  // Sûreté (21/08), mesurée en simulation : le retrait s'applique AVANT le
+  // réapprovisionnement dans la même passe, et le catch{} de l'appelant avale
+  // l'échec du second sans annuler le premier. Si l'API tombe ou que le crédit
+  // est épuisé (déjà arrivé — c'était la cause du décalage de page Murakami), le
+  // retrait divise par 4 la survie du pool : 42 jours sans lui contre 10 avec, et
+  // le pool finit vide dans 60 runs sur 60. Un couloir déjà sous son seuil bas ne
+  // peut donc plus rien perdre.
+  // décompte EN DIRECT (22/08, trouvé en creusant pourquoi Film ne réapprovisionne
+  // jamais) : la version précédente comparait chaque id au MÊME instantané de
+  // counts — si le modèle proposait 2 retraits widen alors qu'il ne restait qu'1
+  // de marge, les deux passaient quand même, et le couloir pouvait descendre sous
+  // son plancher malgré le garde-fou. Chaque retrait accepté doit faire baisser
+  // le compte avant de juger le suivant, pas rester sur la photo de départ.
+  const take = (list, max) => {
+    const out = [];
+    for (const id of list) {
+      if (out.length >= max) break;
+      const it = itemById.get(id);
+      if (!it || it.status !== "doing") continue;
+      const lane = laneOf(it);
+      if (counts[lane] <= LANE_FLOOR[lane]) continue;
+      counts[lane]--;
+      out.push(id);
+    }
+    return out;
+  };
+  const normalIds = (ids || []).filter((id) => { const it = itemById.get(id); return it && !it.explore; });
+  const exploreIds = (ids || []).filter((id) => { const it = itemById.get(id); return it && it.explore; });
+  return [...take(normalIds, 3), ...take(exploreIds, 2)];
+}
+
+// Refus (21/08) : items proposés puis refusés sans être essayés, avec la raison
+// quand M. l'a écrite juste après. Signal distinct d'une note basse — il n'a PAS
+// vécu l'item, il a jugé sur le titre/l'idée. À traiter comme tel dans le profil,
+// jamais comme un verdict sur l'oeuvre.
+function buildSkips(activity, log) {
+  const skips = log.filter((e) => e.type === "skip" && e.activityId === activity.id);
+  const notesByParent = new Map();
+  for (const e of log) if (e.type === "note" && e.parentId) notesByParent.set(e.parentId, e.note);
+  return skips.map((s) => ({ text: s.itemText || s.actionText || "?", why: notesByParent.get(s.id) || null }));
+}
+const skipsBlock = (skips) => (skips.length
+  ? `
+Refusés sans être essayés (il a vu la proposition et l'a écartée avant de commencer). Signal réel mais d'une autre nature qu'une note basse : il n'a pas vécu l'oeuvre, il a réagi au titre, au nom, à l'idée. Un refus répété sur des items qui partagent un même attribut est un signal fort ; un refus isolé peut n'être qu'une question de moment. Ne le traite jamais comme un verdict sur l'oeuvre elle-même :
+${skips.map((s) => `- « ${s.text} »${s.why ? ` — raison donnée : "${s.why}"` : " (sans raison donnée)"}`).join("\n")}
+`
+  : "");
+// Socle de référence (21/08) : "liked"/"neutral" fusionnés en un seul statut
+// "ref" — des oeuvres connues AVANT toute session, jamais tirées, décrites par
+// une note personnelle plutôt qu'un label. La note initialise à 50 et ne bouge
+// qu'au drag du curseur ailleurs dans l'app (confirmé dans le code le 17/08) :
+// même règle ici, une note ABSENTE veut dire aucun avis donné, jamais 50 par
+// défaut — donc rien n'est inventé pour les items pas encore notés (l'ancien
+// "neutral" en fait partie, il n'a jamais été un vrai avis).
+const refBlock = (refItems) => (refItems.length
+  ? `
+Socle de référence, posé par Maxence AVANT toute session — des oeuvres qu'il connaît déjà. Jamais tirées, jamais vécues comme une session ; certaines portent une note personnelle (son vrai avis, à traiter comme un signal aussi fiable qu'une note de session, parfois avec un repère de ce qui l'ancre — une chanson, un album précis), d'autres n'en ont pas encore (silence, pas un jugement neutre — ne les traite jamais comme "note 50") :
+${refItems.map((it) => `- « ${it.text} »${typeof it.rating === "number" ? ` — noté ${it.rating}/100${it.note ? ` (${it.note})` : ""}` : " (pas encore noté)"}`).join("\n")}
+`
+  : "");
+
 async function refreshProfileViaClaude(key, activity, log) {
+  const isCuisine = activity.id === "a_cuisiner";
   const sessions = buildProfileSessions(activity, log);
   const body = sessions.map((s) =>
-    `- « ${s.itemText || "?"} » — note: ${s.rating ?? "?"}/100. Commentaires: ${s.comments.length ? s.comments.map((c) => `"${c}"`).join(" / ") : "(aucun)"}`
+    `- ${s.register ? `[${s.register}] ` : ""}« ${s.itemText || "?"} » — note: ${s.rating ?? "?"}/100. Commentaires: ${s.comments.length ? s.comments.map((c) => `"${c}"`).join(" / ") : "(aucun)"}`
   ).join("\n");
+  const refItems = (activity.items || []).filter((it) => it.status === "ref");
+  const skips = buildSkips(activity, log);
+  const doing = (activity.items || []).filter((it) => it.status === "doing")
+    .map((it) => `${it.explore ? "[exploration]" : ""} ${it.id}: ${it.text}`);
+  // registre taggé par session (22/08, M. : "la note pour homefood et
+  // finedining est commune, ça va pas entraîner une incohérence ?"). Premier
+  // essai : un bloc "nuance" à part — rejeté par M. ("compliqué pour rien",
+  // et surtout la même faiblesse que la prose libre pour les exclusions :
+  // CE QU'IL CHERCHE restait énoncé en général AVANT la réserve). Séparation
+  // complète à la place — deux blocs qui ne lisent QUE leurs propres sessions,
+  // plus un bloc ponts qui ne s'écrit que sur preuve dans LES DEUX, jamais
+  // supposé. Structurellement impossible qu'un constat homefood fuite vers
+  // finedining, pas juste déconseillé par une consigne.
+  const cuisineBlocks = isCuisine ? `1. HOMEFOOD — ce qu'il cherche et ses précautions, sourcés UNIQUEMENT par les sessions [homefood] ci-dessus. Ignore les sessions [finedining] pour ce bloc, même si elles semblent liées.
+2. FINEDINING — même chose, sourcé UNIQUEMENT par les sessions [finedining]. Ignore les sessions [homefood] pour ce bloc.
+3. PONTS ENTRE LES DEUX — un goût, une texture, un attribut confirmé par AU MOINS une session bien notée de CHAQUE registre séparément — jamais supposé ou extrapolé d'un seul côté. S'il n'y a pas encore de session notée dans un des deux registres, ce bloc est vide par construction, dis-le plutôt que d'inventer un pont.
+4. HISTOIRE DU POOL — laisse ce bloc court ou vide s'il n'y a rien de solide à en dire.
+5. PAS ENCORE TRANCHÉ — les lectures concurrentes que ces notes ne permettent PAS de départager, quand deux explications tiennent également et mènent à des recommandations opposées. N'invente pas d'incertitude pour remplir ce bloc — s'il n'y en a pas de réelle, laisse-le vide, c'est une réponse valide. Ne propose PAS de solution, nomme juste la question ouverte.` : `1. CE QU'IL CHERCHE — directions et attributs récurrents qui reviennent dans plusieurs sessions bien notées, du plus confirmé au moins.
+2. PRÉCAUTIONS — tendances observées dans les notes basses, avec leur réserve explicite : une tendance générale n'exclut jamais un cas qui plaît quand même malgré elle (cherche activement un contre-exemple dans les données avant d'écrire une précaution, et mentionne-le s'il existe).
+3. HISTOIRE DU POOL — laisse ce bloc court ou vide s'il n'y a rien de solide à en dire.
+4. PAS ENCORE TRANCHÉ — les lectures concurrentes que ces notes ne permettent PAS de départager, quand deux explications tiennent également et mènent à des recommandations opposées. N'invente pas d'incertitude pour remplir ce bloc — s'il n'y en a pas de réelle, laisse-le vide, c'est une réponse valide. Ne propose PAS de solution, nomme juste la question ouverte.`;
   const prompt = `Tu réécris le champ "note" (profil de goût) de l'activité recommandeur « ${activity.name} » à partir des vraies sessions de Maxence ci-dessous — ${sessions.length} sessions.
 
 ${body}
-
-Structure attendue, 3 blocs denses, sans remplissage, chaque affirmation sourcée par une citation ET une note précise :
-1. CE QU'IL CHERCHE — directions et attributs récurrents qui reviennent dans plusieurs sessions bien notées, du plus confirmé au moins.
-2. PRÉCAUTIONS — tendances observées dans les notes basses, avec leur réserve explicite : une tendance générale n'exclut jamais un cas qui plaît quand même malgré elle (cherche activement un contre-exemple dans les données avant d'écrire une précaution, et mentionne-le s'il existe).
-3. HISTOIRE DU POOL — laisse ce bloc court ou vide s'il n'y a rien de solide à en dire.
-
+${skipsBlock(skips)}${refBlock(refItems)}
+Structure attendue, ${isCuisine ? 5 : 4} blocs denses, sans remplissage, chaque affirmation sourcée par une citation ET une note précise :
+${cuisineBlocks}
+${doing.length ? `\nEnsuite, retraits éventuels parmi les items jamais essayés ci-dessous.\n${REMOVAL_RULES}\n\nItems "doing" actuels :\n${doing.join("\n")}\n` : ""}
 Écris en français, dense, aucune généralité vague ("il aime la belle musique") — uniquement ce que les commentaires montrent vraiment, avec leurs mots.`;
   const out = await claudeJSON(key, prompt, {
     type: "object",
-    properties: { note: { type: "string" } },
-    required: ["note"],
+    properties: { note: { type: "string" }, removeIds: { type: "array", items: { type: "string" } } },
+    required: ["note", "removeIds"],
     additionalProperties: false,
   }, 4000);
-  return out.note;
+  return { note: out.note, removeIds: capRemovals(out.removeIds, activity) };
 }
 
 // ---------- recommandeur musical: profil PARTAGÉ Titre+Album, retrait greffé (17/08, révision) ----------
@@ -2355,20 +2592,28 @@ async function refreshMusicProfileViaClaude(key, titreAct, albumAct, log) {
   // soit faite consciemment, pas juste devinée.
   const titreDoing = (titreAct.items || []).filter((it) => it.status === "doing").map((it) => `[titre]${it.explore ? "[exploration]" : ""} ${it.id}: ${it.text}`);
   const albumDoing = (albumAct.items || []).filter((it) => it.status === "doing").map((it) => `[album]${it.explore ? "[exploration]" : ""} ${it.id}: ${it.text}`);
+  // Base de reference (21/08) : les items marques "ref" (ex "liked"/"neutral",
+  // fusionnes) sont les oeuvres que M. connait deja, posees a la main a la
+  // creation du pool. Ils ne sont jamais tires (le moteur ne regarde que
+  // "doing") et surtout ils n'avaient JAMAIS ete montres au modele : le profil
+  // se construisait donc uniquement sur ~20 decouvertes, en ignorant totalement
+  // le socle de gout. 58 items au total.
+  const refItems = [...(titreAct.items || []), ...(albumAct.items || [])].filter((it) => it.status === "ref");
+  const skips = [...buildSkips(titreAct, log), ...buildSkips(albumAct, log)];
   const prompt = `Tu réécris le profil de goût musical de Maxence — UN SEUL profil partagé entre « titre du jour » (morceaux courts, 5 min) et « album de la semaine » (œuvres complètes, 45 min) : c'est le même goût, pas deux profils séparés, seule la durée du format change ce qui compte (sur un album : la linéarité sur la durée, la prise de risque du projet dans son ensemble).
 
 ${allSessions.length} sessions au total, [titre] et [album] mélangées :
 ${body}
-
-Structure attendue, 4 blocs denses, sans remplissage, chaque affirmation sourcée par une citation ET une note précise (garde [titre]/[album] visible quand c'est utile de distinguer) :
+${skipsBlock(skips)}${refBlock(refItems)}
+Structure attendue, 5 blocs denses, sans remplissage, chaque affirmation sourcée par une citation ET une note précise (garde [titre]/[album] visible quand c'est utile de distinguer) :
 1. CE QU'IL CHERCHE — directions et attributs récurrents.
 2. PRÉCAUTIONS — tendances dans les notes basses, avec leur réserve explicite (cherche activement un contre-exemple avant d'écrire une précaution — une tendance générale n'exclut jamais un cas qui plaît quand même malgré elle).
 3. SPÉCIFICITÉS ALBUM — ce qui ne s'applique qu'au format long (linéarité sur la durée, prise de risque du projet) — court ou vide si rien de solide.
 4. HISTOIRE DU POOL — court ou vide si rien de solide.
+5. PAS ENCORE TRANCHÉ — les lectures concurrentes que ces notes ne permettent PAS de départager, quand deux explications tiennent également et mènent à des recommandations opposées. Exemple de la forme attendue : un item mal noté qui cumulait deux défauts possibles, sans qu'on puisse savoir lequel a pesé. N'invente pas d'incertitude pour remplir ce bloc — s'il n'y en a pas de réelle, laisse-le vide, c'est une réponse valide. Ne propose PAS de solution ici, nomme juste la question ouverte.
 
-Ensuite, retraits éventuels parmi les items ci-dessous (jamais essayés, "doing") — juge sur la force du signal disponible (tout l'historique ci-dessus, pas un nombre minimum de sessions à atteindre), pas sur un seuil arbitraire : dans le doute, ne retire rien, mais un signal déjà net n'a pas besoin d'attendre. Un pool déjà cohérent avec le profil peut très bien ne donner aucun retrait, c'est le cas normal, pas une anomalie à corriger. Deux motifs de retrait différents selon le type d'item, ET DEUX QUOTAS SÉPARÉS (les [exploration] ne doivent jamais être évincés par un arriéré d'items normaux à nettoyer — les deux tombent proportionnellement à ce qu'il y a vraiment à corriger dans chaque groupe, pas un seul quota partagé où le plus nombreux gagne toujours) :
-- item normal (jusqu'à 3 par pool) : ne colle clairement plus au profil que tu viens d'écrire.
-- item [exploration] (jusqu'à 2 par pool, quota indépendant du précédent) : jamais retiré simplement parce qu'il ne confirme pas encore le profil (c'est voulu) — retirable UNIQUEMENT s'il correspond en fait à une précaution déjà nette (l'exploration était une erreur de catégorisation, pas une vraie inconnue à tester). Examine cette liste EN PLUS de la liste normale, pas seulement si de la place reste sur le quota normal.
+Ensuite, retraits éventuels parmi les items jamais essayés ci-dessous, POOL PAR POOL (removeTitreIds / removeAlbumIds), chaque quota comptant séparément pour chaque pool.
+${REMOVAL_RULES}
 Un chevauchement thématique entre les deux pools (l'album dont vient un titre déjà aimé, par exemple) n'est jamais un motif de retrait — c'est cohérent, pas un doublon.
 
 Items "doing" actuels :
@@ -2390,51 +2635,82 @@ ${[...titreDoing, ...albumDoing].join("\n") || "(aucun)"}
   // remplirait le quota normal en premier ne doit pas pouvoir manger celui des
   // [exploration] par la bande ; chaque catégorie est plafonnée indépendamment
   // après coup, pas juste espérée respectée dans la réponse.
-  const capByCategory = (ids, act) => {
-    const exploreIds = new Set((act.items || []).filter((it) => it.explore).map((it) => it.id));
-    const normal = ids.filter((id) => !exploreIds.has(id)).slice(0, 3);
-    const explore = ids.filter((id) => exploreIds.has(id)).slice(0, 2);
-    return [...normal, ...explore];
-  };
   return {
     note: out.note,
-    removeTitreIds: capByCategory(out.removeTitreIds || [], titreAct),
-    removeAlbumIds: capByCategory(out.removeAlbumIds || [], albumAct),
+    removeTitreIds: capRemovals(out.removeTitreIds, titreAct),
+    removeAlbumIds: capRemovals(out.removeAlbumIds, albumAct),
   };
 }
 
-// ---------- recommandeur: réapprovisionnement du pool (17/08, ③b) ----------
-// Seuil bas → réapprovisionne, simplement (M., 17/08) : l'autonomie se mesure en
-// SEMAINES de tirage restant (doing/rythme), jamais en nombre d'items brut — un
-// même compte d'items veut dire des mois pour Film et des jours pour Titre (cf
-// audit du 17/08). Dessous de POOL_LOW_WEEKS → réapprovisionne jusqu'à
-// POOL_TARGET_WEEKS, plafonné à POOL_MAX_ADD par passe (jamais un seul gros ajout
-// qui écraserait la variété d'un coup).
-const POOL_LOW_WEEKS = 4, POOL_TARGET_WEEKS = 8, POOL_MAX_ADD = 15;
-function weeklyDrawRate(activity) {
-  // target/period vit soit sur l'activité (a_film), soit sur sa seule action
-  // (a_ecoute_titre/album) — pas de convention unique dans le catalogue actuel.
-  const src = (activity.target && activity.period) ? activity : (activity.actions || [])[0];
-  if (!src || !src.target || !src.period) return null;
-  if (src.period === "day") return src.target * 7;
-  if (src.period === "week") return src.target;
-  return null;
+// ---------- recommandeur: réapprovisionnement du pool ----------
+// Seuils PAR COULOIR, en nombre d'items (21/08). Deux changements de fond contre
+// la version du 17/08 :
+//
+// 1. Plus d'unité de temps. L'ancienne mesurait une "autonomie en semaines"
+//    (doing/cadence). Or la loi de latence mesurée en simulation est
+//    latence(semaines) = (P+11)/(11 × cadence) — multipliée par la cadence, elle
+//    donne latence(tirages) = (P+11)/11 : la cadence DISPARAÎT. Elle ne servait
+//    qu'à convertir des tirages en semaines, alors que M. ne vit l'activité qu'à
+//    son propre rythme. Prédire une cadence n'a donc aucune utilité, et s'y
+//    essayer était même nuisible : la cadence observée (mesurée 3-4× sous le
+//    nominal) aurait gravé un régime de faible usage dans le moteur.
+// 2. Seuils par couloir, pas sur le total. Avec un seuil global, Film (127 items
+//    hérités, tous "core" faute de lane) ne passerait jamais sous le seuil, donc
+//    ne recevrait JAMAIS un item widen ou terra — les couloirs se renormaliseraient
+//    à 100% core et l'élargissement serait mort pour cette activité. Un seuil par
+//    couloir rend aussi automatique la garantie "au moins un territoire inconnu".
+// Politique (s, S) — le modèle standard de réapprovisionnement de stock : on
+// commande quand le niveau tombe sous le point de commande `s`, et on commande
+// de quoi remonter au niveau cible `S`. Ce que le code faisait déjà sans le
+// nommer (d'où l'impression de chiffres arbitraires), et ce que la théorie
+// recommande précisément ici : le coût de stockage est nul (garder un film non
+// vu ne coûte rien) et chaque commande a un coût fixe élevé (~0,23 $, presque
+// entièrement les recherches web) — donc GROS LOTS, RAREMENT.
+//
+// Le bug d'origine (constaté le 22/08 : Film, 9 sessions sans un seul réappro)
+// n'était pas d'avoir des seuils, c'était d'utiliser LE MÊME chiffre pour deux
+// métiers opposés : point de commande ET plancher de retrait. Un couloir posé
+// dessus ne pouvait plus ni maigrir (plancher) ni déclencher de commande (il
+// fallait passer EN DESSOUS) : figé pour de bon. D'où trois constantes bien
+// distinctes, le plancher toujours STRICTEMENT sous le point de commande.
+//   LANE_REORDER (s) — on commande en dessous. Fixe la fréquence : ~13 séances
+//   entre deux commandes sur core, au lieu d'une commande par séance.
+//   LANE_TARGET (S) — on remonte jusque-là.
+//   LANE_FLOOR — filet SEUL, jamais un déclencheur : si le réappro échoue
+//   plusieurs jours (API en panne, crédit épuisé — vécu le 22/08) pendant que
+//   les retraits continuent, il empêche de vider un couloir. Mesuré : Musique
+//   retire jusqu'à 4 items/jour.
+const LANE_REORDER = { core: 12, widen: 8, terra: 5 };
+const LANE_TARGET = { core: 25, widen: 15, terra: 10 };
+const LANE_FLOOR = { core: 8, widen: 5, terra: 3 };
+const POOL_MAX_ADD = 15; // jamais un gros ajout d'un coup, qui écraserait la variété
+function laneCounts(activity) {
+  const c = { core: 0, widen: 0, terra: 0 };
+  for (const it of activity.items || []) if (it.status === "doing") c[laneOf(it)]++;
+  return c;
 }
-function poolAutonomyWeeks(activity) {
-  const rate = weeklyDrawRate(activity);
-  if (!rate) return null;
-  const doing = (activity.items || []).filter((it) => it.status === "doing").length;
-  return doing / rate;
-}
-// items[] à partir du résultat {core, explore} de replenishPoolViaClaude — les
-// exploratoires portent `explore:true` pour que refreshMusicProfileViaClaude les
-// laisse tranquilles tant qu'ils n'ont pas été essayés une fois (17/08 : un pari
-// délibérément hors profil confirmé se ferait sinon retirer avant d'avoir eu sa chance).
+// items[] à partir du résultat {core, widen, terra} — chaque entrée porte son
+// couloir, sa direction et ses deux scores. `explore:true` conservé sur widen et
+// terra : c'est lui qui les immunise contre le retrait tant qu'ils n'ont pas été
+// essayés (un pari délibérément hors profil se ferait sinon supprimer par la
+// passe qui vient de le proposer, avant d'avoir eu sa chance).
 function buildNewPoolItems(result) {
   if (!result) return [];
-  const core = (result.core || []).map((t) => ({ id: uid(), text: t, status: "doing" }));
-  const explore = (result.explore || []).map((t) => ({ id: uid(), text: t, status: "doing", explore: true }));
-  return [...core, ...explore];
+  const out = [];
+  for (const lane of ["core", "widen", "terra"]) {
+    for (const r of result[lane] || []) {
+      if (!r || !r.text) continue;
+      out.push({
+        id: uid(), text: r.text, status: "doing", lane,
+        dir: r.dir || undefined,
+        fit: typeof r.fit === "number" ? r.fit : undefined,
+        door: typeof r.door === "number" ? r.door : undefined,
+        register: r.register || undefined,
+        ...(lane === "core" ? {} : { explore: true }),
+      });
+    }
+  }
+  return out;
 }
 // Le jugement propose (sur les ATTRIBUTS du profil, pas le genre), la recherche
 // vérifie (existence réelle, titre/auteur exacts) — inversion actée le 17/08 :
@@ -2442,17 +2718,36 @@ function buildNewPoolItems(result) {
 // indexé comme ça ; mais Claude peut PROPOSER sur cette base puis VÉRIFIER
 // l'existence, question binaire et fiable pour web_search.
 async function replenishPoolViaClaude(key, activity, log, siblingActivity = null) {
-  const rate = weeklyDrawRate(activity);
-  const autonomy = poolAutonomyWeeks(activity);
-  if (autonomy == null || autonomy >= POOL_LOW_WEEKS) return null;
-  const needed = Math.max(3, Math.min(POOL_MAX_ADD, Math.ceil((POOL_TARGET_WEEKS - autonomy) * rate)));
-  // ~2/3 confirment le profil, ~1/3 élargit délibérément l'horizon (M., 17/08 —
-  // "ne pas négliger la volonté d'élargissement, à traiter différemment"). Sans
-  // ça, ajout + retrait combinés ne font QUE converger vers ce qui est déjà
-  // confirmé — exactement le rétrécissement que le fil directeur "très varié"
-  // interdit depuis le début du projet. Minimum 1 exploration dès que needed≥2.
-  const exploreCount = needed >= 2 ? Math.max(1, Math.round(needed / 3)) : 0;
-  const coreCount = needed - exploreCount;
+  // Réapprovisionnement CONJOINT (22/08, question de M. : "plus on fait de
+  // trajets, plus on est précis, non ?"). Il a raison sur le fond : un item
+  // commandé aujourd'hui mais tiré dans 20 séances a été choisi contre un profil
+  // de goût périmé — le "coût de stockage" de la théorie (s,S) n'est pas nul ici,
+  // c'est de la fraîcheur perdue. Mais la réponse n'est pas de multiplier les
+  // trajets : c'est de mieux remplir celui qu'on fait déjà.
+  // Le coût d'une commande est FIXE et partagé par les trois couloirs (~0,23 $,
+  // presque entièrement les recherches web, indépendant du nombre d'items). Donc
+  // dès qu'UN couloir déclenche, on remonte les TROIS à leur cible — remplir les
+  // autres au passage ne coûte rien de plus et retarde d'autant leur propre
+  // déclenchement. Moins de trajets au total ET des items plus frais : c'est le
+  // "joint replenishment" classique, strictement meilleur sur les deux axes que
+  // de ne servir que le couloir déclencheur.
+  const counts = laneCounts(activity);
+  const trigger = ["core", "widen", "terra"].some((lane) => counts[lane] < LANE_REORDER[lane]);
+  const want = {};
+  let total = 0;
+  for (const lane of ["core", "widen", "terra"]) {
+    want[lane] = trigger && counts[lane] < LANE_TARGET[lane] ? LANE_TARGET[lane] - counts[lane] : 0;
+    total += want[lane];
+  }
+  if (!total) return null;
+  if (total > POOL_MAX_ADD) { // plafond global : on rabote proportionnellement
+    const k = POOL_MAX_ADD / total;
+    for (const lane of ["core", "widen", "terra"]) want[lane] = Math.floor(want[lane] * k);
+    // le territoire inconnu ne peut jamais être raboté à zéro par l'arrondi :
+    // c'est la garantie que M. a demandée, et elle ne vaut que si elle survit
+    // au plafond comme au tirage.
+    if (counts.terra < LANE_REORDER.terra && !want.terra) want.terra = 1;
+  }
   // le pool jumeau compte aussi (17/08, profil partagé) pour ne pas reproposer le
   // MÊME morceau/la MÊME œuvre — mais un chevauchement thématique (l'album dont
   // vient un titre aimé, un titre extrait d'un album aimé) est cohérent et
@@ -2463,8 +2758,29 @@ async function replenishPoolViaClaude(key, activity, log, siblingActivity = null
   // Górecki, déjà présente comme ALBUM (~40 min) : bon fond artistique, mauvais
   // format, trouvé en testant le 17/08.
   const dur = (activity.actions || [])[0]?.dur;
-  const prompt = `Tu élargis le pool de « ${activity.name} » — le stock d'items pas encore essayés (status "doing") descend sous ${POOL_LOW_WEEKS} semaines d'autonomie (${autonomy.toFixed(1)} actuellement, à ${rate}/semaine).
-${dur ? `\nFormat de la session : environ ${dur} min. Pas une œuvre longue (symphonie complète, opéra entier, album) si ${dur} min est court — ce format-là appartient à un autre pool de l'app.\n` : ""}
+  const laneAsk = (lane, n, body) => (n > 0 ? `\n${body.replace("{N}", n)}\n` : "");
+  // séparées du profil de goût (22/08, trouvé en testant Cuisiner en vrai) : une
+  // exclusion alimentaire n'est pas une nuance de goût qu'on soupèse au cas par
+  // cas, c'est un filtre dur. Noyée dans le paragraphe libre du profil, elle a été
+  // ignorée deux fois (tempeh, champignons proposés alors que les deux sont
+  // explicitement exclus) — sortie en liste à part, non négociable pour CHAQUE
+  // item (core/widen/terra), justement pour ne plus dépendre de ce que le modèle
+  // remarque dans un texte long.
+  const hardBlock = activity.hardConstraints ? `\nEXCLUSIONS STRICTES, à respecter pour CHAQUE item proposé, sans exception — un item qui en enfreint une seule est disqualifié, quel que soit le couloir :\n${activity.hardConstraints}\n` : "";
+  // Cuisiner seul (22/08, M. : "autant me proposer une idée plus globale qui me
+  // guidera vers une plus précise sur internet") : une recette complète inventée
+  // ici peut se tromper sur un détail qu'une vraie source aura correct — et c'est
+  // ce détail-là qui a fait sauter les deux exclusions plus haut. Une IDÉE, pas un
+  // protocole : il retrouve/reconstruit le précis lui-même ensuite.
+  const isCuisine = activity.id === "a_cuisiner";
+  // cible chiffrée, pas un "mélange" vague (22/08, mesuré : sans chiffre, le
+  // modèle penche naturellement vers homefood — 21% de finedining sur 3 runs
+  // indépendants du prompt précédent, 8/38 items, pas du bruit d'échantillon).
+  // Même leçon que les exclusions : une consigne libre sans chiffre ne tient
+  // pas, il faut une proportion explicite à respecter par groupe.
+  const conceptBlock = isCuisine ? `\nFormat de chaque item ICI (différent des autres pools de l'app) : une IDÉE de plat, pas une recette — nom + 1-2 phrases sur CE QUI définit le plat (structure, technique clé en un mot, saveur dominante), jamais COMMENT le préparer. Aucune quantité, aucune température, aucune durée de cuisson, aucun verbe d'action séquencé ("cuire puis mélanger puis..."). Le but est qu'il retrouve ou reconstruise une vraie version précise en cherchant lui-même ensuite — pas de lui livrer un protocole que tu pourrais te tromper sur un détail. DANS CHAQUE GROUPE (widen ET terra séparément), vise environ MOITIÉ homefood, MOITIÉ finedining (voir "register" plus bas) — un vrai équilibre par item, pas une tendance : sur 6 items d'un groupe, environ 3 de chaque, jamais 5 contre 1. Le finedining n'est pas une exception rare ici, c'est la moitié du travail.\n` : "";
+  const prompt = `Tu alimentes le pool de « ${activity.name} » — les items pas encore essayés, dans lesquels l'app tire au hasard ce qu'elle lui propose.
+${dur ? `\nFormat de la session : environ ${dur} min. Pas une œuvre longue (symphonie complète, opéra entier, album) si ${dur} min est court — ce format-là appartient à un autre pool de l'app.\n` : ""}${hardBlock}${conceptBlock}
 Profil de goût (ce qu'il cherche, ses précautions AVEC leur réserve explicite — jamais un filtre dur, juge chaque candidat au cas par cas plutôt que d'exclure mécaniquement) :
 """
 ${activity.note || "(pas de profil)"}
@@ -2474,24 +2790,63 @@ Déjà dans le pool, à ne PAS reproposer À L'IDENTIQUE (essayé ou non) :
 ${known.map((t) => "- " + t).join("\n")}
 Un chevauchement thématique n'est PAS un doublon à éviter : proposer l'album dont vient un titre déjà aimé, ou un titre extrait d'un album déjà aimé, est cohérent et bienvenu — seule l'œuvre strictement identique (même titre, même auteur) doit être évitée.
 
-Propose deux groupes distincts :
-1. coreItems (${coreCount}) — correspondent aux ATTRIBUTS précis déjà confirmés (le grain d'une voix, un piano qui évolue plutôt que boucle, etc), pas à un genre large.
-2. exploreItems (${exploreCount}) — élargissent VRAIMENT l'horizon vers du territoire jamais testé (un genre à peine ou pas exploré, une approche différente) — PAS un pari raisonné sur une direction déjà confirmée sous un autre angle, et SURTOUT PAS un retour sur une précaution déjà nette du profil : si le théâtral démonstratif est déjà clairement rejeté, ce n'est pas une zone d'incertitude à sonder, c'est une réponse déjà donnée — proposer encore de l'opéra pour "tester la limite" ne serait pas de l'exploration, ce serait insister sur un refus déjà exprimé. Un vrai pari d'exploration va voir ailleurs : un genre entièrement différent, une approche structurellement autre — pas la même question posée différemment.
-
-Utilise la recherche web pour vérifier que chaque titre existe réellement sous ce nom exact, par cet artiste/auteur exact — laisse tomber un candidat que tu ne peux pas confirmer plutôt que d'inventer. Même format que les items existants : "artiste – titre" en minuscules.`;
+Trois groupes, à traiter séparément — ils ne répondent pas à la même question.
+${laneAsk("core", want.core, `1. core ({N} items) — ce qui lui correspond. Vise les ATTRIBUTS précis déjà confirmés (le grain d'une voix, un piano qui évolue plutôt que boucle), jamais un genre large.`)}${laneAsk("widen", want.widen, `2. widen ({N} items) — l'élargissement ÉDUQUÉ. Deux gestes valides, et deux seulement :
+   (a) TRANSPORTER un attribut qu'il aime vers un territoire qu'il n'a pas encore touché. On ne cherche pas "quelque chose qui ressemble à ce qu'il a aimé", on cherche cette qualité-là ailleurs.
+   (b) TESTER LA FRONTIÈRE d'un rejet, au lieu de l'éviter. Un rejet formulé comme une direction est presque toujours trop large : ce qui est rejeté est un ATTRIBUT à l'intérieur. Le geste utile est de proposer ce qui porte l'étiquette rejetée SANS l'attribut rejeté.
+   Exemple réel, à comprendre avant de proposer : ses trois rejets les plus nets sont des opéras, mais ce qu'il rejette est la voix lyrique solo démonstrative — il a noté l'intermezzo de Cavalleria Rusticana 79/100, qui est un opéra, et réclame explicitement plus de chœurs. Proposer un opéra sans voix solo n'est donc PAS insister sur un refus : c'est préciser une précaution trop large. En revanche reproposer exactement ce qu'il a déjà rejeté (une aria démonstrative de plus) serait insister — c'est la seule chose interdite ici.`)}${laneAsk("terra", want.terra, `3. terra ({N} items) — le TERRITOIRE INCONNU. Sa justification est l'ABSENCE de données, jamais une correspondance : un monde entier dont rien dans son profil ne parle, ni en bien ni en mal — pense en genres/traditions/écoles complets et distincts propres au domaine de « ${activity.name} », pas des variations proches de ce qu'il connaît déjà.${isCuisine ? " Ici en particulier : une cuisine du monde absente de son profil (pas une variation d'une cuisine déjà présente)." : ""} N'essaie PAS de le relier à son goût, et ne te censure pas parce que tu n'arrives pas à le justifier — c'est le but. La seule exigence est que ce soit la MEILLEURE PORTE D'ENTRÉE dans ce monde-là, jugée sur les critères de ce monde-là et pas sur les siens.`)}
+Pour CHAQUE item, donne aussi :
+- dir : la direction, en 2-4 mots (« jazz modal », « néoclassique piano », « chanson française », « gamelan javanais »). L'app s'en sert pour qu'aucune direction ne monopolise les propositions — sois cohérent, réutilise le même libellé pour deux items de la même veine.
+- fit : 0-100, à quel point ça colle à son profil ACTUEL. Pour un item terra, mets une valeur basse sans état d'âme, c'est normal et sans conséquence.
+- door : 0-100, la qualité de PORTE D'ENTRÉE — est-ce le bon endroit par où commencer ce territoire/cet artiste ? Attention, il a explicitement demandé l'inverse du réflexe habituel : « arrêter de me proposer que les sons les plus écoutés des artistes, il y a sans aucun doute de meilleures portes d'entrée pour moi ». Le morceau le plus streamé n'est presque jamais la meilleure porte.
+${isCuisine ? `- register : "homefood" (quotidien, accessible, peu de technique ou d'équipement) ou "finedining" (ambitieux, niveau restaurant — technique élevée, dressage, ingrédients moins courants). Un axe à part du couloir : un plat peut être core-homefood, terra-finedining, etc.\n` : ""}
+${isCuisine ? `Utilise la recherche web pour vérifier que chaque plat proposé est une combinaison réelle et reconnue — une technique/tradition qui existe vraiment quelque part, pas une association inventée sur le moment. Laisse tomber un candidat que tu ne peux pas confirmer plutôt que d'inventer.` : `Utilise la recherche web pour vérifier que chaque titre existe réellement sous ce nom exact, par cet artiste/auteur exact — laisse tomber un candidat que tu ne peux pas confirmer plutôt que d'inventer. Même format que les items existants : "artiste – titre" en minuscules.`}`;
+  const itemSchema = {
+    type: "object",
+    properties: {
+      text: { type: "string" }, dir: { type: "string" },
+      fit: { type: "number" }, door: { type: "number" },
+      ...(isCuisine ? { register: { type: "string", enum: ["homefood", "finedining"] } } : {}),
+    },
+    required: ["text", "dir", "fit", "door", ...(isCuisine ? ["register"] : [])],
+    additionalProperties: false,
+  };
   const out = await claudeJSON(key, prompt, {
     type: "object",
     properties: {
-      coreItems: { type: "array", items: { type: "string" } },
-      exploreItems: { type: "array", items: { type: "string" } },
+      core: { type: "array", items: itemSchema },
+      widen: { type: "array", items: itemSchema },
+      terra: { type: "array", items: itemSchema },
     },
-    required: ["coreItems", "exploreItems"],
+    required: ["core", "widen", "terra"],
     additionalProperties: false,
-  }, 2200, [{ type: "web_search_20250305", name: "web_search", max_uses: 10 }]);
-  return {
-    core: (out.coreItems || []).filter(Boolean),
-    explore: (out.exploreItems || []).filter(Boolean),
-  };
+  // maxTokens généreux (trouvé 22/08, test réel sur Cuisiner) : les 10 recherches
+  // web_search consomment une bonne partie du budget de sortie avant même que le
+  // JSON final commence, et le texte d'un item Cuisiner (recette + ingrédients)
+  // est bien plus lourd qu'un "artiste – titre" — 3000 coupait la réponse en plein
+  // milieu d'un item (stop_reason "max_tokens", JSON invalide, capturé par le
+  // catch{} silencieux de la vérification quotidienne : Cuisiner ne recevait donc
+  // JAMAIS de widen/terra en pratique).
+  }, 8000, [{ type: "web_search_20250305", name: "web_search", max_uses: 10 }]);
+  // quotas appliqués APRÈS coup, pas seulement demandés dans le prompt (même
+  // précaution que capByCategory le 17/08 : un modèle qui déborde sur un couloir
+  // ne doit pas pouvoir manger la part d'un autre).
+  // filtre déterministe en plus du hardBlock (22/08) : même explicite dans le
+  // prompt, une exclusion a encore glissé une fois sur onze (endive, alors que
+  // la liste la cite noir sur blanc) — une règle absolue ne peut pas dépendre
+  // uniquement de ce que le modèle respecte, il faut aussi la vérifier en code.
+  // groupes de mots (pas des phrases) : "haricot"+"rouge" matche "haricots
+  // rouges" aussi bien que "haricot rouge" — une phrase figée ratait le pluriel
+  // porté par le premier mot ("abricots secs" ne contient pas "abricot sec").
+  const deaccent = (s) => (s || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
+  const bannedGroups = (activity.bannedTerms || []).map((g) => (Array.isArray(g) ? g : [g]).map(deaccent));
+  const clean = (arr) => (arr || []).filter((r) => {
+    if (!r || !r.text) return false;
+    const t = deaccent(r.text);
+    return !bannedGroups.some((words) => words.every((w) => t.includes(w)));
+  });
+  const take = (arr, n) => clean(arr).slice(0, n);
+  return { core: take(out.core, want.core), widen: take(out.widen, want.widen), terra: take(out.terra, want.terra) };
 }
 
 // ---------- palette / css ----------
@@ -3080,6 +3435,10 @@ function Throughline() {
   // (auto-start included, see AUTO_START_MS above) and stashed on
   // lastStartDelayRef for finish() to attach to the completed log entry.
   const proposedAtRef = useRef(null);
+  // dernier refus (hold-to-skip sur un recommandeur) — sert à raccrocher un
+  // commentaire libre écrit juste après, sans aucune UI dédiée : M. voulait
+  // pouvoir dire POURQUOI, et le champ de log libre est déjà là en permanence.
+  const skipRef = useRef(null);
   const lastStartDelayRef = useRef(null);
   // undo support (see undoLast()): snapshot of a pipeline's items right before
   // finish() logs a session on it, so undo can restore them even if advanceViaClaude
@@ -3403,7 +3762,7 @@ function Throughline() {
       try { const raw = await store.get(NS("tlx_lastLoadRef")); lastLoadRef.current = raw ? JSON.parse(raw) : null; } catch { lastLoadRef.current = null; }
       if (!alive) return;
       const loadedLog = l ?? [];
-      const loadedActivities = reconcileLivedStatus(migrateSingleItemActivities(migratePickerActions(a ?? SEED)), loadedLog);
+      const loadedActivities = migrateRefStatus(reconcileLivedStatus(migrateSingleItemActivities(migratePickerActions(a ?? SEED)), loadedLog));
       setActivities(loadedActivities);
       setLog(loadedLog);
       setApiKey(k || "");
@@ -3454,7 +3813,20 @@ function Throughline() {
             if (newItems.length) {
               setActivities((arr) => arr.map((a2) => (a2.id === act.id ? { ...a2, items: [...(a2.items || []), ...newItems] } : a2)));
             }
-          } catch (e) {}
+          } catch (e) {
+            // ne plus avaler l'échec en silence (22/08, M. : "ça me sera indiqué
+            // non ?" — non, justement). Le symptôme d'un réappro qui échoue n'est
+            // pas une erreur visible mais une ABSENCE : moins de variété, le
+            // territoire inconnu qui s'éteint sans bruit. Invisible par nature.
+            // Une ligne de log (mécanisme déjà là, zéro UI en plus) suffit à
+            // rendre la panne retrouvable après coup — c'est ce qui manquait
+            // quand le crédit API s'est épuisé le 22/08 : rien nulle part.
+            setLog((L) => [...L, {
+              id: uid(), date: todayKey(), ts: realNow().getTime(), type: "note",
+              activityId: act.id,
+              note: `[système] réapprovisionnement du pool échoué — ${e && e.message ? e.message : "erreur inconnue"}`,
+            }]);
+          }
         }
       })();
     })();
@@ -3587,6 +3959,22 @@ function Throughline() {
     // le même sens qu'un refus avant d'engager quoi que ce soit).
     if (stage === "proposal" && current?.activity?.kind === "recommandeur" && current.action?.itemId) {
       const a = current.activity;
+      // Trace du refus (21/08, M. : "oui trace mais je dirai aussi pourquoi en
+      // commentaire libre"). C'est le signal le plus abondant du système et il
+      // n'en restait RIEN : le log ne connaissait que "done" et "note". Il est
+      // aussi plus propre qu'en industrie — un seul item est proposé à la fois,
+      // donc l'exposition est certaine, sans biais de position ni doute sur la
+      // visibilité. Rien ne s'affiche (minimalisme, aucun verdict rendu) ; le
+      // "pourquoi" se raccroche tout seul si M. écrit dans le log libre juste
+      // après (voir SKIP_NOTE_WINDOW_MS dans submitFreeLog).
+      const skipId = uid();
+      skipRef.current = { id: skipId, ts: Date.now(), activityId: a.id, itemId: current.action.itemId };
+      setLog((L) => [...L, {
+        id: skipId, date: todayKey(), ts: realNow().getTime(), type: "skip",
+        activityId: a.id, actionId: current.action.id, domain: a.domain,
+        actionText: current.action.baseText || current.action.text,
+        itemText: current.action.text, itemId: current.action.itemId,
+      }]);
       const nextItem = pickItemLRU(a, log, current.action, current.action.itemId);
       if (nextItem.itemId && nextItem.itemId !== current.action.itemId) {
         const todayR = todayKey();
@@ -4178,8 +4566,19 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
               }
             }
           } else {
-            const note = await refreshProfileViaClaude(key, updatedActivity, patchedLog);
-            setActivities((arr) => arr.map((a) => (a.id === aid ? { ...a, note } : a)));
+            // même traitement que la branche musicale (21/08, homogénéisation) :
+            // Film et Cuisiner n'avaient NI retrait NI réapprovisionnement — seul
+            // le profil se réécrivait, donc leur pool ne pouvait jamais bouger.
+            // Film accumulait 146 items sans qu'aucune curation soit possible.
+            const { note, removeIds } = await refreshProfileViaClaude(key, updatedActivity, patchedLog);
+            const fresh = {
+              ...updatedActivity, note,
+              items: (updatedActivity.items || []).map((it) => (removeIds.includes(it.id) && it.status === "doing" ? { ...it, status: "out" } : it)),
+            };
+            setActivities((arr) => arr.map((a) => (a.id === aid ? fresh : a)));
+            const result = await replenishPoolViaClaude(key, fresh, patchedLog, null);
+            const newItems = buildNewPoolItems(result);
+            if (newItems.length) setActivities((arr) => arr.map((a) => (a.id === aid ? { ...a, items: [...(a.items || []), ...newItems] } : a)));
           }
         } catch (e) {}
       })();
@@ -5169,6 +5568,22 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
       setLogText("");
       return;
     }
+    // Raison d'un refus (21/08) : si M. vient de refuser une proposition et écrit
+    // dans la foulée, ce texte EST l'explication du refus — on le raccroche à
+    // l'entrée "skip" au lieu de le laisser flotter comme une note isolée. Rien
+    // dans l'UI ne le lui demande (minimalisme) ; la fenêtre courte suffit à
+    // distinguer une explication d'une note sans rapport écrite plus tard.
+    const sk = skipRef.current;
+    if (sk && Date.now() - sk.ts < SKIP_NOTE_WINDOW_MS) {
+      skipRef.current = null;
+      setLog((L) => [...L, {
+        id: uid(), date: todayKey(), ts: realNow().getTime(), type: "note",
+        activityId: sk.activityId, itemId: sk.itemId, parentId: sk.id, note: text,
+      }]);
+      setLogText("");
+      setMsg("noté"); setTimeout(() => setMsg(""), 1400);
+      return;
+    }
     // "log " en préfixe (Maxence 21/08) : jamais un démarrage, toujours une
     // activité faite EN DEHORS de l'app à enregistrer comme si elle avait été
     // faite in-app (temps/commentaires en direct restent le rôle du déclenchement
@@ -5798,7 +6213,7 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
         const key = (await store.get("tlx_apiKey")) || "";
         const a = activities.find((x) => x.id === activityId);
         if (!key || !a) return { error: !key ? "pas de clé" : "activité introuvable" };
-        return { note: await refreshProfileViaClaude(key, a, log) };
+        return await refreshProfileViaClaude(key, a, log);
       },
       // profil partagé Titre+Album (17/08, révision) — mêmes principes de test.
       refreshMusicProfile: async () => {
@@ -5817,9 +6232,9 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
         if (!key || !a) return { error: !key ? "pas de clé" : "activité introuvable" };
         const siblingId = activityId === "a_ecoute_titre" ? "a_ecoute_album" : activityId === "a_ecoute_album" ? "a_ecoute_titre" : null;
         const sibling = siblingId ? activities.find((x) => x.id === siblingId) : null;
-        return { autonomy: poolAutonomyWeeks(a), result: await replenishPoolViaClaude(key, a, log, sibling) };
+        return { lanes: laneCounts(a), result: await replenishPoolViaClaude(key, a, log, sibling) };
       },
-      poolAutonomyWeeks,
+      laneCounts,
     };
   });
 
