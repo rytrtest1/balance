@@ -626,8 +626,9 @@ function itemStep(a, log) {
   return pickItemLRU(a, log, a.actions[0] || { id: uid(), text: "—", min: 15 });
 }
 // --- parfum — sentir matières premières : paire/jour (15/08, changement de
-// programme — fiche papier "protocole de suivi"), une famille par semaine
-// (parfumWeekFamille), sur 5 checkpoints temporels par mouillette : ouverture/t0,
+// programme — fiche papier "protocole de suivi"), toujours dans une même
+// famille mais plus au calendrier (retiré 04/09, voir pickItemsLRU), sur 5
+// checkpoints temporels par mouillette : ouverture/t0,
 // légers/+30min, transition/+2h, fond/+6h, rappel/J+1 (jour LOGIQUE, pas +Nh, juste
 // avant le prochain tirage — voir PARFUM_ROUNDS). Historique : 07/08 round 2 était
 // passé de 3 à 3-avec-suivi-temporel (3 matières comparées ET l'évolution de
@@ -691,89 +692,16 @@ function parfumNextInterval(prev, hit) {
   const f = hit ? PARFUM_REVIEW_GROW : PARFUM_REVIEW_SHRINK;
   return Math.max(PARFUM_REVIEW_MIN_DAYS, Math.min(PARFUM_REVIEW_MAX_DAYS, Math.round(prev * f)));
 }
-// famille de la semaine — rotation déterministe sur PARFUM_FAMILLES (15/08, fiche
-// papier "une famille par semaine, changée le lundi"). Pas d'état à persister : le
-// calcul retombe toujours pareil au reload, ancré sur un lundi arbitraire (l'epoch
-// ne veut rien dire en soi, il sert juste à compter les semaines écoulées). Utilise
-// logicalNow (pivot 9h, pas minuit) pour rester cohérent avec todayKey ailleurs.
-// Compté en JOURS CALENDAIRES UTC (Date.UTC sur les mêmes Y/M/D), pas en ms bruts
-// entre deux Date locales : sinon les changements d'heure d'été/hiver décalent le
-// nombre de semaines écoulées de ±1h autour de fin mars/fin octobre, et le cycle de
-// 14 semaines n'est plus exact (repéré en vérifiant plusieurs semaines d'affilée en
-// sandbox le 15/08 — deux familles sautaient/se répétaient juste après un DST).
-const PARFUM_WEEK_EPOCH_DAYS = Math.floor(Date.UTC(2024, 0, 1) / 86400000); // lundi
-// durée de séjour PROPORTIONNELLE à la taille de la famille (15/08-c, Maxence : une
-// semaine fixe ne colle pas à la vraie taille des familles — agrumes (3) tourne en
-// rond en 2 jours puis répète le même trio 5 jours de plus, boisé (43) ne verrait
-// qu'un tiers de ses matières en une semaine et mettrait ~3 cycles complets (~10
-// mois) à être vu une seule fois en entier). Règle : assez de jours pour voir CHAQUE
-// matière de la famille au moins une fois (paire/jour, donc ceil(taille/2) jours),
-// arrondi à la semaine pleine (le "changée le lundi" de la fiche reste vrai, juste
-// pas toujours 1 semaine pile). L'arrondi lui-même EST la marge de renfort — une
-// famille de 2 jours de passage obtient déjà 5 jours gratuits en arrondissant à la
-// semaine, inutile d'en rajouter par-dessus. Correction 15/08-e (Maxence, à raison :
-// "absurde que 164 prennent 23 semaines et 82 en prennent 17") — une marge fixe de
-// +3 jours AVANT l'arrondi avait été ajoutée en plus de l'arrondi lui-même, une
-// double marge qui poussait plusieurs familles moyennes dans une semaine
-// supplémentaire à chaque fois ; cumulée sur 14 familles, ça cassait complètement la
-// proportionnalité attendue (2/jour × 7j = 14/semaine). Retirée. Le renfort ne peut
-// de toute façon tomber qu'APRÈS que tout le monde soit passé une fois : dans
-// pickItemsLRU, jamais-sentie (lastSeen=-1) prime TOUJOURS sur déjà-sentie, donc
-// aucune répétition n'est possible tant qu'une matière de la famille n'a pas encore
-// été sentie — "nouveau avant répétition" est déjà garanti par ce tri, pas besoin
-// d'un mécanisme séparé ici. Décompte dynamique sur PARFUM_FAMILLE_REF (pas un
-// chiffre en dur) : s'auto-ajuste si le catalogue change un jour. Compte sur
-// l'effectif COMPLET de la famille (15/08-f, Maxence : la réduction aux essentielles
-// (PARFUM_ESSENTIEL, 15/08-d) ne faisait gagner que 4 semaines sur 14 au total — 11
-// familles restaient à 1 semaine dans les deux cas, seules floral/boisé/balsamique
-// changeaient — pas assez pour justifier de sacrifier la couverture. `PARFUM_ESSENTIEL`
-// reste défini et à jour, gardé de côté comme `PARFUM_BLIND`, au cas où il revienne
-// dessus plus tard sur une famille précise plutôt que globalement.
-function parfumFamilyWeeks(famille) {
-  const inFam = Object.keys(PARFUM_FAMILLE_REF).filter((num) => PARFUM_FAMILLE_REF[num] === famille);
-  const passDays = Math.ceil(inFam.length / 2);
-  return Math.max(1, Math.ceil(passDays / 7));
-}
-// recalculé à chaque appel plutôt que mis en cache — 14 familles, coût négligeable,
-// et ça reste correct si PARFUM_FAMILLE_REF change en cours de route.
-function parfumFamilySchedule() {
-  let cum = 0;
-  return PARFUM_FAMILLES.map((f) => {
-    const weeks = parfumFamilyWeeks(f.key);
-    const start = cum;
-    cum += weeks;
-    return { key: f.key, weeks, start };
-  });
-}
-function parfumWeekFamille(now) {
-  const d = logicalNow(now);
-  const dow = (d.getDay() + 6) % 7; // 0=lundi..6=dimanche
-  d.setHours(0, 0, 0, 0);
-  d.setDate(d.getDate() - dow);
-  const dayIdx = Math.floor(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) / 86400000);
-  const weeksSinceEpoch = Math.floor((dayIdx - PARFUM_WEEK_EPOCH_DAYS) / 7);
-  const schedule = parfumFamilySchedule();
-  const total = schedule.reduce((s, e) => s + e.weeks, 0);
-  const w = ((weeksSinceEpoch % total) + total) % total;
-  const entry = schedule.find((e) => w >= e.start && w < e.start + e.weeks) || schedule[0];
-  return entry.key;
-}
+// Programme "une famille par semaine" (15/08) retiré le 04/09 — Maxence :
+// "pourquoi pas une matière aléatoire par jour plutôt que par famille".
+// `parfumWeekFamille`/`parfumFamilySchedule`/`parfumFamilyWeeks` supprimées
+// (plus aucun appelant, voir pickItemsLRU) : la famille du jour n'est plus
+// calculée d'avance sur un calendrier, elle est juste celle de la paire qui
+// gagne le tirage — voir la note dans pickItemsLRU. Le principe "une famille
+// à la fois, jamais mélangées" reste, appliqué directement à CHAQUE paire.
 function pickItemsLRU(a, log, n) {
   const all = (a.items || []).filter((it) => it.status === "doing");
-  // filtre famille de la semaine (15/08) — repli sur le pool entier si la famille
-  // n'a plus assez de matières "doing" (catalogue épuisé sur cette famille-là) :
-  // un forçage ne doit jamais bloquer faute de stock, la cadence par famille est
-  // une préférence d'apprentissage, pas un verrou.
-  const famille = parfumWeekFamille();
-  const inFamille = all.filter((it) => dominantFamille(it) === famille);
-  // repli sur PARFUM_ESSENTIEL retiré (15/08-f, voir parfumFamilyWeeks) — le tirage
-  // couvre à nouveau la famille entière, pas que le sous-ensemble essentiel.
-  const doing = inFamille.length >= n ? inFamille : all;
   const today = todayKey();
-  const echues = doing.filter((it) => it.due && it.due <= today).sort((x, y) => (x.due < y.due ? -1 : x.due > y.due ? 1 : 0));
-  // `due` ne se pose que via submitParfumGuess, sautée tant que PARFUM_BLIND est
-  // faux (08/08) — donc echues reste vide en pratique aujourd'hui, gardé pour le
-  // jour où le blind reviendrait (voir PARFUM_BLIND).
   const lastSeen = (it) => { const s = it.sessions || []; return s.length ? Math.max(...s.map((x) => x.ts || 0)) : -1; };
   // 16/08 — inversion complète du critère (Maxence : "le critère de sélection c'est
   // pas d'abord ce qui n'est pas tombé, c'est deux matières voisines... donne-moi
@@ -794,25 +722,88 @@ function pickItemsLRU(a, log, n) {
   //    matières du catalogue PAR ORDRE DE LISTE, jamais les suivantes, tant
   //    qu'aucune des premières n'a de vraie session. Corrigé par un mélange avant
   //    le tri (casse les égalités au hasard, pas par ordre d'écriture).
-  // La fenêtre elle-même reste la garantie de couverture (une matière jamais
-  // sentie finit par y entrer, même si elle ne gagne pas le tirage tout de suite) —
-  // amorti par pfamCompares (une paire déjà beaucoup confrontée cède la place sans
-  // jamais tomber à zéro de chance). Repli sur couverture pure UNIQUEMENT si
-  // personne dans la fenêtre ne partage rien (famille très éparse, ou matière #89
-  // sans facettes_ref fiables) — le seul cas où proximité n'a rien à trancher.
-  const WINDOW = 10;
-  const shuffled = [...doing].sort(() => Math.random() - 0.5);
-  const window = shuffled.filter((it) => it.due == null || it.due > today).sort((x, y) => lastSeen(x) - lastSeen(y)).slice(0, WINDOW);
-  const candidates = [];
-  for (let x = 0; x < window.length; x++) {
-    for (let y = x + 1; y < window.length; y++) {
-      const [a, b] = [window[x], window[y]];
-      const raw = pfRefCloseness(a.num, b.num);
-      if (!raw) continue;
-      const pairCompares = (a.pfamCompares || []).filter((c) => c.against === b.id).length;
-      candidates.push({ pair: [a, b], weight: raw / (1 + pairCompares) });
-    }
+  // Repensé 04/09 après simulation (400 jours de tirage réel sur le vrai pool de
+  // 164 matières) : deux défauts trouvés, tous deux dans l'esprit contraires à ce
+  // que Maxence veut ("le but c'est de toujours faire un matériau nouveau" —
+  // "on ne refait jamais une même paire c'est évident"). L'ancienne version
+  // (fenêtre de 10 + pondération amortie par pfamCompares) ne garantissait NI
+  // l'un ni l'autre : (a) 5 matières à proximité 0.000 avec toute leur famille
+  // (ex. geosmin #27, aucun mot de fiche en commun avec les 6 autres terreux)
+  // étaient mathématiquement exclues de tout candidat pour toujours — pas de la
+  // malchance, une impossibilité garantie ; (b) l'amortissement /(1+compares)
+  // laissait une paire déjà faite revenir plusieurs jours d'affilée par pur
+  // hasard (mesuré : jusqu'à 6 jours identiques dans une petite famille comme
+  // agrumes/vert, 3 matières = seulement 3 paires possibles). Remplacé par deux
+  // règles dures plutôt qu'une pondération qui ne fait qu'atténuer :
+  // 1) tant qu'il reste une matière jamais sentie dans le pool, la paire du jour
+  //    DOIT en inclure une (comparée à SA voisine la plus proche) — jamais
+  //    reléguée derrière une re-comparaison entre deux matières déjà connues,
+  //    même proches. Perf triviale à couvrir sans fenêtre tronquée (43 matières
+  //    au plus par famille, boisé).
+  // 2) une paire déjà faite une fois (pfamCompares) est totalement exclue tant
+  //    qu'une combinaison inédite existe dans le pool — pas juste amortie. Le
+  //    plancher (même famille = déjà comparable, cf. lemon vs bergamot/bitter
+  //    orange) ne sert plus qu'à donner un score >0 aux paires sans mot-clé
+  //    partagé, jamais à contourner la règle du jamais-deux-fois.
+  // Repli seulement si TOUTES les combinaisons du pool ont déjà été faites au
+  // moins une fois (petite famille épuisée) : on retombe alors sur la paire la
+  // MOINS souvent refaite (pas la plus proche) — la proximité ne doit plus
+  // jamais forcer une répétition qu'une autre paire éviterait.
+  // Jamais-senti prioritaire, jamais deux familles mélangées dans une paire,
+  // mais SANS programme/calendrier (04/09-c, Maxence : "pourquoi pas une
+  // matière aléatoire par jour plutôt que par famille" — plus simple que
+  // 04/09-b qui faisait avancer un programme agrumes→aromatique→...). Une
+  // seule recherche sur TOUT le catalogue à la fois, la contrainte
+  // même-famille appliquée paire par paire (jamais indole avec un agrume,
+  // cf. le "wtf" du 04/09-b) — la famille du jour n'est plus choisie
+  // d'avance, elle est juste celle de la paire qui gagne le tirage. Le
+  // principe (approfondir une famille à la fois, pas mélanger) reste intact
+  // au niveau de la PAIRE ; c'est juste le calendrier de rotation qui
+  // disparaît, plus fidèle à un usage réel irrégulier (10 jours d'absence
+  // n'ont plus de "semaine" à perdre). `parfumWeekFamille`/le programme par
+  // semaine sont retirés (plus aucun appelant).
+  const PARFUM_SAME_POOL_FLOOR = 0.02;
+  const pool = [...all].filter((it) => it.due == null || it.due > today).sort(() => Math.random() - 0.5);
+  // dernière comparaison réelle, cherchée sur TOUT le catalogue.
+  let mostRecentTs = -1, mostRecentIds = null;
+  for (const it of all) for (const c of it.pfamCompares || []) {
+    if (c.ts > mostRecentTs) { mostRecentTs = c.ts; mostRecentIds = [it.id, c.against]; }
   }
+  const mostRecentKey = mostRecentIds ? [...mostRecentIds].sort().join("|") : null;
+  const yesterdayIds = new Set(mostRecentIds || []);
+  const buildCandidates = ({ requireNew, allowRepeat, excludeYesterday, excludeMostRecentPair }) => {
+    const out = [];
+    for (let x = 0; x < pool.length; x++) {
+      for (let y = x + 1; y < pool.length; y++) {
+        const [p, q] = [pool[x], pool[y]];
+        if (dominantFamille(p) !== dominantFamille(q)) continue;
+        const isNew = lastSeen(p) === -1 || lastSeen(q) === -1;
+        if (requireNew && !isNew) continue;
+        if (excludeYesterday && (yesterdayIds.has(p.id) || yesterdayIds.has(q.id))) continue;
+        if (excludeMostRecentPair && [p.id, q.id].sort().join("|") === mostRecentKey) continue;
+        const compares = (p.pfamCompares || []).filter((c) => c.against === q.id).length;
+        if (!allowRepeat && compares > 0) continue;
+        const raw = pfRefCloseness(p.num, q.num) || PARFUM_SAME_POOL_FLOOR;
+        out.push({ pair: [p, q], weight: allowRepeat ? raw / (1 + compares) : raw });
+      }
+    }
+    return out;
+  };
+  // Chaîne de repli du plus strict au plus permissif — Maxence 04/09 : "que ça
+  // n'arrive [réutiliser la matière d'hier] que dans le cas où on n'a pas
+  // d'autre candidat plus judicieux ou neuf, en dernier recours".
+  const tiers = [
+    { requireNew: true, allowRepeat: false, excludeYesterday: true, excludeMostRecentPair: false },
+    { requireNew: true, allowRepeat: false, excludeYesterday: false, excludeMostRecentPair: false },
+    { requireNew: false, allowRepeat: false, excludeYesterday: true, excludeMostRecentPair: false },
+    { requireNew: false, allowRepeat: false, excludeYesterday: false, excludeMostRecentPair: false },
+    // pool vraiment épuisé (cas extrême, 164 matières) — jamais littéralement
+    // la paire d'hier si évitable, le reste pondéré par le moins-souvent-refait.
+    { requireNew: false, allowRepeat: true, excludeYesterday: false, excludeMostRecentPair: true },
+    { requireNew: false, allowRepeat: true, excludeYesterday: false, excludeMostRecentPair: false },
+  ];
+  let candidates = [];
+  for (const cfg of tiers) { candidates = buildCandidates(cfg); if (candidates.length) break; }
   let picks = null;
   if (candidates.length) {
     const total = candidates.reduce((s, c) => s + c.weight, 0);
@@ -821,9 +812,10 @@ function pickItemsLRU(a, log, n) {
     if (!picks) picks = candidates[candidates.length - 1].pair;
   }
   if (!picks) {
-    picks = echues.slice(0, PARFUM_REVIEW_SLOTS);
-    const reste = doing.filter((it) => !picks.includes(it)).sort((x, y) => lastSeen(x) - lastSeen(y));
-    for (const it of reste) { if (picks.length >= n) break; if (!picks.includes(it)) picks.push(it); }
+    // repli dégénéré (pool < n, ou `due` un jour où PARFUM_BLIND reviendrait) —
+    // les 2 matières les moins récemment senties, tout catalogue confondu.
+    const reste = [...all].sort((x, y) => lastSeen(x) - lastSeen(y));
+    picks = reste.slice(0, n);
   }
   // sorted by permanent bottle number, not draw order — .num is what actually
   // gets read aloud/displayed, so its order is the only one that matters for
@@ -1026,28 +1018,48 @@ const PARFUM_REGISTRES = [
 // bouteille, pas une donnée de jugement. Remplace l'ancien tally de sessions comme
 // source principale de dominantFamille ci-dessous (celui-ci reste en repli pour une
 // matière hors de ces 164, ex. catalogue rechargé/étendu plus tard).
+// Corrigé 04/09 (Maxence : "vérifie que les familles sont pertinentes" —
+// audit réel, pas une confiance de principe) : 10 réassignations trouvées où
+// la famille ne collait pas au propre profil de la matière —
+// #4/8/11 (goudron de bouleau x2, cade) étaient en boisé alors que ce sont,
+// vérifié par recherche externe, LES matières historiques de l'accord Cuir de
+// Russie (leather) en parfumerie — pas du bois, du cuir tanné au goudron ;
+// #30 (fleur de cuir) a "cuir" dans son nom même, comme #70 (royal leather)
+// déjà en animal ; #2 (thé noir) est resté ambigu même après recherche
+// (sources mixtes cuir/tabac vs foin/violette) — tranché en aromatique
+// (Maxence, cohérent avec le facet "foin" déjà défini là) ; #17 (olibanum
+// resinoid) était seul en boisé alors que ses 3 cousins encens (#10/12/18)
+// sont en balsamique — même matière, incohérence corrigée ; #153 (gurjun
+// BALSAM oil) a "balsam" dans le nom et tous ses cousins résineux sont en
+// balsamique ; #75 (cypriol) et son propre tag menaient avec "boisé" pas
+// "terreux" ; #134 (linalool ex coriandre) a "épicé (coriandre)" écrit dans
+// ses propres tags ; #141 (patchone) et #5 (patchouli dark) sont la même
+// matière première sous deux noms, harmonisés sur terreux ; #163 (benzyl
+// acetate ex ylang) était en fruité alors que la recherche confirme un profil
+// dominant floral-jasmin (composant principal des reconstitutions de jasmin),
+// la poire n'étant qu'une note secondaire — corrigé en floral.
 const PARFUM_FAMILLE_REF = {
-  1:"floral", 2:"boisé", 3:"floral", 4:"boisé", 5:"terreux", 6:"boisé", 7:"épicé", 8:"boisé",
-  9:"épicé", 10:"balsamique", 11:"boisé", 12:"balsamique", 13:"animal", 14:"balsamique", 15:"balsamique", 16:"balsamique",
-  17:"boisé", 18:"balsamique", 19:"gourmand", 20:"boisé", 21:"boisé", 22:"frais", 23:"floral", 24:"balsamique",
-  25:"épicé", 26:"fruité", 27:"terreux", 28:"boisé", 29:"frais", 30:"boisé", 31:"boisé", 32:"gourmand",
+  1:"floral", 2:"aromatique", 3:"floral", 4:"animal", 5:"terreux", 6:"boisé", 7:"épicé", 8:"animal",
+  9:"épicé", 10:"balsamique", 11:"animal", 12:"balsamique", 13:"animal", 14:"balsamique", 15:"balsamique", 16:"balsamique",
+  17:"balsamique", 18:"balsamique", 19:"gourmand", 20:"boisé", 21:"boisé", 22:"frais", 23:"floral", 24:"balsamique",
+  25:"épicé", 26:"fruité", 27:"terreux", 28:"boisé", 29:"frais", 30:"animal", 31:"boisé", 32:"gourmand",
   33:"gourmand", 34:"balsamique", 35:"floral", 36:"floral", 37:"musqué", 38:"musqué", 39:"animal", 40:"musqué",
   41:"agrumes", 42:"gourmand", 43:"boisé", 44:"musqué", 45:"floral", 46:"balsamique", 47:"balsamique", 48:"balsamique",
   49:"balsamique", 50:"boisé", 51:"balsamique", 52:"boisé", 53:"boisé", 54:"gourmand", 55:"boisé", 56:"boisé",
   57:"boisé", 58:"floral", 59:"gourmand", 60:"gourmand", 61:"floral", 62:"floral", 63:"terreux", 64:"boisé",
   65:"terreux", 66:"terreux", 67:"chimique", 68:"balsamique", 69:"balsamique", 70:"animal", 71:"balsamique", 72:"boisé",
-  73:"gourmand", 74:"aromatique", 75:"terreux", 76:"aromatique", 77:"balsamique", 78:"boisé", 79:"boisé", 80:"boisé",
+  73:"gourmand", 74:"aromatique", 75:"boisé", 76:"aromatique", 77:"balsamique", 78:"boisé", 79:"boisé", 80:"boisé",
   81:"boisé", 82:"boisé", 83:"boisé", 84:"aromatique", 85:"boisé", 86:"frais", 87:"boisé", 88:"terreux",
   89:"chimique", 90:"boisé", 91:"animal", 92:"musqué", 93:"animal", 94:"boisé", 95:"vert", 96:"balsamique",
   97:"frais", 98:"boisé", 99:"frais", 100:"boisé", 101:"animal", 102:"fruité", 103:"musqué", 104:"boisé",
   105:"boisé", 106:"épicé", 107:"boisé", 108:"gourmand", 109:"floral", 110:"frais", 111:"floral", 112:"boisé",
   113:"animal", 114:"animal", 115:"frais", 116:"floral", 117:"floral", 118:"floral", 119:"floral", 120:"floral",
   121:"floral", 122:"floral", 123:"fruité", 124:"floral", 125:"fruité", 126:"chimique", 127:"chimique", 128:"chimique",
-  129:"floral", 130:"floral", 131:"floral", 132:"boisé", 133:"floral", 134:"floral", 135:"agrumes", 136:"agrumes",
-  137:"boisé", 138:"animal", 139:"floral", 140:"boisé", 141:"boisé", 142:"animal", 143:"animal", 144:"épicé",
+  129:"floral", 130:"floral", 131:"floral", 132:"boisé", 133:"floral", 134:"épicé", 135:"agrumes", 136:"agrumes",
+  137:"boisé", 138:"animal", 139:"floral", 140:"boisé", 141:"terreux", 142:"animal", 143:"animal", 144:"épicé",
   145:"épicé", 146:"musqué", 147:"musqué", 148:"vert", 149:"boisé", 150:"animal", 151:"aromatique", 152:"floral",
-  153:"boisé", 154:"balsamique", 155:"épicé", 156:"vert", 157:"animal", 158:"balsamique", 159:"animal", 160:"boisé",
-  161:"floral", 162:"floral", 163:"fruité", 164:"balsamique",
+  153:"balsamique", 154:"balsamique", 155:"épicé", 156:"vert", 157:"animal", 158:"balsamique", 159:"animal", 160:"boisé",
+  161:"floral", 162:"floral", 163:"floral", 164:"balsamique",
 };
 // R1 facettes de référence — même source que PARFUM_FAMILLE_REF (parfum-fiches-
 // reference.json), extraites ici pour la première fois (16/08, Maxence : "oublie
@@ -1123,7 +1135,13 @@ const PARFUM_FACETTES_REF = {
 // générique comme "léger", présent dans des dizaines de fiches, pèse
 // automatiquement presque rien face à un mot rare comme "castoréum" — pas besoin
 // d'une liste de mots à exclure à la main).
-const pfFacetteWords = (f) => parfumNorm(f).split(" ").filter((w) => w.length >= 3);
+// tronqué à 6 lettres (04/09, trouvé en simulant 400 jours de tirage réel : 5
+// matières ne partageaient jamais un mot avec aucune voisine de leur famille —
+// "citronné" (#41) vs "citron frais" (#136), même note, mais "citronne" ≠
+// "citron" en comparaison de mot exact. Même bug que le passage phrase→mot du
+// 16/08 ("oud" vs "oud léger"), un cran plus fin : le mot exact ne suffit
+// toujours pas, il faut sa racine.
+const pfFacetteWords = (f) => parfumNorm(f).split(" ").filter((w) => w.length >= 3).map((w) => w.slice(0, 6));
 const PARFUM_REF_WORDS = (() => {
   const out = {};
   for (const num in PARFUM_FACETTES_REF) {
@@ -1929,7 +1947,9 @@ function pickAging(activities, log, place, options = {}) {
             // Pas de `desc` : pair[0].name prend la place de "détails".
             drawn = { activity: pf, action: { ...matAction, id: "x_pf_direct_cmp",
               text: pair[0].name, baseText: "comparer",
-              pfamFamily: parfumWeekFamille(), pfamPair: pair, pfamRoundId: roundDef.id } };
+              // famille de la vraie paire tirée (04/09, plus de programme par
+              // semaine — voir pickItemsLRU), pas une famille calculée à part.
+              pfamFamily: dominantFamille(itemA), pfamPair: pair, pfamRoundId: roundDef.id } };
             break;
           }
           if (drawn) return resolveDraw(drawn, log);
