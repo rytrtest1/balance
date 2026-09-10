@@ -7107,15 +7107,15 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                       // le tap qui finit la session (running → done) est ce "premier tap".
                       // Sur "done", le commentaire est donc TOUJOURS tout en bas, jamais
                       // promu, jamais étiqueté — juste le curseur, pour toutes les activités
-                      // (parfum ou non). Pause reste TOUJOURS présent juste au-dessus
-                      // (Maxence, en capitales : "IL DOIT TOUJOURS Y AVOIR LE BOUTON PAUSE
-                      // AUSSI").
+                      // (parfum ou non). Pause retiré d'ici le 11/09 (M. : "le bouton pause ne
+                      // sert évidemment que quand l'activité est en cours, une fois terminée
+                      // c'est absurde" — annule l'exigence capitalisée du 16/08 qui le gardait
+                      // TOUJOURS visible). Vérifié : togglePause n'a de toute façon plus aucun
+                      // effet observable ici — startedAt/le timer ne comptent plus, finish()
+                      // a déjà figé la durée avant d'arriver sur "done".
                       const commentBlock = (
                         <React.Fragment key="comment">
-                          <div style={{ textAlign: "center", marginTop: 18, marginBottom: 10 }}>
-                            <button className="link" onClick={togglePause}>{paused ? "reprendre" : "pause"}</button>
-                          </div>
-                          <div style={{ position: "relative", maxWidth: 360, margin: "0 auto" }}>
+                          <div style={{ position: "relative", maxWidth: 360, margin: "18px auto 0" }}>
                             <input className="in" value={comment}
                               autoComplete="off" name="comment-done"
                               onChange={(e) => setComment(e.target.value.toLowerCase())}
