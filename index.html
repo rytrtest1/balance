@@ -5581,7 +5581,14 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
       setTimeout(() => setMsg(""), 2400);
       return;
     }
+    // traiter en background (28/08, M. : "marquer 'noté' direct et traiter l'info en
+    // background comme d'habitude" — même idiome que submitRunningComment/coachViaClaude
+    // ailleurs dans l'app). Le champ se vide et redevient tapable tout de suite pour la
+    // pensée suivante ; la classification Claude tourne derrière sans bloquer la
+    // saisie — les messages plus bas ("logged: X" / "noté" / erreur) remplacent
+    // simplement cet accusé provisoire une fois résolus.
     setLogBusy(true);
+    setLogText(""); setMsg("noté");
     const catalogue = activities.map((a) => {
       const acts = (a.actions || []).map((ac) => `${ac.id}: ${ac.text}`).join(" · ") || "(pas d'action fixe)";
       return `${a.id} — ${a.name} (${a.domain}) : ${acts}`;
@@ -7301,15 +7308,19 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
               autoComplete="off" name="freelog"
               onChange={(e) => setLogText(e.target.value.toLowerCase())}
               onKeyDown={(e) => { if (e.key === "Enter") submitFreeLog(); }}
-              disabled={logBusy}
-              style={{ fontSize: 14, textAlign: "center", paddingBottom: 8, color: C.text }} />
+              style={{ fontFamily: "var(--mono)", fontSize: 13, textAlign: "center", paddingBottom: 8, color: C.text }} />
             {!logText && (
               // Maxence 17/08 (log libre) : le hintcursor manquait le garde `!value` que
               // les 3 autres usages ont déjà (voir item-name plus haut) — restait affiché
               // même une fois du texte tapé. Repositionné centré (comme les 3 autres,
               // ex. item-name) au lieu de collé à droite, cohérent avec le texte centré
               // du champ. Ligne horizontale (borderBottom) retirée sur ce champ.
-              <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "flex-end", justifyContent: "center", paddingBottom: 8, pointerEvents: "none" }}>
+              // 21/08 : police/taille pas alignées avec les 3 autres champs curseur
+              // (var(--mono)/13, ce champ tournait sur le body font en 14) — repéré
+              // par Maxence ("pas la même taille ni le curseur ni le texte"), fixé
+              // ici sur input ET hint sans toucher au positionnement (flex-end voulu
+              // ci-dessus, différent des 3 autres, pas la plainte).
+              <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "flex-end", justifyContent: "center", paddingBottom: 8, pointerEvents: "none", fontFamily: "var(--mono)", fontSize: 13 }}>
                 <span className="hintcursor" />
               </div>
             )}
@@ -7322,7 +7333,7 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
             </label>
           </div>
           <div style={{ marginTop: 14 }}>
-            <button className="link" onClick={() => setKeyOpen((o) => !o)}>key{apiKey ? " ·" : ""}</button>
+            <button className="link" onClick={() => setKeyOpen((o) => !o)}>key</button>
           </div>
           {keyOpen && (
             <div style={{ marginTop: 18, maxWidth: 320, marginLeft: "auto", marginRight: "auto" }}>
