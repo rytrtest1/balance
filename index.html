@@ -2673,16 +2673,6 @@ Donne aussi :
 - door : 0-100, la qualité de PORTE D'ENTRÉE — est-ce le bon endroit par où commencer ce territoire/cet artiste ? Attention, il a explicitement demandé l'inverse du réflexe habituel : « arrêter de me proposer que les sons les plus écoutés des artistes, il y a sans aucun doute de meilleures portes d'entrée pour moi ». Le morceau le plus streamé n'est presque jamais la meilleure porte.
 
 ${isCuisine ? `Utilise la recherche web pour vérifier que ce plat est une combinaison réelle et reconnue — une technique/tradition qui existe vraiment quelque part, pas une association inventée sur le moment. Laisse tomber si tu ne peux pas confirmer.` : `Utilise la recherche web pour vérifier que ce titre existe réellement sous ce nom exact, par cet artiste/auteur exact — laisse tomber si tu ne peux pas confirmer. Même format que les items existants : "artiste – titre" en minuscules.`}`;
-  const out = await claudeJSON(key, prompt, {
-    type: "object",
-    properties: {
-      text: { type: "string" }, dir: { type: "string" },
-      fit: { type: "number" }, door: { type: "number" },
-    },
-    required: ["text", "dir", "fit", "door"],
-    additionalProperties: false,
-  }, 2000, [{ type: "web_search_20250305", name: "web_search", max_uses: 3 }]);
-  if (!out || !out.text) return null;
   // filtre déterministe en plus du hardBlock (22/08) : même explicite dans le
   // prompt, une exclusion a déjà glissé une fois (endive, alors que la liste la
   // cite noir sur blanc) — une règle absolue ne peut pas dépendre uniquement de
@@ -2691,16 +2681,38 @@ ${isCuisine ? `Utilise la recherche web pour vérifier que ce plat est une combi
   // "haricot rouge" — une phrase figée ratait le pluriel porté par le premier mot.
   const deaccent = (s) => (s || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
   const bannedGroups = (activity.bannedTerms || []).map((g) => (Array.isArray(g) ? g : [g]).map(deaccent));
-  const t = deaccent(out.text);
-  if (bannedGroups.some((words) => words.every((w) => t.includes(w)))) return null;
-  return {
-    id: uid(), text: out.text, status: "doing", lane,
-    dir: out.dir || undefined,
-    fit: typeof out.fit === "number" ? out.fit : undefined,
-    door: typeof out.door === "number" ? out.door : undefined,
-    register: register || undefined,
-    ...(lane === "core" ? {} : { explore: true }),
-  };
+  // retenter EN PLACE, pas avaler en silence (22/08, M. : "fix le cas où l'appel
+  // n'aboutit pas à un choix validé, même si rare") — un texte vide ou filtré par
+  // les exclusions n'est pas une exception réseau, donc claudeJSON ne le retente
+  // jamais tout seul ; sans ça, `submitComment` recevait `null`, ne loggait rien,
+  // et le créneau restait silencieusement vide (le même angle mort que la panne
+  // API qu'on avait déjà corrigé, juste par un autre chemin). 3 tentatives sur ce
+  // même créneau — jamais un créneau différent — puis on lève une vraie erreur
+  // pour que le catch{} déjà en place à l'appel la journalise normalement.
+  let lastReason = "raison inconnue";
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const out = await claudeJSON(key, prompt, {
+      type: "object",
+      properties: {
+        text: { type: "string" }, dir: { type: "string" },
+        fit: { type: "number" }, door: { type: "number" },
+      },
+      required: ["text", "dir", "fit", "door"],
+      additionalProperties: false,
+    }, 2000, [{ type: "web_search_20250305", name: "web_search", max_uses: 3 }]);
+    if (!out || !out.text) { lastReason = "réponse sans item exploitable"; continue; }
+    const t = deaccent(out.text);
+    if (bannedGroups.some((words) => words.every((w) => t.includes(w)))) { lastReason = `item filtré (exclusion enfreinte) : ${out.text.slice(0, 60)}`; continue; }
+    return {
+      id: uid(), text: out.text, status: "doing", lane,
+      dir: out.dir || undefined,
+      fit: typeof out.fit === "number" ? out.fit : undefined,
+      door: typeof out.door === "number" ? out.door : undefined,
+      register: register || undefined,
+      ...(lane === "core" ? {} : { explore: true }),
+    };
+  }
+  throw new Error(`aucun item valide après 3 tentatives — ${lastReason}`);
 }
 
 // ---------- palette / css ----------
@@ -3644,40 +3656,6 @@ function Throughline() {
       }
       setLoading(false);
       loaded.current = true;
-      // ③b, arrière-plan, une fois par jour (17/08, simplifié 22/08) : filet de
-      // sécurité seulement. Le remplacement normal se fait juste après chaque
-      // session (voir submitComment) — cette passe ne rattrape que les couloirs
-      // restés vides parce que ce remplacement a échoué (panne API, etc.).
-      (async () => {
-        if (!k) return;
-        const today = todayKey();
-        const lastCheck = await store.get(NS("tlx_poolCheckDate"));
-        if (lastCheck === today) return;
-        store.set(NS("tlx_poolCheckDate"), today);
-        for (const act of loadedActivities) {
-          if (act.kind !== "recommandeur") continue;
-          const siblingId = act.id === "a_ecoute_titre" ? "a_ecoute_album" : act.id === "a_ecoute_album" ? "a_ecoute_titre" : null;
-          const sibling = siblingId ? loadedActivities.find((a2) => a2.id === siblingId) : null;
-          for (const slot of missingSlots(act)) {
-            try {
-              const item = await generateOneItemViaClaude(k, act, slot.lane, loadedLog, sibling, slot.register);
-              if (item) setActivities((arr) => arr.map((a2) => (a2.id === act.id ? { ...a2, items: [...(a2.items || []), item] } : a2)));
-            } catch (e) {
-              // ne plus avaler l'échec en silence (22/08, M. : "ça me sera indiqué
-              // non ?" — non, justement). Le symptôme n'est pas une erreur visible
-              // mais une ABSENCE : ce couloir ne propose plus rien, sans bruit.
-              // Une ligne de log (mécanisme déjà là, zéro UI en plus) suffit à
-              // rendre la panne retrouvable après coup — c'est ce qui manquait
-              // quand le crédit API s'est épuisé le 22/08 : rien nulle part.
-              setLog((L) => [...L, {
-                id: uid(), date: todayKey(), ts: realNow().getTime(), type: "note",
-                activityId: act.id,
-                note: `[système] génération d'item échouée (${slot.lane}${slot.register ? "/" + slot.register : ""}) — ${e && e.message ? e.message : "erreur inconnue"}`,
-              }]);
-            }
-          }
-        }
-      })();
     })();
     return () => { alive = false; };
   }, []);
@@ -3698,6 +3676,44 @@ function Throughline() {
   }, [running, startedAt, paused]);
 
   // ----- now-flow actions -----
+  // extrait de propose() (22/08) pour être testable directement, indépendamment
+  // du planificateur (quotas/quart de travail) qui décide QUAND une activité
+  // recommandeur est proposée — cette fonction ne s'occupe que du cas où elle
+  // l'est mais n'a plus aucun item : générer avant de montrer, jamais après.
+  const ensureRecoItem = async (p, logUse, actsUse) => {
+    setMsg("préparation d'une proposition…");
+    const key = (await store.get("tlx_apiKey")) || "";
+    if (!key) { setMsg(""); proposedAtRef.current = Date.now(); setCurrent(p); setStage("proposal"); return; }
+    try {
+      const isCuisine = p.activity.id === "a_cuisiner";
+      const Q = LANE_QUOTAS;
+      let r = Math.random() * (Q.core + Q.widen + Q.terra), lane = "terra";
+      if (r < Q.core) lane = "core"; else if (r < Q.core + Q.widen) lane = "widen";
+      const register = isCuisine ? (Math.random() < (REGISTER_QUOTAS.homefood || 0.5) ? "homefood" : "finedining") : null;
+      const siblingId = p.activity.id === "a_ecoute_titre" ? "a_ecoute_album" : p.activity.id === "a_ecoute_album" ? "a_ecoute_titre" : null;
+      const sibling = siblingId ? actsUse.find((a2) => a2.id === siblingId) : null;
+      const item = await generateOneItemViaClaude(key, p.activity, lane, logUse, sibling, register);
+      const freshActivity = { ...p.activity, items: [...(p.activity.items || []), item] };
+      setActivities((arr) => arr.map((a2) => (a2.id === p.activity.id ? freshActivity : a2)));
+      const action = itemStep(freshActivity, logUse);
+      setMsg("");
+      proposedAtRef.current = Date.now();
+      setCurrent({ activity: freshActivity, action });
+      setStage("proposal");
+    } catch (e) {
+      // visible plutôt qu'un blocage muet — même logique que les autres échecs
+      // de génération (22/08) : on montre quand même la proposition générique
+      // plutôt que de laisser l'écran figé sur "préparation…".
+      setLog((L) => [...L, {
+        id: uid(), date: todayKey(), ts: realNow().getTime(), type: "note",
+        activityId: p.activity.id,
+        note: `[système] génération d'un premier item échouée — ${e && e.message ? e.message : "erreur inconnue"}`,
+      }]);
+      setMsg("");
+      proposedAtRef.current = Date.now();
+      setCurrent(p); setStage("proposal");
+    }
+  };
   const propose = (logUse = log, actsUse = activities, relax = false, avoidId = null) => {
     const pl = computePlace(); setPlace(pl); // place is read from the clock, not chosen
     // if every row is past its day/week cap right now, don't stop — relax and redraw
@@ -3717,6 +3733,17 @@ function Throughline() {
     // otherwise a reload before that row's first real completion would re-roll it.
     if (seeded.length) setActivities((prev) => [...prev]);
     setRunning(false); setElapsedMs(0);
+    // pool vide sur TOUS les couloirs (22/08, M. : "vérifier qu'on a bien un item
+    // dispo avant de lancer l'activité, sinon d'abord faire le call, et lancer
+    // l'activité une fois l'item obtenu") — resolveDraw retombe alors sur une
+    // action générique sans itemId (`!hasDoingItems`), qui casserait tout
+    // l'intérêt du recommandeur (aucun titre réel proposé). Plutôt que d'afficher
+    // ça, on génère UN item pour de vrai avant de proposer quoi que ce soit —
+    // jamais après coup.
+    if (p && p.activity.kind === "recommandeur" && !p.action?.itemId) {
+      ensureRecoItem(p, logUse, actsUse);
+      return;
+    }
     if (!p) { setCurrent(null); setStage("empty"); }
     else {
       proposedAtRef.current = Date.now();
@@ -5962,7 +5989,7 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
       // reset ponctuel du vécu d'un pool (21/08, demande M. sur Parfum matières) :
       // "resetPoolSessions" à la racine du fichier liste des activityId dont TOUS
       // les items reviennent à status="doing"/sessions=[] — un seul déclenchement
-      // par activité (flag localStorage, même idiome que tlx_poolCheckDate), sinon
+      // par activité (flag localStorage dédié), sinon
       // chaque resync ultérieur du même fichier effacerait aussi les vraies
       // sessions faites APRÈS le reset. L'ancien vécu n'est jamais perdu : archivé
       // côté fichier avant d'ajouter la clé (fait hors app, pas par ce mécanisme).
@@ -6079,7 +6106,20 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
         const sibling = siblingId ? activities.find((x) => x.id === siblingId) : null;
         return { lanes: laneCounts(a), missing: missingSlots(a), item: await generateOneItemViaClaude(key, a, lane, log, sibling, register || null) };
       },
-      laneCounts, missingSlots,
+      laneCounts, missingSlots, itemStep, propose, ensureRecoItem,
+      // pose directement une proposition sur UNE activité précise, sans dépendre
+      // du planificateur horaire (quotas/quart de travail) — pour les démos en
+      // direct. Ne joue que l'étape "proposal" ; begin/finish/submitComment
+      // restent de vrais taps ensuite, comme sur n'importe quelle proposition.
+      driveSession: (activityId) => {
+        const a = activities.find((x) => x.id === activityId);
+        if (!a) return { error: "activité introuvable" };
+        const action = itemStep(a, log);
+        proposedAtRef.current = Date.now();
+        setCurrent({ activity: a, action });
+        setStage("proposal");
+        return { activity: a.name, action };
+      },
     };
   });
 
