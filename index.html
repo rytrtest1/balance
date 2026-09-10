@@ -1522,13 +1522,14 @@ function parfumAide(roundId) { return roundId === "final" ? PARFUM_AIDE_FINAL : 
 // "nextDay" pour "final" (le J+1 de la fiche — rappel + touche fraîche) : prêt dès que
 // le jour LOGIQUE (voir logicalNow/DAY_PIVOT_HOUR, pas minuit) a changé depuis prepTs,
 // quelle que soit l'heure.
-// Fenêtres, pas juste des seuils (08/08, Maxence — l'usage normal, c'est l'app ouverte
-// plusieurs fois par jour ; le cas raté est l'exception qu'on gère, pas la norme qu'on
-// conçoit). `minHoursSincePrep` est un PLANCHER, `maxHoursSincePrep` ferme la fenêtre :
-// passée, ce round n'est plus proposé pour les matières pas encore notées — pas
-// rattrapé plus tard, gardé "non évaluée" (voir la boucle d'expiration dans pickAging).
-// Résiduel/rappel reste daté (pas en heures) : sa fenêtre est LE jour logique suivant —
-// expiré dès qu'un 2e passage de pivot (9h) survient sans qu'il ait noté.
+// Fenêtres à l'origine (08/08), retirées le 10/09 avec le forçage automatique
+// (voir resolveParfumManual) : minHoursSincePrep/maxHoursSincePrep ne gatent
+// plus rien pour les 4 premiers rounds — le round courant est maintenant
+// disponible dès que Maxence tape "parfum", jamais imposé par un minuteur.
+// Les champs restent affichés/documentés pour l'ordre et les labels ; seul
+// "final" (rappel) garde sa contrainte via minHoursSincePrep === "nextDay",
+// un vrai test de mémoire espacée (jour logique suivant, voir logicalNow/
+// DAY_PIVOT_HOUR), pas une histoire de friction.
 const PARFUM_ROUNDS = [
   { id: "direct", label: "ouverture", minHoursSincePrep: 0, maxHoursSincePrep: 0.25 },
   { id: "m30", label: "légers", minHoursSincePrep: 0.33, maxHoursSincePrep: 0.75 },
@@ -1536,15 +1537,6 @@ const PARFUM_ROUNDS = [
   { id: "h6", label: "fond", minHoursSincePrep: 5, maxHoursSincePrep: 9 },
   { id: "final", label: "rappel", minHoursSincePrep: "nextDay" },
 ];
-// battement (08/08, Maxence) : sans marge, rouvrir l'app à peine après la fin
-// d'une fenêtre (ex. +1h05 sur ouverture, fenêtre 0-1h) marquait direct la
-// matière "non évaluée" — trop strict pour un usage réel où l'app n'est pas
-// ouverte à la seconde près. Ajoute une marge de rattrapage APRÈS
-// maxHoursSincePrep avant d'abandonner le round ; ne touche pas minHoursSincePrep
-// donc ne crée pas de chevauchement avec la fenêtre suivante (le round courant
-// est toujours vérifié en premier dans la boucle). Ne s'applique pas au résiduel
-// (pas de maxHoursSincePrep, déjà sa propre fenêtre en jours).
-const PARFUM_ROUND_GRACE_HOURS = 1;
 // which cook created the OLDEST still-open dish debt (Maxence 11/07: "l'app
 // propose peu de temps après l'action qui ramène à 0" — eligible ≠ prioritized;
 // pickAging's weight() ages a row off when THAT ROW was last done, so a vaisselle
@@ -1622,6 +1614,13 @@ function buildLotteryRows(activities, log, place, skipQuota = false) {
         // field at the bottom of the app (submitFreeLog), typed once he's actually
         // baked. See pendingGarnitureFrom/lastCuireTs above for what this unlocks.
         if (action.id === "x_mp_cuire") continue;
+        // log-only depuis le 10/09 (voir resolveParfumManual) — même idiome que
+        // x_mp_cuire ci-dessus. Sans cette exclusion, la loterie générale
+        // reproposerait x_pf_matiere à son rythme normal (3/jour) même sans
+        // forçage, en tirant un item au hasard hors du mécanisme pf3/round —
+        // exactement la réapparition non voulue que le passage au manuel visait
+        // à éliminer. La seule porte d'entrée reste de taper "parfum".
+        if (action.id === "x_pf_matiere") continue;
         if (action.id === "x_mp_garniture") {
           // debt-driven like vaisselle, not target/quota-driven — pushed straight in
           // and skips the completions/rolling-week gate below entirely. Needed
@@ -1830,6 +1829,101 @@ function migrateSingleItemActivities(acts) {
     }) };
   });
 }
+// parfum — matières/jour, déclenché À LA DEMANDE (10/09, M. : "je log 'parfum'
+// pour connaître la paire du jour, ensuite quand je suis prêt je log l'étape —
+// on met bien une notif qui rappelle les étapes suivantes comme d'hab mais on
+// ne les impose pas"). Appelée uniquement depuis submitFreeLog quand le texte
+// tapé est exactement "parfum" — plus jamais depuis pickAging (voir sa note).
+// Logique interne reprise à l'identique de l'ancien forçage (tirage de la
+// paire via pickItemsLRU, prépa, comparer à chaque round, deviner/couleur en
+// fin de cycle) : seule la fenêtre horaire par round (floorOk/stillOpen)
+// disparaît — Maxence choisit quand il est prêt, la notif suffit à le lui
+// rappeler sans que l'app décide à sa place. Le rappel J+1 (round "final")
+// garde sa contrainte de jour logique : un vrai test de mémoire espacée,
+// pas de la friction. Mute `pf.pf3` en place comme l'ancien forçage — le
+// caller (submitFreeLog) doit refaire `setActivities((prev) => [...prev])`
+// après l'appel pour que la mutation soit vue par le rendu suivant.
+function resolveParfumManual(activities, log, place) {
+  const pf = activities.find((x) => x.id === "a_parfum_explo");
+  if (!pf) return null;
+  const matAction = (pf.actions || []).find((x) => x.id === "x_pf_matiere");
+  // garde-fou numéros (08/08, voir l'ancienne note dans pickAging) : sans lui
+  // un pool antérieur à leur ajout afficherait « #undefined ».
+  const numbered = (pf.items || []).some((it) => it.status === "doing" && it.num);
+  if (!matAction || !numbered || !hasDoingItems(pf)) return null;
+  // home requis seulement pour tirer 2 nouvelles bouteilles et faire la
+  // mouillette (08/08, Maxence : "j'ai emporté les touches avec moi" — une fois
+  // faite, la mouillette voyage avec lui). Tout le reste (comparer, deviner,
+  // couleur, round courant) ne touche plus aux bouteilles, jamais gaté ici.
+  const atHome = placeOk(pf, place);
+  if ((!pf.pf3 || pf.pf3.revealed) && atHome) {
+    const picks = pickItemsLRU(pf, log, 2);
+    pf.pf3 = { order: picks.map((p) => p.id), nums: picks.map((p) => p.num), names: picks.map((p) => p.text),
+      prepAcked: false, prepTs: null, round: 0, doneInRound: 0, guessed: false, guesses: [], revealed: false, cmpUpTo: 0 };
+  }
+  if (!pf.pf3 || pf.pf3.revealed) return null; // pas chez lui et rien en cours : rien à proposer.
+  const numList = pf.pf3.nums.map((n) => `#${n}`).join(" · ");
+  const nameList = pf.pf3.names.join(" · ");
+  if (!pf.pf3.prepAcked) {
+    if (!atHome) return null;
+    return resolveDraw({ activity: pf, action: { ...matAction,
+      text: `aujourd'hui : ${PARFUM_BLIND ? numList : nameList}`,
+      parfumPrep: true, desc: "prépare une mouillette pour chacune de ces 2 bouteilles, puis reviens noter." } }, log);
+  }
+  if (pf.pf3.cmpUpTo < pf.pf3.round) {
+    // comparer — répété à CHAQUE round (16/08, voir l'ancienne note dans
+    // pickAging) : deux matières à égalité en tête peuvent diverger en fond.
+    const [idA, idB] = pf.pf3.order;
+    const [itemA, itemB] = [idA, idB].map((id) => (pf.items || []).find((it) => it.id === id));
+    const lastOfRound = (it, roundId) => (it && it.sessions || []).filter((s) => s.round === roundId).slice(-1)[0];
+    let drawn = null;
+    while (pf.pf3.cmpUpTo < pf.pf3.round) {
+      const roundDef = PARFUM_ROUNDS[pf.pf3.cmpUpTo];
+      if (!lastOfRound(itemA, roundDef.id) || !lastOfRound(itemB, roundDef.id)) { pf.pf3.cmpUpTo += 1; continue; }
+      const pair = [
+        { id: idA, num: pf.pf3.nums[0], name: pf.pf3.names[0] },
+        { id: idB, num: pf.pf3.nums[1], name: pf.pf3.names[1] },
+      ];
+      drawn = { activity: pf, action: { ...matAction, id: "x_pf_direct_cmp",
+        text: pair[0].name, baseText: "comparer",
+        pfamFamily: dominantFamille(itemA), pfamPair: pair, pfamRoundId: roundDef.id } };
+      break;
+    }
+    if (drawn) return resolveDraw(drawn, log);
+  }
+  if (pf.pf3.round >= PARFUM_ROUNDS.length) {
+    // deviner puis couleur en fin de cycle (08/08, 16/08-i — voir l'ancienne
+    // note dans pickAging pour le détail) ; sautée tant que PARFUM_BLIND est faux.
+    if (PARFUM_BLIND && !pf.pf3.guessed) {
+      return resolveDraw({ activity: pf, action: { ...matAction,
+        text: `avant de savoir — ${numList}`, pf3nums: pf.pf3.nums,
+        parfumGuess: true, desc: "un nom, une famille, ou rien — ce qui te vient. la réponse arrive juste après." } }, log);
+    }
+    if (!pf.pf3.revealed) {
+      const colored = pf.pf3.colored || [];
+      const cIdx = pf.pf3.order.findIndex((id) => !colored.includes(id));
+      if (cIdx >= 0) {
+        return resolveDraw({ activity: pf, action: { ...matAction, id: "x_pf_couleur",
+          text: pf.pf3.names[cIdx], baseText: "couleur", itemId: pf.pf3.order[cIdx],
+          parfumColor: true, pfColorName: pf.pf3.names[cIdx],
+          desc: "quelle couleur est cette matière ? drag = teinte, tap = saturation, tap = garder. ne rien toucher + tap-tap = pas de couleur." } }, log);
+      }
+      pf.pf3.revealed = true;
+    }
+    return null;
+  }
+  // round courant, sans fenêtre horaire (10/09, voir la note en tête de
+  // fonction) — sauf "final" (rappel), qui garde sa contrainte de jour logique.
+  const roundDef = PARFUM_ROUNDS[pf.pf3.round];
+  if (roundDef.minHoursSincePrep === "nextDay") {
+    const daysSince = daysBetween(keyOf(logicalNow(new Date(pf.pf3.prepTs))), todayKey());
+    if (daysSince < 1) return null;
+  }
+  const label = PARFUM_BLIND ? `#${pf.pf3.nums[pf.pf3.doneInRound]}` : pf.pf3.names[pf.pf3.doneInRound];
+  return resolveDraw({ activity: pf, action: { ...matAction,
+    text: label, baseText: roundDef.label,
+    itemId: pf.pf3.order[pf.pf3.doneInRound], parfumRound: roundDef.id } }, log);
+}
 function pickAging(activities, log, place, options = {}) {
   const { avoidId = null, relax = false } = options;
   // vaisselle: force immediately after the cook that opened the debt (Maxence
@@ -1869,169 +1963,15 @@ function pickAging(activities, log, place, options = {}) {
     const grille = su && (su.actions || []).find((x) => x.id === "x_su_grille");
     if (su && grille && placeOkW(grille.where || su.where, place)) return resolveDraw({ activity: su, action: grille }, log);
   }
-  // parfum — 3 matières/jour : forcé jusqu'à résolution des 3, même idée que
-  // vaisselle/anki/sudoku ci-dessus mais sur un état (pas juste "dernier logué") —
-  // sinon le tirage pondéré pourrait ne jamais le proposer avant que Maxence sorte
-  // de chez lui (retour du 01/08 sur la 1ère version qui laissait ça au hasard).
-  // `pf.pf3` porte le tirage du jour (voir pickItemsLRU ci-dessus) ; deux
-  // acquittements l'encadrent — prepAcked (a vu la liste des 3 à préparer) et
-  // revealed (a vu la correspondance finale) — sans quoi le forçage boirait à
-  // l'infini sur la même carte (rien ne progresse "count" tant qu'on n'a pas
-  // vraiment noté une matière). Le nom (`.text`) s'affiche directement sur les
-  // écrans de prépa/évaluation depuis que PARFUM_BLIND est à faux (08/08, Maxence :
-  // on fonctionne avec les noms pour l'instant) — le mode numéro-anonyme d'origine
-  // (07/08 : "le numéro doit être celui écrit sur la bouteille") reste codé plus
-  // bas derrière ce flag, gardé de côté. Un rejet (avoidId) fait retomber sur le
-  // tirage normal pour ce tour-là, comme les autres forçages ci-dessus.
-  if (avoidId !== "a_parfum_explo") {
-    const pf = activities.find((x) => x.id === "a_parfum_explo");
-    if (pf) {
-      const matAction = (pf.actions || []).find((x) => x.id === "x_pf_matiere");
-      // garde-fou numéros (08/08) : le protocole entier repose sur `.num`, le numéro
-      // écrit à la main sur la bouteille. Un pool chargé depuis un catalogue antérieur
-      // à leur ajout n'en a pas — sans ce garde-fou l'app afficherait « #undefined »
-      // sur les 4×3 écrans. Dans ce cas on ne force rien : x_pf_matiere reste tirable
-      // normalement (comportement d'avant le protocole), et un rechargement du
-      // catalogue rétablit le tout.
-      const numbered = (pf.items || []).some((it) => it.status === "doing" && it.num);
-      // home requis seulement pour tirer 3 nouvelles bouteilles et faire la
-      // mouillette (08/08, Maxence : "j'ai emporté les touches avec moi" — une fois
-      // faite, la mouillette voyage avec lui). Les checkpoints (cœur/fond/résiduel)
-      // et la révélation ne touchent plus aux bouteilles, donc forcent partout ;
-      // seuls le tirage et la prépa restent gatés par placeOk ci-dessous.
-      const atHome = placeOk(pf, place);
-      if (matAction && numbered && hasDoingItems(pf)) {
-        if ((!pf.pf3 || pf.pf3.revealed) && atHome) {
-          const picks = pickItemsLRU(pf, log, 2);
-          pf.pf3 = { order: picks.map((p) => p.id), nums: picks.map((p) => p.num), names: picks.map((p) => p.text),
-            prepAcked: false, prepTs: null, round: 0, doneInRound: 0, guessed: false, guesses: [], revealed: false, cmpUpTo: 0 };
-          if (options.seeded) options.seeded.push(pf);
-        }
-        if (pf.pf3 && !pf.pf3.revealed) {
-        const numList = pf.pf3.nums.map((n) => `#${n}`).join(" · ");
-        const nameList = pf.pf3.names.join(" · ");
-        if (!pf.pf3.prepAcked) {
-          if (atHome) {
-            return resolveDraw({ activity: pf, action: { ...matAction,
-              text: `aujourd'hui : ${PARFUM_BLIND ? numList : nameList}`,
-              parfumPrep: true, desc: "prépare une mouillette pour chacune de ces 2 bouteilles, puis reviens noter." } }, log);
-          }
-        } else if (pf.pf3.cmpUpTo < pf.pf3.round) {
-          // comparer — répété à CHAQUE round (16/08 v1 → v2, Maxence : "c'est capital
-          // de le faire à chaque round" — la courbe de la relation compte autant que
-          // la relation : deux matières à égalité en tête peuvent diverger en fond,
-          // exactement ce que la tenue mesure en parfumerie). cmpUpTo = index du
-          // dernier round déjà comparé ; round a déjà avancé dès que les 2 blottes de
-          // CE round sont notées (voir submitComment), donc cmpUpTo<round = un vs en
-          // attente. Boucle comme l'expiration ci-dessous : si les 2 sessions du round
-          // manquent (fenêtre ratée sans capture), on saute ce round sans carte plutôt
-          // qu'un vs vide — coûte un tour au pire, se rattrape au tirage suivant.
-          const [idA, idB] = pf.pf3.order;
-          const [itemA, itemB] = [idA, idB].map((id) => (pf.items || []).find((it) => it.id === id));
-          const lastOfRound = (it, roundId) => (it && it.sessions || []).filter((s) => s.round === roundId).slice(-1)[0];
-          let drawn = null;
-          while (pf.pf3.cmpUpTo < pf.pf3.round) {
-            const roundDef = PARFUM_ROUNDS[pf.pf3.cmpUpTo];
-            if (!lastOfRound(itemA, roundDef.id) || !lastOfRound(itemB, roundDef.id)) { pf.pf3.cmpUpTo += 1; continue; }
-            const pair = [
-              { id: idA, num: pf.pf3.nums[0], name: pf.pf3.names[0] },
-              { id: idB, num: pf.pf3.nums[1], name: pf.pf3.names[1] },
-            ];
-            // 16/08-q (Maxence, dernier réglage du jour : "on remet COMPARER à la place
-            // d'intensité... on met intensité ou autre sous la seconde matière, avec les
-            // points de navigation en dessous") — "comparer" REVIENT dans le slot baseText,
-            // statique (plus la facette dynamique, essayée en -o puis -n, retirée). Le
-            // TITRE principal reste le nom de la matière A (comme sur l'écran mesures) ;
-            // la facette EN COURS de comparaison vit maintenant sous la matière B, voir
-            // ParfumVsPicker. `text` reste un repli avant que pfVsHeroActive soit prêt.
-            // Pas de `desc` : pair[0].name prend la place de "détails".
-            drawn = { activity: pf, action: { ...matAction, id: "x_pf_direct_cmp",
-              text: pair[0].name, baseText: "comparer",
-              // famille de la vraie paire tirée (04/09, plus de programme par
-              // semaine — voir pickItemsLRU), pas une famille calculée à part.
-              pfamFamily: dominantFamille(itemA), pfamPair: pair, pfamRoundId: roundDef.id } };
-            break;
-          }
-          if (drawn) return resolveDraw(drawn, log);
-        } else if (pf.pf3.round >= PARFUM_ROUNDS.length) {
-          // le test (08/08). Avant, la fin d'un cycle était une révélation passive :
-          // l'app affichait la réponse, il la lisait. C'est de l'encodage sans
-          // récupération — or c'est la récupération qui fixe (testing effect), et
-          // c'est exactement ce qu'il s'est inventé tout seul le 03/08 hors protocole
-          // (« je pense que c'est l'opoponax… c'est bien le black opoponax »). Une
-          // carte s'intercale donc avant la révélation : il pose un nom sur chaque
-          // numéro. Facultatif, jamais bloquant — laisser vide passe, et rien n'est
-          // noté ni jugé (voir submitParfumGuess). Même pour une matière jamais
-          // sentie, se forcer à une hypothèse fait mieux retenir la vraie réponse.
-          // Sautée tant que PARFUM_BLIND est faux (08/08) : deviner un nom n'a plus
-          // de sens quand le nom est déjà affiché depuis le premier écran.
-          if (PARFUM_BLIND && !pf.pf3.guessed) {
-            return resolveDraw({ activity: pf, action: { ...matAction,
-              text: `avant de savoir — ${numList}`, pf3nums: pf.pf3.nums,
-              parfumGuess: true, desc: "un nom, une famille, ou rien — ce qui te vient. la réponse arrive juste après." } }, log);
-          }
-          // couleur (16/08-i) — remplace la carte "révélé", devenue inutile depuis
-          // que les noms sont affichés dès le premier écran (Maxence : "enlever le
-          // stage révélé complètement inutile maintenant"). À la place, la fin de
-          // cycle donne une COULEUR à chaque matière (drag teinte → tap → drag
-          // saturation, le nom prend la couleur en direct) : un marqueur de plus
-          // dans la base, pour des associations d'un autre ordre à terme. Une carte
-          // par matière ; la 2e validée clôt le cycle (revealed, posé proprement
-          // par submitParfumColor — le fallback in-place ci-dessous ne sert que si
-          // un vieux pf3 traînait sans passer par la carte).
-          if (!pf.pf3.revealed) {
-            const colored = pf.pf3.colored || [];
-            const cIdx = pf.pf3.order.findIndex((id) => !colored.includes(id));
-            if (cIdx >= 0) {
-              return resolveDraw({ activity: pf, action: { ...matAction, id: "x_pf_couleur",
-                text: pf.pf3.names[cIdx], baseText: "couleur", itemId: pf.pf3.order[cIdx],
-                parfumColor: true, pfColorName: pf.pf3.names[cIdx],
-                desc: "quelle couleur est cette matière ? drag = teinte, tap = saturation, tap = garder. ne rien toucher + tap-tap = pas de couleur." } }, log);
-            }
-            pf.pf3.revealed = true;
-          }
-        } else {
-          // Boucle d'expiration (08/08, voir la note sur PARFUM_ROUNDS) : avant de
-          // proposer le round courant, on saute en silence ceux dont la fenêtre est
-          // fermée — plusieurs à la fois si l'app est restée fermée un moment.
-          // L'usage normal, c'est l'app ouverte plusieurs fois par jour ; ce cas est
-          // l'EXCEPTION qu'on gère proprement, pas la norme qu'on conçoit. Rien
-          // n'est rattrapé : les matières pas notées à temps restent "non évaluées"
-          // (aucune entrée sessions[] pour ce round), pf.pf3.round avance quand même.
-          // En sortie de boucle : soit une fenêtre est OUVERTE (carte proposée ici),
-          // soit les 4 rounds sont dépassés — ce tirage-ci retombe sur le tirage
-          // normal sans carte parfum (coûte un tour au pire), le PROCHAIN tirage
-          // retombera dans le bloc guess/couleur au-dessus puisque round >= length.
-          while (pf.pf3.round < PARFUM_ROUNDS.length) {
-            const roundDef = PARFUM_ROUNDS[pf.pf3.round];
-            const isNextDay = roundDef.minHoursSincePrep === "nextDay";
-            const hoursSince = (realNow().getTime() - pf.pf3.prepTs) / 3600000;
-            const daysSince = isNextDay ? daysBetween(keyOf(logicalNow(new Date(pf.pf3.prepTs))), todayKey()) : null;
-            const floorOk = isNextDay ? daysSince >= 1 : hoursSince >= roundDef.minHoursSincePrep;
-            if (!floorOk) break; // pas encore l'heure — retombe sur le tirage normal.
-            const stillOpen = isNextDay ? daysSince < 2 : hoursSince < roundDef.maxHoursSincePrep + PARFUM_ROUND_GRACE_HOURS;
-            if (stillOpen) {
-              // texte = la matière elle-même (16/08-l, Maxence : "nomme bien la matière
-              // première en cours au-dessus de la ligne principale") — avant, le nom
-              // était noyé au milieu d'une phrase ("sentir matières premières — ouverture
-              // — orris imperial (1/2)"). baseText = juste le round, sans le "· 1/2"
-              // (16/08-m, Maxence : "simplifions... on garde juste 'ouverture' ou autre
-              // step sans 1/2"). Pas de `desc` ici non plus (même tour) — le toggle
-              // "détails" qu'il portait est remplacé par le nom de la mesure/facette en
-              // cours, affiché au même endroit (voir pfMeasureActive/pfCur dans le JSX).
-              const label = PARFUM_BLIND ? `#${pf.pf3.nums[pf.pf3.doneInRound]}` : pf.pf3.names[pf.pf3.doneInRound];
-              return resolveDraw({ activity: pf, action: { ...matAction,
-                text: label, baseText: roundDef.label,
-                itemId: pf.pf3.order[pf.pf3.doneInRound], parfumRound: roundDef.id } }, log);
-            }
-            // fenêtre fermée (ratée) : round suivant, sans carte pour celui-ci.
-            pf.pf3.round += 1; pf.pf3.doneInRound = 0;
-          }
-        }
-        }
-      }
-    }
-  }
+  // parfum — retiré du forçage automatique le 10/09 (voir resolveParfumManual,
+  // déclenché depuis submitFreeLog en tapant "parfum" dans le log libre). Le
+  // forçage ci-dessous hijackait CHAQUE tirage tant que le cycle en cours
+  // n'était pas fini (5 checkpoints + reveal) — Maxence : "friction à ouvrir
+  // l'app chez moi", et exactement le mécanisme nommé dans le diagnostic du
+  // décrochage d'usage mi-août (28/08 : "la certitude que le parfum tombe en
+  // premier au réveil bloque l'ouverture de l'app"). Reminders (scheduleReminder,
+  // posés par ackParfum à la prépa) restent inchangés — ils continuent de
+  // rappeler sans plus rien imposer.
   let rows = buildLotteryRows(activities, log, place, relax).filter((r) => r.activity.id !== avoidId);
   if (!rows.length) return null;
   // focaccia/garniture: hour-of-day deadline guarantee (see
@@ -4694,11 +4634,13 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
     if (Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy) * 1.5) go(dx < 0 ? 1 : -1);
   };
 
-  // parfum prep/reveal ack — flips the one flag on pf.pf3 and moves straight to
-  // the next forced card (see pickAging); no session, no log entry. Mutates the
-  // activity object in place (same reference trick as pickAging's seedTs) so the
-  // immediately-following propose() sees the flag already set even though
-  // setActivities' own re-render hasn't landed yet.
+  // parfum prep/reveal ack — flips the one flag on pf.pf3 ; no session, no log
+  // entry. Mutates the activity object in place (same reference trick as
+  // resolveParfumManual) so the immediately-following propose() sees the flag
+  // already set even though setActivities' own re-render hasn't landed yet.
+  // propose() ci-dessous retombe sur le tirage normal (10/09, plus de forçage
+  // automatique — voir resolveParfumManual) : la suite du cycle parfum n'arrive
+  // plus qu'en retapant "parfum" dans le log libre, jamais enchaînée toute seule.
   const ackParfum = async (flag) => {
     const pf = activities.find((a) => a.id === "a_parfum_explo");
     if (pf && pf.pf3) {
@@ -5486,6 +5428,27 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
       const normName = (s) => s.toLowerCase().trim().replace(/[—–-]/g, " ").replace(/\s+/g, " ").trim();
       const deaccent = (s) => s.normalize("NFD").replace(/[̀-ͯ]/g, "");
       let typedNorm = normName(text);
+      // "parfum" en log libre (10/09, voir resolveParfumManual) : déclenche à la
+      // demande ce qui était avant forcé automatiquement sur CHAQUE tirage —
+      // tire la paire du jour si besoin (et qu'il est chez lui), sinon avance au
+      // prochain geste du cycle en cours (prépa/comparer/deviner/couleur/round).
+      // Ambigu avec les 2 activités parfum du catalogue (voir la note un peu
+      // plus bas sur le préfixe) — vérifié avant tout le reste, jamais à la place.
+      if (typedNorm === "parfum") {
+        const draw = resolveParfumManual(activities, log, place);
+        setActivities((prev) => [...prev]);
+        setLogText("");
+        if (draw) {
+          proposedAtRef.current = Date.now();
+          setRunning(false); setElapsedMs(0);
+          setCurrent(draw); setStage("proposal");
+          setMsg("parfum proposé");
+        } else {
+          setMsg("rien côté parfum pour l'instant (pas chez toi pour tirer, ou déjà tout noté)");
+        }
+        setTimeout(() => setMsg(""), 2400);
+        return;
+      }
       // "0" en fin de texte (Maxence 21/08) : force le mode "de zéro" sur les
       // activités à picker de-zéro/continuer (free poetry, minuscules) — sans le
       // "0", "continuer" par défaut. Remplace le tirage 50/50 sur ce chemin
