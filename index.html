@@ -1917,7 +1917,17 @@ function resolveParfumManual(activities, log, place) {
   const roundDef = PARFUM_ROUNDS[pf.pf3.round];
   if (roundDef.minHoursSincePrep === "nextDay") {
     const daysSince = daysBetween(keyOf(logicalNow(new Date(pf.pf3.prepTs))), todayKey());
-    if (daysSince < 1) return null;
+    if (daysSince < 1) return null; // pas encore le jour logique suivant.
+    // plafond de 36h (11/09, M. : "à moins que ça fasse vraiment trop longtemps
+    // genre + de 36h") — passé ce délai le rappel n'a plus de sens (mémoire déjà
+    // reconsolidée ou perdue autrement), le round reste "non évalué" (aucune
+    // session), le cycle se clôt et une paire fraîche est proposée directement
+    // à la place plutôt qu'un rappel périmé.
+    const hoursSince = (realNow().getTime() - pf.pf3.prepTs) / 3600000;
+    if (hoursSince > 36) {
+      pf.pf3.revealed = true;
+      return resolveParfumManual(activities, log, place);
+    }
   }
   const label = PARFUM_BLIND ? `#${pf.pf3.nums[pf.pf3.doneInRound]}` : pf.pf3.names[pf.pf3.doneInRound];
   return resolveDraw({ activity: pf, action: { ...matAction,
@@ -3416,11 +3426,16 @@ function Throughline() {
   // directly while the tab is alive; (2) the due timestamp is persisted, so if the
   // tab was closed past the delay, the very next time the app becomes visible it
   // fires immediately instead of silently having missed it.
-  const fireReminder = async (text) => {
+  const fireReminder = async (text, data = null) => {
     try {
       if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
       const reg = "serviceWorker" in navigator ? await navigator.serviceWorker.ready.catch(() => null) : null;
-      if (reg && reg.showNotification) reg.showNotification("balance", { body: text, icon: "icon-192.png" });
+      // `data` (11/09, M. : "si on clique sur la notif ça lance la step en
+      // question") — lu par sw.js sur notificationclick, jamais par cette page
+      // directement (la notif système vit hors du DOM). Sans service worker actif
+      // (fallback `new Notification`), le clic ne fait que remonter le premier
+      // client focusable, sans data — dégradation silencieuse, pas une erreur.
+      if (reg && reg.showNotification) reg.showNotification("balance", { body: text, icon: "icon-192.png", data });
       else new Notification("balance", { body: text });
     } catch {}
   };
@@ -3445,12 +3460,12 @@ function Throughline() {
     const now = Date.now();
     const due = all.filter((r) => now >= r.dueTs);
     if (!due.length) return;
-    due.forEach((r) => fireReminder(r.text));
+    due.forEach((r) => fireReminder(r.text, r.data || null));
     const rest = all.filter((r) => now < r.dueTs);
     saveJSON(NS("tlx_reminder"), rest);
     armNextReminder(rest);
   };
-  const scheduleReminder = async (text, afterMin, key = null) => {
+  const scheduleReminder = async (text, afterMin, key = null, data = null) => {
     // same piggyback-on-a-real-tap pattern as devicemotion's permission grab in
     // start() above — no dedicated prompt/button.
     if (typeof Notification !== "undefined" && Notification.permission === "default") {
@@ -3459,7 +3474,7 @@ function Throughline() {
     if (afterMin <= 0) return;
     const dueTs = Date.now() + afterMin * 60000;
     const rest = (await readReminders()).filter((r) => !key || r.key !== key);
-    saveJSON(NS("tlx_reminder"), [...rest, { text, dueTs, key }]);
+    saveJSON(NS("tlx_reminder"), [...rest, { text, dueTs, key, data }]);
     setTimeout(checkDueReminder, afterMin * 60000 + 500);
   };
   const cancelReminder = async (key) => {
@@ -3473,7 +3488,7 @@ function Throughline() {
       if (!all.length) return;
       const now = Date.now();
       const due = all.filter((r) => now >= r.dueTs);
-      due.forEach((r) => fireReminder(r.text));
+      due.forEach((r) => fireReminder(r.text, r.data || null));
       const rest = all.filter((r) => now < r.dueTs);
       if (due.length) saveJSON(NS("tlx_reminder"), rest);
       armNextReminder(rest);
@@ -4657,9 +4672,14 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
         // déjà documenté au-dessus, sur readReminders).
         const label = PARFUM_BLIND ? pf.pf3.nums.map((n) => `#${n}`).join(" · ") : pf.pf3.names.join(" · ");
         const blindSuffix = PARFUM_BLIND ? " à l'aveugle" : "";
-        await scheduleReminder(`parfum — légers : reviens noter ${label}${blindSuffix}`, 30, "parfum_m30");
-        await scheduleReminder(`parfum — transition : reviens noter ${label}${blindSuffix}`, 120, "parfum_h2");
-        await scheduleReminder(`parfum — fond : reviens noter ${label}${blindSuffix}`, 360, "parfum_h6");
+        // data: {type:"parfum"} (11/09, M. : "si on clique sur la notif ça lance
+        // la step en question") — lu par sw.js sur notificationclick, remonté à
+        // cette page via postMessage, déclenche triggerParfumManual comme s'il
+        // avait tapé "parfum". Un seul type pour les 3 : le round courant est
+        // déterministe (pf.pf3.round), pas besoin de distinguer laquelle a sonné.
+        await scheduleReminder(`parfum — légers : reviens noter ${label}${blindSuffix}`, 30, "parfum_m30", { type: "parfum" });
+        await scheduleReminder(`parfum — transition : reviens noter ${label}${blindSuffix}`, 120, "parfum_h2", { type: "parfum" });
+        await scheduleReminder(`parfum — fond : reviens noter ${label}${blindSuffix}`, 360, "parfum_h6", { type: "parfum" });
       }
       setActivities((arr) => [...arr]);
     }
@@ -4676,6 +4696,48 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
     if (pf) { pf.pf3 = null; setActivities((arr) => [...arr]); }
     propose(log, activities, false, "a_parfum_explo");
   };
+  // parfum — même déclenchement que taper "parfum" dans le log libre (10/09,
+  // voir resolveParfumManual), factorisé pour être aussi appelable depuis un
+  // clic sur la notif (11/09, M. : "si on clique sur la notif ça lance la step
+  // en question") — un seul chemin, jamais deux logiques à maintenir.
+  const triggerParfumManual = () => {
+    const draw = resolveParfumManual(activities, log, place);
+    setActivities((prev) => [...prev]);
+    if (draw) {
+      proposedAtRef.current = Date.now();
+      setRunning(false); setElapsedMs(0);
+      setCurrent(draw); setStage("proposal");
+      setMsg("parfum proposé");
+    } else {
+      setMsg("rien côté parfum pour l'instant (pas chez toi pour tirer, ou déjà tout noté)");
+    }
+    setTimeout(() => setMsg(""), 2400);
+  };
+  // notificationclick (11/09) : sw.js poste ce message au client déjà ouvert
+  // (postMessage) et, en repli si l'app était fermée, ouvre "./?notif=parfum" —
+  // les deux chemins convergent ici. Query param nettoyé après coup (replaceState)
+  // pour qu'un simple refresh ne re-déclenche pas.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("notif") === "parfum") {
+      triggerParfumManual();
+      params.delete("notif");
+      const clean = window.location.pathname + (params.toString() ? "?" + params.toString() : "");
+      window.history.replaceState(null, "", clean);
+    }
+    const onMessage = (e) => {
+      if (e.data && e.data.type === "tlx-notification-click" && e.data.data && e.data.data.type === "parfum") {
+        triggerParfumManual();
+      }
+    };
+    if ("serviceWorker" in navigator) navigator.serviceWorker.addEventListener("message", onMessage);
+    return () => { if ("serviceWorker" in navigator) navigator.serviceWorker.removeEventListener("message", onMessage); };
+    // deps = [activities, log, place] (pas []) : sans ça onMessage fige la
+    // closure sur l'état du tout premier rendu (activities encore vide avant le
+    // chargement du catalogue) — un vrai clic sur la notif arrive toujours bien
+    // plus tard que ce premier rendu. Ré-abonner à chaque changement coûte peu
+    // (un simple add/removeEventListener) et garde toujours la dernière valeur.
+  }, [activities, log, place]);
   // couleur (16/08-i) — validation de la carte x_pf_couleur : écrit `color` {h,s}
   // sur l'item (marqueur de plus dans la base, jamais un jugement olfactif) et
   // avance le cycle ; la 2e matière colorée pose revealed → le prochain forçage
@@ -5435,18 +5497,8 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
       // Ambigu avec les 2 activités parfum du catalogue (voir la note un peu
       // plus bas sur le préfixe) — vérifié avant tout le reste, jamais à la place.
       if (typedNorm === "parfum") {
-        const draw = resolveParfumManual(activities, log, place);
-        setActivities((prev) => [...prev]);
         setLogText("");
-        if (draw) {
-          proposedAtRef.current = Date.now();
-          setRunning(false); setElapsedMs(0);
-          setCurrent(draw); setStage("proposal");
-          setMsg("parfum proposé");
-        } else {
-          setMsg("rien côté parfum pour l'instant (pas chez toi pour tirer, ou déjà tout noté)");
-        }
-        setTimeout(() => setMsg(""), 2400);
+        triggerParfumManual();
         return;
       }
       // "0" en fin de texte (Maxence 21/08) : force le mode "de zéro" sur les
@@ -5843,6 +5895,64 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
       }
     };
 
+    // parfum — 1 tirage manuel simulé par jour, un cycle complet (11/09, M. :
+    // "pour les simulations on compte toujours ça 1x par jour quoi un cycle
+    // complet") — depuis le passage au déclenchement manuel (10/09,
+    // resolveParfumManual), pickAging ne touche plus jamais cette activité,
+    // donc runBlock ci-dessus ne la tirerait plus jamais toute seule. Rejoue
+    // ici, une fois par jour simulé, ce que taper "parfum" ferait dans la vraie
+    // app : prépa (si chez lui et pas de cycle en cours) puis autant de
+    // rounds/comparaisons/couleur que resolveParfumManual en redonne pour CE
+    // jour — jusqu'à ce qu'il n'y ait plus rien (rappel pas encore dû, ou pas
+    // chez lui). `_debugDate` fixé en tête pour que les vérifs de jour logique
+    // de resolveParfumManual (rappel J+1) lisent bien CE jour simulé, pas l'état
+    // laissé par runBlock (fin de fenêtre, déjà sur le jour suivant à 8h).
+    const completeParfumDay = (dayKey, place) => {
+      const pf = acts.find((a) => a.id === "a_parfum_explo");
+      if (!pf) return;
+      _debugDate = fromKey(dayKey); _debugDate.setHours(9, 0, 0, 0);
+      const now = new Date(_debugDate);
+      let guard = 0;
+      while (guard++ < 20) {
+        const draw = resolveParfumManual(acts, logArr, place);
+        if (!draw) break;
+        const action = draw.action;
+        if (action.parfumPrep) {
+          pf.pf3.prepAcked = true; pf.pf3.prepTs = now.getTime();
+          continue;
+        }
+        if (action.id === "x_pf_direct_cmp") {
+          // comparer PASSE par begin()→finish()→submitComment() dans la vraie
+          // app (pas un no-op comme prépa/couleur/deviner) — une vraie entrée
+          // "done" doit être loggée, sinon le récap du simulateur sous-compte
+          // les vraies sessions parfum.
+          const [pa, pb] = action.pfamPair;
+          const itA = (pf.items || []).find((x) => x.id === pa.id);
+          const itB = (pf.items || []).find((x) => x.id === pb.id);
+          if (itA) itA.pfamCompares = [...(itA.pfamCompares || []), { ts: now.getTime(), against: pb.id, otherNum: pb.num, otherName: pb.name }];
+          if (itB) itB.pfamCompares = [...(itB.pfamCompares || []), { ts: now.getTime(), against: pa.id, otherNum: pa.num, otherName: pa.name }];
+          pf.pf3.cmpUpTo += 1;
+          logArr.push({ id: uid(), date: dayKey, ts: now.getTime(), type: "done", activityId: pf.id, actionId: action.id, actionText: "comparer", min: pf.dur || 10, sec: (pf.dur || 10) * 60, domain: pf.domain });
+          continue;
+        }
+        if (action.parfumColor) {
+          pf.pf3.colored = [...(pf.pf3.colored || []), action.itemId];
+          if (pf.pf3.colored.length >= (pf.pf3.order || []).length) pf.pf3.revealed = true;
+          continue;
+        }
+        if (action.parfumGuess) { pf.pf3.guessed = true; continue; } // PARFUM_BLIND off, ne devrait pas se produire
+        if (action.parfumRound) {
+          const it = (pf.items || []).find((x) => x.id === action.itemId);
+          if (it) it.sessions = [...(it.sessions || []), { ts: now.getTime(), round: action.parfumRound }];
+          logArr.push({ id: uid(), date: dayKey, ts: now.getTime(), type: "done", activityId: pf.id, actionId: action.id, actionText: action.baseText, min: pf.dur || 10, sec: (pf.dur || 10) * 60, domain: pf.domain, itemId: action.itemId });
+          if (pf.pf3.doneInRound === 0) pf.pf3.doneInRound = 1;
+          else { pf.pf3.doneInRound = 0; pf.pf3.round += 1; }
+          continue;
+        }
+        break; // forme d'action non prévue — mieux vaut sortir que boucler à l'infini.
+      }
+    };
+
     let day = _debugDate ? new Date(_debugDate) : new Date();
     day.setHours(0, 0, 0, 0);
     const rate = drawsPerDay > 0 ? drawsPerDay : 13;
@@ -5850,7 +5960,9 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
     for (let d = 0; d < days; d++) {
       const cur = new Date(day); cur.setDate(cur.getDate() + d);
       const cumAfter = Math.floor(rate * (d + 1));
-      runBlock(cur, cumAfter - cumBefore, isWorkShift(new Date(cur.getFullYear(), cur.getMonth(), cur.getDate(), 21, 0, 0)) ? "work" : "home");
+      const placeToday = isWorkShift(new Date(cur.getFullYear(), cur.getMonth(), cur.getDate(), 21, 0, 0)) ? "work" : "home";
+      runBlock(cur, cumAfter - cumBefore, placeToday);
+      completeParfumDay(keyOf(cur), placeToday);
       cumBefore = cumAfter;
     }
 
@@ -5973,6 +6085,24 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
           for (const id of todo) localStorage.setItem(flagKey(id), "1");
         }
       }
+      // reset ponctuel des paires déjà faites (11/09, demande M. — la mécanique de
+      // tirage de pickItemsLRU a changé le 04-05/09, les paires comparées sous
+      // l'ancien algo ne représentent plus rien pour le nouveau) : même idiome que
+      // resetPoolSessions ci-dessus, mais NE touche que `pfamCompares` — sessions,
+      // ratings, trials/interval/due (mémoire sensorielle réelle par matière)
+      // restent intacts, seul l'historique des PAIRES déjà comparées repart à zéro
+      // ("comme si on n'avait jamais rien tiré", M.). Flag localStorage dédié pour
+      // ne pas rejouer le reset à chaque resync ultérieur du même fichier.
+      if (isCatalogue && Array.isArray(o.resetPfamCompares) && o.resetPfamCompares.length) {
+        const flagKey = (id) => NS("tlx_pfamReset_" + id);
+        const todo = o.resetPfamCompares.filter((id) => !localStorage.getItem(flagKey(id)));
+        if (todo.length) {
+          nextActs = nextActs.map((a) => (todo.includes(a.id)
+            ? { ...a, items: (a.items || []).map((it) => ({ ...it, pfamCompares: [] })) }
+            : a));
+          for (const id of todo) localStorage.setItem(flagKey(id), "1");
+        }
+      }
       setActivities(nextActs);
       // un catalogue ne restaure jamais d'historique : son `log` est vide par
       // construction, et le vécu local est justement ce qu'on protège ici.
@@ -6076,7 +6206,7 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
         const sibling = siblingId ? activities.find((x) => x.id === siblingId) : null;
         return { lanes: laneCounts(a), missing: missingSlots(a), item: await generateOneItemViaClaude(key, a, lane, log, sibling, register || null) };
       },
-      laneCounts, missingSlots, itemStep, propose, ensureRecoItem,
+      laneCounts, missingSlots, itemStep, propose, ensureRecoItem, applyImport, triggerParfumManual,
       // pose directement une proposition sur UNE activité précise, sans dépendre
       // du planificateur horaire (quotas/quart de travail) — pour les démos en
       // direct. Ne joue que l'étape "proposal" ; begin/finish/submitComment
@@ -6989,6 +7119,7 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
                             <input className="in" value={comment}
                               autoComplete="off" name="comment-done"
                               onChange={(e) => setComment(e.target.value.toLowerCase())}
+                              onKeyDown={(e) => { if (e.key === "Enter") submitComment(); }}
                               style={{ fontFamily: "var(--mono)", fontSize: 13, textAlign: "center", display: "block", color: C.text }} />
                             {!comment && (
                               <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: COMMENT_HINT_MODE === "cursor" ? "flex-start" : "center", justifyContent: "center", gap: 6, pointerEvents: "none", fontFamily: "var(--mono)", fontSize: 13, color: C.faint }}>

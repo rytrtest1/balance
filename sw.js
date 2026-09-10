@@ -1,6 +1,6 @@
 // throughline service worker — makes the app work offline after first load.
 // Bump CACHE when you change index.html or assets so phones pick up the update.
-const CACHE = "throughline-v93";
+const CACHE = "throughline-v94";
 const CORE = [
   "./",
   "./index.html",
@@ -27,6 +27,27 @@ self.addEventListener("activate", (e) => {
     caches.keys().then((keys) =>
       Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k)))
     ).then(() => self.clients.claim())
+  );
+});
+
+// 11/09 : clic sur une notif parfum (data: {type:"parfum"}, voir fireReminder
+// dans index.html) — la notif système vit hors du DOM, donc le seul canal vers
+// la page est postMessage à un client déjà ouvert, ou une query param sur une
+// fenêtre nouvellement ouverte (le postMessage ci-dessous n'atteindrait jamais
+// une page qui n'existe pas encore). Les deux convergent dans index.html.
+self.addEventListener("notificationclick", (e) => {
+  e.notification.close();
+  const data = e.notification.data || {};
+  e.waitUntil(
+    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((list) => {
+      for (const c of list) {
+        c.postMessage({ type: "tlx-notification-click", data });
+        if ("focus" in c) return c.focus();
+      }
+      if (self.clients.openWindow) {
+        return self.clients.openWindow(data.type === "parfum" ? "./?notif=parfum" : "./");
+      }
+    })
   );
 });
 
