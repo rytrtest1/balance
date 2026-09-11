@@ -2665,6 +2665,35 @@ ${isCuisine ? `Utilise la recherche web pour vérifier que ce plat est une combi
   throw new Error(`aucun item valide après 3 tentatives — ${lastReason}`);
 }
 
+// filet de sécurité recommandeur (11/09) — rejoue le même refresh de profil +
+// réappro qu'un `done` normal déclenche en arrière-plan, pour un créneau resté en
+// attente parce que l'app a été fermée avant la fin de cet appel (voir le
+// commentaire "backgrounded tab getting killed... common on phones" sur le
+// chargement de tlx_flow) : confirmé en sandbox le 11/09, un reload ~300ms après
+// avoir validé une note laisse status+rating écrits (synchrone) mais aucun
+// nouvel item ni profil rafraîchi (l'IIFE async n'a pas eu le temps de finir).
+// N'écrit rien lui-même — même contrat que __tlx.generateOneItem — pour rester
+// appelable aussi bien depuis submitComment() que depuis le filet au chargement.
+async function retryRecoSync(key, aid, entry, activitiesSnapshot, log) {
+  const act = activitiesSnapshot.find((a) => a.id === aid);
+  if (!act) throw new Error("activité introuvable");
+  const { lane, register } = entry;
+  if (MUSIC_PROFILE_ACTIVITY_IDS.includes(aid)) {
+    const siblingId = aid === "a_ecoute_titre" ? "a_ecoute_album" : "a_ecoute_titre";
+    const sibling = activitiesSnapshot.find((a) => a.id === siblingId) || act;
+    const titreAct = aid === "a_ecoute_titre" ? act : sibling;
+    const albumAct = aid === "a_ecoute_album" ? act : sibling;
+    const { note } = await refreshMusicProfileViaClaude(key, titreAct, albumAct, log);
+    const targetAct = { ...(aid === "a_ecoute_titre" ? titreAct : albumAct), note };
+    const targetSibling = { ...(aid === "a_ecoute_titre" ? albumAct : titreAct), note };
+    const item = await generateOneItemViaClaude(key, targetAct, lane, log, targetSibling, null);
+    return { note, item, bothMusic: true };
+  }
+  const { note } = await refreshProfileViaClaude(key, act, log);
+  const item = await generateOneItemViaClaude(key, { ...act, note }, lane, log, null, register);
+  return { note, item, bothMusic: false };
+}
+
 // ---------- palette / css ----------
 const C = { bg: "#000000", text: "#ece9e3", mut: "#8a877f", faint: "#56544e", line: "#222226", soft: "#18181b", bone: "#d6cfbf" };
 const css = `
@@ -3669,6 +3698,56 @@ function Throughline() {
       setCurrent(p); setStage("proposal");
     }
   };
+  // filet de sécurité recommandeur (11/09, révisé — voir retryRecoSync) : si CETTE
+  // activité a un créneau resté en attente d'une session précédente interrompue
+  // avant la fin de l'appel (app fermée entre la validation d'une note et la fin
+  // du refresh profil + réappro — "common on phones", voir plus haut), le réparer
+  // AVANT de proposer quoi que ce soit — même principe que ensureRecoItem
+  // ci-dessus ("générer avant de montrer, jamais après"), étendu à "réparer avant
+  // de montrer". Se déclenche seulement quand CETTE activité revient dans la
+  // rotation (donc au rythme naturel de sa propre cadence — Titre 1x/jour, Album
+  // 1x/semaine — jamais une rafale au démarrage de l'app pour des créneaux pas
+  // encore concernés), pas à chaque ouverture de l'app comme un filet au boot.
+  const resolvePendingSync = async (p, logUse, actsUse, entry) => {
+    setMsg("mise à jour du profil…");
+    const key = (await store.get("tlx_apiKey")) || "";
+    const pendingKey = NS("tlx_recoPending");
+    if (!key) { setMsg(""); proposedAtRef.current = Date.now(); setCurrent(p); setStage("proposal"); return; }
+    try {
+      const { note, item, bothMusic } = await retryRecoSync(key, p.activity.id, entry, actsUse, logUse);
+      let fresh = { ...p.activity, note };
+      if (item) fresh = { ...fresh, items: [...(fresh.items || []), item] };
+      setActivities((arr) => arr.map((a2) => {
+        if (a2.id === p.activity.id) return fresh;
+        if (bothMusic && (a2.id === "a_ecoute_titre" || a2.id === "a_ecoute_album")) return { ...a2, note };
+        return a2;
+      }));
+      const p2 = JSON.parse(localStorage.getItem(pendingKey) || "{}");
+      delete p2[p.activity.id];
+      localStorage.setItem(pendingKey, JSON.stringify(p2));
+      const action = itemStep(fresh, logUse);
+      setMsg("");
+      proposedAtRef.current = Date.now();
+      setCurrent({ activity: fresh, action });
+      setStage("proposal");
+    } catch (e) {
+      // marque l'essai du jour pour ne pas retenter en rafale si l'activité
+      // revient dans la rotation à nouveau tout de suite (skip/redraw répétés) —
+      // même plafond que throughline-no-bulk-refill, appliqué ici par activité
+      // plutôt qu'au boot.
+      const p2 = JSON.parse(localStorage.getItem(pendingKey) || "{}");
+      if (p2[p.activity.id]) p2[p.activity.id] = { ...p2[p.activity.id], lastAttemptDate: todayKey() };
+      localStorage.setItem(pendingKey, JSON.stringify(p2));
+      setLog((L) => [...L, {
+        id: uid(), date: todayKey(), ts: realNow().getTime(), type: "note",
+        activityId: p.activity.id,
+        note: `[système] filet de sécurité — mise à jour du profil/pool échouée à nouveau — ${e && e.message ? e.message : "erreur inconnue"}`,
+      }]);
+      setMsg("");
+      proposedAtRef.current = Date.now();
+      setCurrent(p); setStage("proposal");
+    }
+  };
   const propose = (logUse = log, actsUse = activities, relax = false, avoidId = null) => {
     const pl = computePlace(); setPlace(pl); // place is read from the clock, not chosen
     // if every row is past its day/week cap right now, don't stop — relax and redraw
@@ -3688,16 +3767,26 @@ function Throughline() {
     // otherwise a reload before that row's first real completion would re-roll it.
     if (seeded.length) setActivities((prev) => [...prev]);
     setRunning(false); setElapsedMs(0);
-    // pool vide sur TOUS les couloirs (22/08, M. : "vérifier qu'on a bien un item
-    // dispo avant de lancer l'activité, sinon d'abord faire le call, et lancer
-    // l'activité une fois l'item obtenu") — resolveDraw retombe alors sur une
-    // action générique sans itemId (`!hasDoingItems`), qui casserait tout
-    // l'intérêt du recommandeur (aucun titre réel proposé). Plutôt que d'afficher
-    // ça, on génère UN item pour de vrai avant de proposer quoi que ce soit —
-    // jamais après coup.
-    if (p && p.activity.kind === "recommandeur" && !p.action?.itemId) {
-      ensureRecoItem(p, logUse, actsUse);
-      return;
+    if (p && p.activity.kind === "recommandeur") {
+      // créneau resté en attente d'une session interrompue AVANT cette activité
+      // (11/09, voir resolvePendingSync) — vérifié en premier, avant même de
+      // regarder si le pool est vide, puisque ça peut être la cause du "vide".
+      const stuckEntry = JSON.parse(localStorage.getItem(NS("tlx_recoPending")) || "{}")[p.activity.id];
+      if (stuckEntry && stuckEntry.lastAttemptDate !== todayKey()) {
+        resolvePendingSync(p, logUse, actsUse, stuckEntry);
+        return;
+      }
+      // pool vide sur TOUS les couloirs (22/08, M. : "vérifier qu'on a bien un item
+      // dispo avant de lancer l'activité, sinon d'abord faire le call, et lancer
+      // l'activité une fois l'item obtenu") — resolveDraw retombe alors sur une
+      // action générique sans itemId (`!hasDoingItems`), qui casserait tout
+      // l'intérêt du recommandeur (aucun titre réel proposé). Plutôt que d'afficher
+      // ça, on génère UN item pour de vrai avant de proposer quoi que ce soit —
+      // jamais après coup.
+      if (!p.action?.itemId) {
+        ensureRecoItem(p, logUse, actsUse);
+        return;
+      }
     }
     if (!p) { setCurrent(null); setStage("empty"); }
     else {
@@ -4375,34 +4464,29 @@ Réécris les observations en y intégrant ce qu'apporte ce commentaire — gard
         const consumedItem = (updatedActivity.items || []).find((it) => it.id === itemId);
         const consumedLane = consumedItem ? laneOf(consumedItem) : "core";
         const consumedRegister = consumedItem ? consumedItem.register || null : null;
+        // filet de sécurité (11/09, voir retryRecoSync) : marqueur qui survit à une
+        // fermeture/reload de l'app pendant l'appel qui suit — effacé dès que le
+        // refresh+réappro aboutit, sinon relu et retenté au prochain lancement.
+        const pendingKey = NS("tlx_recoPending");
+        const pending = JSON.parse(localStorage.getItem(pendingKey) || "{}");
+        // PAS de lastAttemptDate ici : ce premier essai vient d'une vraie séance, pas
+        // d'un rattrapage — le plafond 1x/jour ne doit compter que les rattrapages
+        // depuis le filet ci-dessous, sinon une interruption le soir bloquerait tout
+        // rattrapage jusqu'au lendemain au lieu du prochain lancement.
+        pending[aid] = { itemId, lane: consumedLane, register: consumedRegister, ts: Date.now() };
+        localStorage.setItem(pendingKey, JSON.stringify(pending));
         try {
-          if (MUSIC_PROFILE_ACTIVITY_IDS.includes(aid)) {
-            // profil partagé Titre+Album (17/08, révision post-simulation) : même
-            // goût musical, une seule synthèse sur les deux.
-            const siblingId = aid === "a_ecoute_titre" ? "a_ecoute_album" : "a_ecoute_titre";
-            const sibling = activities.find((a) => a.id === siblingId) || updatedActivity;
-            const titreAct = aid === "a_ecoute_titre" ? updatedActivity : sibling;
-            const albumAct = aid === "a_ecoute_album" ? updatedActivity : sibling;
-            const { note } = await refreshMusicProfileViaClaude(key, titreAct, albumAct, patchedLog);
-            setActivities((arr) => arr.map((a) => (a.id === "a_ecoute_titre" || a.id === "a_ecoute_album" ? { ...a, note } : a)));
-            const targetAct = { ...(aid === "a_ecoute_titre" ? titreAct : albumAct), note };
-            const targetSibling = { ...(aid === "a_ecoute_titre" ? albumAct : titreAct), note };
-            const item = await generateOneItemViaClaude(key, targetAct, consumedLane, patchedLog, targetSibling, null);
-            if (item) setActivities((arr) => arr.map((a) => (a.id === aid ? { ...a, items: [...(a.items || []), item] } : a)));
-          } else {
-            // même traitement que la branche musicale (21/08, homogénéisation) :
-            // Film et Cuisiner n'avaient ni retrait ni réapprovisionnement — seul
-            // le profil se réécrivait, donc leur pool ne pouvait jamais bouger.
-            const { note } = await refreshProfileViaClaude(key, updatedActivity, patchedLog);
-            const fresh = { ...updatedActivity, note };
-            setActivities((arr) => arr.map((a) => (a.id === aid ? fresh : a)));
-            const item = await generateOneItemViaClaude(key, fresh, consumedLane, patchedLog, null, consumedRegister);
-            if (item) setActivities((arr) => arr.map((a) => (a.id === aid ? { ...a, items: [...(a.items || []), item] } : a)));
-          }
+          const activitiesSnapshot = activities.map((a) => (a.id === aid ? updatedActivity : a));
+          const { note, item, bothMusic } = await retryRecoSync(key, aid, pending[aid], activitiesSnapshot, patchedLog);
+          if (bothMusic) setActivities((arr) => arr.map((a) => (a.id === "a_ecoute_titre" || a.id === "a_ecoute_album" ? { ...a, note } : a)));
+          else setActivities((arr) => arr.map((a) => (a.id === aid ? { ...a, note } : a)));
+          if (item) setActivities((arr) => arr.map((a) => (a.id === aid ? { ...a, items: [...(a.items || []), item] } : a)));
+          const p2 = JSON.parse(localStorage.getItem(pendingKey) || "{}");
+          delete p2[aid];
+          localStorage.setItem(pendingKey, JSON.stringify(p2));
         } catch (e) {
-          // visible plutôt qu'avalé (22/08, même correction que le filet
-          // quotidien) — sinon un échec ici laisse le profil pas à jour ET le
-          // couloir vide, sans aucune trace nulle part.
+          // visible plutôt qu'avalé (22/08) — le marqueur reste posé, retenté au
+          // prochain lancement par le filet de sécurité (voir l'effet de chargement).
           setLog((L) => [...L, {
             id: uid(), date: todayKey(), ts: realNow().getTime(), type: "note",
             activityId: aid,
@@ -6206,7 +6290,7 @@ note = dans tous les cas, une ligne qui résume ce qui a été dit (sert de comm
         const sibling = siblingId ? activities.find((x) => x.id === siblingId) : null;
         return { lanes: laneCounts(a), missing: missingSlots(a), item: await generateOneItemViaClaude(key, a, lane, log, sibling, register || null) };
       },
-      laneCounts, missingSlots, itemStep, propose, ensureRecoItem, applyImport, triggerParfumManual,
+      laneCounts, missingSlots, itemStep, propose, ensureRecoItem, resolvePendingSync, applyImport, triggerParfumManual,
       // pose directement une proposition sur UNE activité précise, sans dépendre
       // du planificateur horaire (quotas/quart de travail) — pour les démos en
       // direct. Ne joue que l'étape "proposal" ; begin/finish/submitComment
